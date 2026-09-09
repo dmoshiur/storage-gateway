@@ -1,23 +1,35 @@
-# Private NGO PDF Storage Gateway
+# AM Storage Company — Storage Gateway & Bridge
 
-A production-oriented, **private PDF-only storage gateway** for a small NGO. It is designed as a narrow internal infrastructure service — not a public drive, file-sharing product, or social app.
+The official **AM Storage Company** platform is a private, PDF-only **Storage
+Bridge**: an administrative control plane (Next.js dashboard, Firestore metadata,
+Cloudflare R2 object storage) plus a high-concurrency FastAPI API bridge that the
+public NGO website [gramunnayan.com](https://gramunnayan.com) calls with
+dashboard-generated Custom API Keys. It is a narrow internal infrastructure
+service — not a public drive, file-sharing product, or social app.
 
 - **Application:** Next.js 16 App Router + TypeScript + Tailwind CSS
-- **Hosting:** Vercel
+- **Public API bridge:** FastAPI (async, high-concurrency PDF streaming) — see [`fastapi/README.md`](fastapi/README.md)
+- **Hosting:** Vercel (gateway) + your own host for the FastAPI bridge
 - **Identity:** Firebase Authentication with server-verified session cookies
 - **Metadata/state:** Cloud Firestore
 - **PDF bytes:** private Cloudflare R2 bucket, accessed through short-lived S3 presigned URLs
 - **Scheduled maintenance:** Vercel Cron + secured Firestore lock
 
-The intended scale is `≤ 10 GB` of PDFs. The design keeps operations simple and low-cost while preserving an explicit storage abstraction for a future provider migration.
+The intended scale is `≤ 10 GB` of PDFs. The design keeps operations simple and
+low-cost while preserving an explicit storage abstraction for a future provider
+migration.
 
-> **No PDF binary is ever stored in Firestore or the Vercel filesystem.**
+> **No PDF binary is ever stored in Firestore or the Vercel filesystem, and
+> Cloudflare R2 credentials are never exposed to gramunnayan.com or its
+> visitors.**
 
 ## What is included
 
 - Two sign-in methods: the shared administrator passphrase (`ADMIN_PASS`) alone, or Firebase email/password for any provisioned user — both issued as HTTP-only, server-verified session cookies, plus logout
 - Server-enforced admin RBAC (`admin`, `editor`, `viewer` policy is centralized and extendable)
-- An administrative dashboard, responsive file library, Trash, storage health, audit log, and settings screens
+- An administrative dashboard branded **AM Storage Company**, with responsive file library, Trash, storage health, audit log, and settings screens
+- An **API Management** screen to generate/revoke/view high-entropy `am_store_live_…` Custom API Keys and copy a ready-made integration snippet for gramunnayan.com
+- A FastAPI **Storage Bridge** that validates `X-AM-Storage-Key` server-to-server, streams multipart PDFs into R2, registers them as managed documents, and returns signed PDF URLs
 - Direct browser-to-private-R2 signed uploads with progress indicators
 - Server-side finalization checks for extension, claimed/actual size, R2 content type, signed file identifier, `%PDF-x.y` header, and `%%EOF` trailer
 - Staging-to-final R2 copy on finalization so an expiring upload URL cannot overwrite an active PDF
@@ -27,6 +39,45 @@ The intended scale is `≤ 10 GB` of PDFs. The design keeps operations simple an
 - Secure server-to-server website integration using `X-Storage-Gateway-Key`
 - Secure HTTP headers, bounded JSON request sizes, schema validation, same-origin checks for cookie mutations, and best-effort per-instance rate limiting
 - Firestore rules, required indexes, R2 CORS template, tests, and deployment documentation
+
+## Version pins and stability fixes
+
+- `firebase-admin` is pinned to exactly **`13.0.0`** (no caret) with an npm
+  `overrides` entry for `jwks-rsa` — the combination that permanently fixes the
+  ESM/jwks-rsa startup crash. Do not bump it without retesting cold starts and
+  session verification.
+- Dashboard session initialization is null-safe: an expired, revoked, or corrupt
+  session cookie resolves to a signed-out state (redirect to `/admin/login`)
+  instead of surfacing a server error on load.
+
+## Storage Bridge for gramunnayan.com
+
+```text
+gramunnayan.com (server)
+      │  POST /api/v1/storage/upload  (multipart PDF)
+      │  Header: X-AM-Storage-Key: am_store_live_…
+      ▼
+┌────────────────────────  AM Storage Bridge (FastAPI) ────────────────────────┐
+│ validates key (gateway registry) · PDF gate · streams to R2 · registers doc │
+└───────┬──────────────────────────────────────────────┬──────────────────────┘
+        │ X-Storage-Gateway-Key (server-to-server)      │ R2 credentials (private)
+        ▼                                               ▼
+  AM Storage gateway (Next.js)                 Cloudflare R2
+  Firestore metadata · audit · retention       private PDF bytes
+```
+
+1. Generate a key in the dashboard under **API Management** (Admin → API Management).
+2. Copy the snippet and set the two variables on the gramunnayan.com **server**
+   (`AM_STORAGE_BRIDGE_URL`, `AM_STORAGE_API_KEY`) — never in browser code.
+3. The bridge verifies the key through the gateway registry (revocation is
+   immediate, `lastUsedAt` is tracked), validates the PDF, streams it to R2,
+   registers the document, and returns `{ file, url }` where `url` is a
+   short-lived signed PDF URL for visitors.
+
+See [`fastapi/README.md`](fastapi/README.md) for deployment, environment
+variables, and the full endpoint reference. The gateway-internal bridge routes
+(`POST /api/internal/bridge/verify-key`, `POST /api/internal/bridge/files`) are
+server-to-server only and require the `X-Storage-Gateway-Key` header.
 
 ## Architecture
 

@@ -2,7 +2,7 @@
   "name": "ngo-private-pdf-storage-gateway",
   "version": "1.0.0",
   "private": true,
-  "description": "Private, secure PDF storage gateway for a small NGO using Next.js, Firebase, and Cloudflare R2.",
+  "description": "AM Storage Company — private PDF Storage Bridge and admin dashboard for gramunnayan.com using Next.js, Firebase, and Cloudflare R2.",
   "engines": {
     "node": ">=20.9.0"
   },

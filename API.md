@@ -1,4 +1,4 @@
-# Storage Gateway API
+# AM Storage Company — Storage Gateway API
 
 Base URL examples below use `https://storage.example.org`. All responses are JSON unless `redirect=true` is explicitly requested.
 
@@ -31,13 +31,30 @@ Never construct an admin-only request based on a browser-side `isAdmin` value.
 
 ### NGO website integration API
 
-The NGO main website calls **read-only** file endpoints from its own backend with:
+The NGO main website ([gramunnayan.com](https://gramunnayan.com)) has two
+integration modes:
 
-```http
-X-Storage-Gateway-Key: <INTEGRATION_API_KEY>
-```
+1. **Recommended — through the AM Storage Bridge (FastAPI).** The public bridge
+   endpoint `POST /api/v1/storage/upload` accepts multipart PDFs authenticated
+   with a Custom API Key generated in the dashboard:
 
-This key must never be sent to the NGO website browser, committed to source, logged, or put in `NEXT_PUBLIC_*`. An integration caller can access active, non-expired metadata and request a short-lived download URL. It cannot access Trash, settings, logs, uploads, or any destructive endpoint.
+   ```http
+   X-AM-Storage-Key: am_store_live_xxxxxx
+   ```
+
+   The bridge validates the key against the registry, streams the PDF into
+   private R2, registers the document, and returns a signed PDF URL. It also
+   exposes key-protected `GET /api/files`, `GET /api/files/{id}` and
+   `GET /api/files/{id}/download`. See `fastapi/README.md`. The key is issued,
+   listed, and revoked under **Admin → API Management** in the dashboard.
+
+2. **Direct read-only gateway access** from the NGO server's own backend with:
+
+   ```http
+   X-Storage-Gateway-Key: <INTEGRATION_API_KEY>
+   ```
+
+This integration key must never be sent to the NGO website browser, committed to source, logged, or put in `NEXT_PUBLIC_*`. An integration caller can access active, non-expired metadata and request a short-lived download URL. It cannot access Trash, settings, logs, uploads, or any destructive endpoint.
 
 ## Admin auth
 
@@ -405,6 +422,28 @@ export async function getPdfDownloadUrl(fileId: string) {
 
 If the public website itself serves visitors, add its own authorization rules before it calls the gateway. A gateway integration key grants the NGO website server access to all active metadata, so it must be kept server-side and scoped operationally.
 
+## Storage Bridge internal endpoints
+
+These routes are **server-to-server only** and must never be called from a
+browser. They authenticate with the `X-Storage-Gateway-Key` header (the same
+`INTEGRATION_API_KEY` the bridge holds) and back the FastAPI bridge:
+
+### `POST /api/internal/bridge/verify-key`
+
+Body: `{ "key": "am_store_live_…" }`. Verifies the key against the Firestore
+registry (SHA-256 digest lookup), rejects revoked keys, and refreshes
+`lastUsedAt`. Responds `200` with `{ "valid": true, "keyId": "…" }` or
+`{ "valid": false, "keyId": null }` — transport/upstream failures raise `5xx`,
+never a false rejection.
+
+### `POST /api/internal/bridge/files`
+
+Body includes the final R2 object key (`pdfs/YYYY/MM/<uuid>.pdf`), validated PDF
+metadata (`originalName`, optional `title`/`description`/`category`/`tags`), and
+`size`. Enforces the configured max PDF size and storage limit, creates an
+`active` document, and writes a `BRIDGE_UPLOAD` audit event. Responds `201` with
+the serialized file record.
+
 ## Common errors
 
 | Status / code | Meaning |
@@ -414,6 +453,8 @@ If the public website itself serves visitors, add its own authorization rules be
 | `400 INVALID_FILE_TYPE` / `INVALID_PDF` | File did not pass PDF validation |
 | `401 UNAUTHENTICATED` / `SESSION_EXPIRED` | Login/session missing or invalid |
 | `401 INVALID_INTEGRATION_KEY` | Website key missing/incorrect |
+| `401 INVALID_API_KEY` | Bridge `X-AM-Storage-Key` missing, revoked, or unknown |
+| `503 KEY_SERVICE_UNAVAILABLE` | Bridge could not reach the key registry |
 | `403 ACCOUNT_NOT_PERMITTED` / `FORBIDDEN` | Identity lacks the required server-side role |
 | `403 INVALID_ORIGIN` | Cross-origin cookie mutation rejected |
 | `404 FILE_NOT_FOUND` | Document does not exist or is intentionally hidden |
