@@ -30,3 +30,5 @@
 .DS_Store
 .vscode/
 .idea/
+
+fastapi/__pycache__/
