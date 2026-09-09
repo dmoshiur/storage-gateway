@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "@/app/globals.css";
 
 export const metadata: Metadata = {
-  title: { default: "NGO PDF Storage Gateway", template: "%s | NGO PDF Storage" },
+  title: { default: "AM Storage Company", template: "%s | AM Storage Company" },
   description: "Private administrative PDF storage gateway.",
   robots: { index: false, follow: false },
 };
