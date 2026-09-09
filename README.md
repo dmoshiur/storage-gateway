@@ -53,16 +53,19 @@ The NGO main website talks to gateway routes only. It never needs R2 credentials
 
 ### Server-only secrets
 
-`R2_*`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, `INTEGRATION_API_KEY`, and `CRON_SECRET` are only read by modules marked `server-only`. Never use a `NEXT_PUBLIC_` prefix for any of them. Start from [`.env.example`](.env.example); it contains placeholders only.
+`R2_*`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, `ADMIN_PASS`, `INTEGRATION_API_KEY`, and `CRON_SECRET` are only read by modules marked `server-only`. Never use a `NEXT_PUBLIC_` prefix for any of them. Start from [`.env.example`](.env.example); it contains placeholders only.
 
 The Firebase Web SDK configuration is intentionally `NEXT_PUBLIC_*`: it identifies the Firebase project, but does **not** grant database or R2 administrative access. Firestore Rules and server-side authorization still protect data.
 
 ### Authentication and roles
 
-1. The login page uses Firebase Auth email/password.
-2. It sends the short-lived Firebase ID token to `POST /api/auth/session` over same origin.
-3. The server verifies it with Firebase Admin, evaluates the custom role claim (or documented `ADMIN_EMAILS` bootstrap allowlist), and creates an HTTP-only, SameSite=Lax session cookie only for an `admin`.
-4. Every dashboard mutation verifies that cookie on the server. The browser’s UI state is never trusted for authorization.
+1. The login page first asks for the shared administrator passphrase (`ADMIN_PASS`). It is checked server-side by `POST /api/auth/gate` using a constant-time comparison; the form is not revealed until it passes.
+2. The login page then uses Firebase Auth email/password.
+3. It sends the short-lived Firebase ID token to `POST /api/auth/session` over same origin.
+4. The server verifies it with Firebase Admin, evaluates the custom role claim (or documented `ADMIN_EMAILS` bootstrap allowlist), and creates an HTTP-only, SameSite=Lax session cookie only for an `admin`.
+5. Every dashboard mutation verifies that cookie on the server. The browser’s UI state is never trusted for authorization.
+
+The passphrase is a gate in front of sign-in, not the authorization boundary: the real access control remains the server-verified Firebase admin session.
 
 Use Firebase custom claims for production roles, e.g. `{ role: "admin" }`. `ADMIN_EMAILS` is a convenient bootstrap fallback, not a replacement for controlled role provisioning.
 
@@ -133,6 +136,7 @@ npm run dev
 | `FIREBASE_CLIENT_EMAIL` | yes | Firebase Admin service account email |
 | `FIREBASE_PRIVATE_KEY` | yes | Firebase Admin service account private key; preserve escaped newlines |
 | `ADMIN_EMAILS` | bootstrap | comma-separated initial admins; custom claim is preferred |
+| `ADMIN_PASS` | yes | shared administrator passphrase gating the sign-in form |
 | `R2_ACCOUNT_ID` | yes | Cloudflare account ID |
 | `R2_ACCESS_KEY_ID` | yes | R2 S3 API access key, server only |
 | `R2_SECRET_ACCESS_KEY` | yes | R2 S3 API secret, server only |

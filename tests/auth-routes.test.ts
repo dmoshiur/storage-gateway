@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api/errors";
 
 vi.mock("server-only", () => ({}));
@@ -24,6 +24,7 @@ vi.mock("@/lib/firestore/users", () => ({ recordAdminLogin }));
 
 const sessionRoute = await import("@/app/api/auth/session/route");
 const logoutRoute = await import("@/app/api/auth/logout/route");
+const gateRoute = await import("@/app/api/auth/gate/route");
 
 function sameOriginRequest(url: string, init: RequestInit): Request {
   return new Request(url, {
@@ -69,5 +70,29 @@ describe("admin session routes", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("set-cookie")).toMatch(/ngo_gateway_session=.*Max-Age=0/i);
     expect(writeAuditLogSafely).toHaveBeenCalledWith(expect.objectContaining({ action: "LOGOUT" }));
+  });
+});
+
+describe("admin passphrase gate route", () => {
+  const original = process.env.ADMIN_PASS;
+
+  beforeAll(() => {
+    process.env.ADMIN_PASS = "correct-admin-passphrase";
+  });
+  afterAll(() => {
+    if (original === undefined) delete process.env.ADMIN_PASS;
+    else process.env.ADMIN_PASS = original;
+  });
+
+  it("accepts the correct administrator passphrase", async () => {
+    const response = await gateRoute.POST(sameOriginRequest("https://gateway.test/api/auth/gate", { method: "POST", body: JSON.stringify({ adminPass: "correct-admin-passphrase" }) }));
+    expect(response.status).toBe(200);
+    expect((await response.json()).data.passphraseAccepted).toBe(true);
+  });
+
+  it("rejects an incorrect passphrase without granting access", async () => {
+    const response = await gateRoute.POST(sameOriginRequest("https://gateway.test/api/auth/gate", { method: "POST", body: JSON.stringify({ adminPass: "wrong-passphrase" }) }));
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.code).toBe("ADMIN_PASS_INVALID");
   });
 });
