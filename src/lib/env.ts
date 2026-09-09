@@ -1,4 +1,5 @@
 import "server-only";
+import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { ApiError } from "@/lib/api/errors";
 
@@ -48,6 +49,20 @@ export function getRequiredSecret(name: "INTEGRATION_API_KEY" | "CRON_SECRET"): 
   const value = process.env[name];
   if (!value || value.length < 24) return configurationError("secret", [name]);
   return value;
+}
+
+/** Required shared administrator passphrase. It gates access to the admin sign-in form. */
+export function getAdminPass(): string {
+  const value = process.env.ADMIN_PASS;
+  if (!value || value.length < 8) return configurationError("secret", ["ADMIN_PASS"]);
+  return value;
+}
+
+/** Constant-time comparison so a missing/mismatched passphrase cannot be distinguished by timing. */
+export function verifyAdminPass(candidate: string): boolean {
+  const expected = Buffer.from(getAdminPass());
+  const supplied = Buffer.from(candidate);
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }
 
 export function getAdminEmails(): Set<string> {
