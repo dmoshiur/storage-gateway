@@ -19,7 +19,7 @@ Use Firebase custom claims as the long-term source of truth. From a tightly cont
 await admin.auth().setCustomUserClaims("FIREBASE_UID", { role: "admin" });
 ```
 
-The gateway recognizes `admin`, `editor`, and `viewer`, but this release permits dashboard sign-in / mutations only for `admin`. `editor` and `viewer` are intentionally ready for future least-privilege expansion. Set `ADMIN_EMAILS` only to bootstrap a first admin; remove it once custom claims are managed.
+The gateway recognizes `admin`, `editor`, and `viewer`. Any user created in Firebase Authentication (email/password) can sign in; the assigned role decides what they may do — `admin` has full control, while `editor` and `viewer` get read-only access to the library. Independently of Firebase, the shared `ADMIN_PASS` passphrase signs in directly as a full administrator. Set `ADMIN_EMAILS` only to bootstrap a first admin; remove it once custom claims are managed.
 
 ## 2. Firestore
 

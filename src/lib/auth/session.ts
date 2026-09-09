@@ -6,6 +6,7 @@ import { ApiError } from "@/lib/api/errors";
 import { getAdminAuth } from "@/lib/firebase/admin";
 import { getAdminEmails } from "@/lib/env";
 import { can, type Capability } from "@/lib/auth/authorization";
+import { isSharedSessionToken, verifySharedPassSessionToken } from "@/lib/auth/shared-session";
 import { resolveRoleFromIdentityClaims } from "@/lib/auth/login-policy";
 import type { Role, SessionActor } from "@/types/auth";
 
@@ -36,8 +37,10 @@ export async function createAdminSession(idToken: string): Promise<{ cookie: str
     throw new ApiError(401, "INVALID_ID_TOKEN", "Your sign-in could not be verified. Please sign in again.");
   }
   const actor = actorFromClaims(decoded);
-  if (!can(actor.role, "manage_files")) {
-    throw new ApiError(403, "ADMIN_REQUIRED", "This account is not authorized to access the storage gateway.");
+  // Every user provisioned in Firebase Authentication may sign in; the resolved
+  // role decides what each dashboard route lets them do.
+  if (!can(actor.role, "read_files")) {
+    throw new ApiError(403, "ACCOUNT_NOT_PERMITTED", "This account is not permitted to sign in to the storage gateway.");
   }
   const cookie = await auth.createSessionCookie(idToken, { expiresIn: SESSION_MAX_AGE_SECONDS * 1000 });
   return { cookie, actor };
@@ -45,6 +48,11 @@ export async function createAdminSession(idToken: string): Promise<{ cookie: str
 
 export async function verifySessionCookie(value: string | undefined): Promise<SessionActor> {
   if (!value) throw new ApiError(401, "UNAUTHENTICATED", "Please sign in to continue.");
+  if (isSharedSessionToken(value)) {
+    const actor = verifySharedPassSessionToken(value, SESSION_MAX_AGE_SECONDS);
+    if (!actor) throw new ApiError(401, "SESSION_EXPIRED", "Your session has expired. Please sign in again.");
+    return actor;
+  }
   try {
     const decoded = await getAdminAuth().verifySessionCookie(value, true);
     return actorFromClaims(decoded);

@@ -1,20 +1,25 @@
 import { describe, expect, it } from "vitest";
 import { can } from "@/lib/auth/authorization";
-import { resolveRoleFromIdentityClaims, shouldCreateAdminSession } from "@/lib/auth/login-policy";
+import { resolveRoleFromIdentityClaims } from "@/lib/auth/login-policy";
 
 describe("authentication and authorization policy", () => {
   const administrators = new Set(["admin@ngo.example"]);
-  it("permits an authorized login through a custom claim or configured bootstrap admin", () => {
+  it("resolves an administrator through a custom claim or configured bootstrap admin", () => {
     expect(resolveRoleFromIdentityClaims({ email: "staff@ngo.example", role: "admin" }, administrators)).toBe("admin");
-    expect(shouldCreateAdminSession({ email: "ADMIN@ngo.example" }, administrators)).toBe(true);
+    expect(resolveRoleFromIdentityClaims({ email: "ADMIN@ngo.example" }, administrators)).toBe("admin");
   });
-  it("rejects an unauthorized account from the admin session", () => {
-    expect(shouldCreateAdminSession({ email: "visitor@ngo.example" }, administrators)).toBe(false);
+  it("lets any provisioned Firebase account sign in with at least read-only access", () => {
+    // Every user created in Firebase Authentication defaults to the viewer role,
+    // which can browse and download but never mutate storage.
+    expect(resolveRoleFromIdentityClaims({ email: "visitor@ngo.example" }, administrators)).toBe("viewer");
+    expect(can("viewer", "read_files")).toBe(true);
     expect(can("viewer", "manage_files")).toBe(false);
+    expect(can("viewer", "manage_settings")).toBe(false);
   });
-  it("keeps logout/session capabilities separate from role escalation", () => {
+  it("keeps role capabilities centralized and separate from sign-in", () => {
     expect(can("admin", "manage_files")).toBe(true);
     expect(can("editor", "read_files")).toBe(true);
+    expect(can("editor", "manage_files")).toBe(false);
     expect(can("editor", "manage_settings")).toBe(false);
   });
 });

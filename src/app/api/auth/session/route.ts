@@ -18,7 +18,7 @@ export async function POST(request: Request) {
     const { cookie, actor } = await createAdminSession(idToken);
     await Promise.all([
       recordAdminLogin(actor),
-      writeAuditLog({ action: "LOGIN", actor: auditActorFrom(actor) }),
+      writeAuditLog({ action: "LOGIN", actor: auditActorFrom(actor), details: { method: "firebase" } }),
     ]);
     const response = success({ actor: { uid: actor.uid, email: actor.email, role: actor.role } }, requestId);
     response.cookies.set({
