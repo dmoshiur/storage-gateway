@@ -17,6 +17,7 @@ const links: ReadonlyArray<{ href: string; label: string; icon: typeof LayoutDas
   { href: "/admin/storage", label: "Storage", icon: HardDrive, capability: "read_files" },
   { href: "/admin/audit-logs", label: "Audit logs", icon: ClipboardList, capability: "view_audit" },
   { href: "/admin/settings", label: "Settings", icon: Settings, capability: "manage_settings" },
+  { href: "/admin/api-management", label: "API Management", icon: ShieldCheck, capability: "manage_settings" },
 ];
 
 const roleLabels: Record<Role, string> = {
