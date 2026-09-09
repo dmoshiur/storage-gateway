@@ -9,10 +9,17 @@ import { formatDate } from "@/utils/format";
 
 interface ApiKey {
   id: string;
+  /** Visible identifier (dual-token era). Null for pre-upgrade legacy keys. */
+  keyId: string | null;
   prefix: string;
   createdAt: string | null;
   lastUsedAt: string | null;
   revokedAt: string | null;
+}
+
+interface NewCredential {
+  keyId: string;
+  keySecret: string;
 }
 
 /** Public bridge origin shown in the copyable snippets. Set NEXT_PUBLIC_BRIDGE_URL to the deployed bridge origin. */
@@ -24,11 +31,19 @@ function apiError(caught: unknown, fallback: string): string {
 
 export function ApiManagement() {
   const [keys, setKeys] = useState<ApiKey[]>([]);
-  const [newKey, setNewKey] = useState<string | null>(null);
+  const [newCredential, setNewCredential] = useState<NewCredential | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [revokingId, setRevokingId] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void apiFetch<{ keys: ApiKey[] }>("/api/api-keys")
+      .then((result) => { if (alive) setKeys(result.keys); })
+      .catch((caught) => { if (alive) setError(apiError(caught, "Unable to load API keys.")); });
+    return () => { alive = false; };
+  }, []);
 
   async function load() {
     try {
@@ -39,24 +54,16 @@ export function ApiManagement() {
     }
   }
 
-  useEffect(() => {
-    let alive = true;
-    void apiFetch<{ keys: ApiKey[] }>("/api/api-keys")
-      .then((result) => { if (alive) setKeys(result.keys); })
-      .catch((caught) => { if (alive) setError(apiError(caught, "Unable to load API keys.")); });
-    return () => { alive = false; };
-  }, []);
-
   async function generate() {
     setGenerating(true);
     setError(null);
-    setNewKey(null);
+    setNewCredential(null);
     try {
-      const result = await apiFetch<{ id: string; key: string }>("/api/api-keys", { method: "POST", body: "{}" });
-      setNewKey(result.key);
+      const result = await apiFetch<NewCredential & { id: string }>("/api/api-keys", { method: "POST", body: "{}" });
+      setNewCredential({ keyId: result.keyId, keySecret: result.keySecret });
       await load();
     } catch (caught) {
-      setError(apiError(caught, "Unable to generate key."));
+      setError(apiError(caught, "Unable to generate API credential."));
     } finally {
       setGenerating(false);
     }
@@ -85,27 +92,55 @@ export function ApiManagement() {
     }
   }
 
-  const snippetKey = newKey ?? "am_store_live_REPLACE_WITH_GENERATED_KEY";
+  const snippetKeyId = newCredential?.keyId ?? "am_store_live_REPLACE_WITH_KEY_ID";
+  const snippetSecret = newCredential?.keySecret ?? "am_sec_live_REPLACE_WITH_SECRET";
   const curlSnippet = [
     `curl -X POST ${bridgeUrl}/api/v1/storage/upload \\`,
-    `  -H 'X-AM-Storage-Key: ${snippetKey}' \\`,
+    `  -H 'X-AM-Storage-Key-Id: ${snippetKeyId}' \\`,
+    `  -H 'X-AM-Storage-Key-Secret: ${snippetSecret}' \\`,
     "  -F 'file=@annual-report.pdf' \\",
     "  -F 'title=Annual Report 2026'",
   ].join("\n");
   const nodeSnippet = [
     "// gramunnayan.com → AM Storage Company bridge (server-side only)",
+    "import { createHmac, createHash } from \"node:crypto\";",
+    "",
+    "const base = process.env.AM_STORAGE_BRIDGE_URL;",
+    "const keyId = process.env.AM_STORAGE_KEY_ID;          // am_store_live_… (visible)",
+    "const keySecret = process.env.AM_STORAGE_KEY_SECRET;  // am_sec_live_… (env only)",
+    "",
+    "// ── 1) Dual-token mode (recommended) ─────────────────────────────────",
+    "// The key pair travels over TLS and the gateway verifies it server-side.",
     "const form = new FormData();",
     'form.append("file", fs.createReadStream("annual-report.pdf"), "annual-report.pdf");',
     'form.append("title", "Annual Report 2026");',
-    "",
-    "const response = await fetch(`${process.env.AM_STORAGE_BRIDGE_URL}/api/v1/storage/upload`, {",
+    "const response = await fetch(base + \"/api/v1/storage/upload\", {",
     "  method: \"POST\",",
-    "  headers: { \"X-AM-Storage-Key\": process.env.AM_STORAGE_API_KEY }, // never expose in the browser",
+    "  headers: { \"X-AM-Storage-Key-Id\": keyId, \"X-AM-Storage-Key-Secret\": keySecret },",
     "  body: form,",
     "});",
-    'const result = await response.json();',
-    '// result.data.file  → permanent metadata record (id, title, size, retention, status)',
-    "// result.data.url   → temporary signed PDF URL returned to your visitors",
+    "const result = await response.json();",
+    "// result.data.file → permanent metadata record (id, title, size, retention, status)",
+    "// result.data.url  → temporary signed PDF URL returned to your visitors",
+    "",
+    "// ── 2) HMAC signed mode (secret is never sent after setup) ───────────",
+    "// Build the multipart body yourself (e.g. the `form-data` package) so the",
+    "// exact bytes being signed are known:",
+    "const bodyBytes = await buildMultipartBytes(file, title);",
+    "const timestamp = Math.floor(Date.now() / 1000);",
+    "const bodyHash = createHash(\"sha256\").update(bodyBytes).digest(\"hex\");",
+    "const signature = createHmac(\"sha256\", keySecret)",
+    "  .update(`${timestamp}:${bodyHash}`) // signed string: <timestamp>:<sha256hex(body)>",
+    "  .digest(\"hex\");",
+    "await fetch(base + \"/api/v1/storage/upload\", {",
+    "  method: \"POST\",",
+    "  headers: {",
+    "    \"X-AM-Storage-Key-Id\": keyId,",
+    "    \"X-AM-Storage-Timestamp\": String(timestamp),",
+    "    \"X-AM-Storage-Signature\": signature,",
+    "  },",
+    "  body: bodyBytes,",
+    "});",
   ].join("\n");
 
   return (
@@ -115,24 +150,36 @@ export function ApiManagement() {
           <p className="text-sm font-semibold uppercase tracking-wider text-ngo-600">AM Storage Company · Storage Bridge</p>
           <h1 className="mt-1 text-2xl font-bold tracking-tight text-ink-900 sm:text-3xl">API Management</h1>
           <p className="mt-2 max-w-2xl text-sm text-slate-600">
-            Generate and revoke Custom API Keys for gramunnayan.com. Keys authorize the public gateway endpoint below and are
-            verified server-to-server by the bridge. R2 credentials are never exposed to the client site.
+            Generate and revoke dual-token API credentials for gramunnayan.com. Each credential is an{" "}
+            <strong>API Key ID</strong> (visible) plus an <strong>API Secret Key</strong> (shown once, like Cloudflare R2). The bridge
+            verifies both server-to-server against the gateway registry. R2 credentials are never exposed to the client site.
           </p>
         </div>
       </header>
 
       {error && <Notice type="error">{error}</Notice>}
 
-      {newKey && (
+      {newCredential && (
         <Notice type="warning">
-          <strong>Copy this key now — it cannot be displayed again.</strong> Send it to the gramunnayan.com server over a private
-          channel and store it in its environment (never in browser code or client bundles).
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <code className="break-all rounded bg-amber-100 px-2 py-1 text-sm font-bold">{newKey}</code>
-            <Button variant="secondary" onClick={() => void copy(newKey, "key")}>
-              {copied === "key" ? <Check className="h-4 w-4" /> : <Clipboard className="h-4 w-4" />}
-              {copied === "key" ? "Copied" : "Copy key"}
-            </Button>
+          <strong>Copy both parts now — the API Secret Key cannot be displayed again.</strong> Send them to the gramunnayan.com
+          server over a private channel and store them in its environment (never in browser code or client bundles).
+          <div className="mt-3 space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-bold uppercase tracking-wide text-amber-800">Key ID (visible)</span>
+              <code className="break-all rounded bg-amber-100 px-2 py-1 font-mono text-sm font-bold">{newCredential.keyId}</code>
+              <Button variant="secondary" onClick={() => void copy(newCredential.keyId, "key-id")}>
+                {copied === "key-id" ? <Check className="h-4 w-4" /> : <Clipboard className="h-4 w-4" />}
+                {copied === "key-id" ? "Copied" : "Copy"}
+              </Button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-bold uppercase tracking-wide text-amber-800">Secret (once only)</span>
+              <code className="break-all rounded bg-amber-100 px-2 py-1 font-mono text-sm font-bold">{newCredential.keySecret}</code>
+              <Button variant="secondary" onClick={() => void copy(newCredential.keySecret, "key-secret")}>
+                {copied === "key-secret" ? <Check className="h-4 w-4" /> : <Clipboard className="h-4 w-4" />}
+                {copied === "key-secret" ? "Copied" : "Copy"}
+              </Button>
+            </div>
           </div>
         </Notice>
       )}
@@ -140,20 +187,22 @@ export function ApiManagement() {
       <section className="panel p-5 sm:p-6">
         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
           <div>
-            <h2 className="flex items-center gap-2 font-bold text-ink-900"><ShieldCheck className="h-5 w-5 text-ngo-600" />Custom API keys</h2>
+            <h2 className="flex items-center gap-2 font-bold text-ink-900"><ShieldCheck className="h-5 w-5 text-ngo-600" />Custom API credentials</h2>
             <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
-              Keys are prefixed <code className="font-mono text-xs">am_store_live_</code>, high-entropy, and stored only as SHA-256
-              digests. Revoking a key takes effect immediately on the next bridge request.
+              Credentials are prefixed <code className="font-mono text-xs">am_store_live_</code> (ID) and{" "}
+              <code className="font-mono text-xs">am_sec_live_</code> (secret), high-entropy, and stored only as a SHA-256 digest
+              (plus an encrypted copy that enables HMAC signed mode). Revoking a credential takes effect immediately on the next
+              bridge request.
             </p>
           </div>
           <Button onClick={() => void generate()} disabled={generating} className="shrink-0">
-            <Plus className="h-4 w-4" />{generating ? "Generating…" : "Generate key"}
+            <Plus className="h-4 w-4" />{generating ? "Generating…" : "Generate API key"}
           </Button>
         </div>
 
         {keys.length === 0 ? (
           <p className="mt-5 rounded-lg border border-dashed border-slate-300 px-4 py-6 text-center text-sm text-slate-500">
-            No Custom API keys yet. Generate the first key for gramunnayan.com above.
+            No API credentials yet. Generate the first key pair for gramunnayan.com above.
           </p>
         ) : (
           <ul className="mt-5 divide-y divide-slate-100">
@@ -162,13 +211,15 @@ export function ApiManagement() {
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <KeyRound className="h-4 w-4 shrink-0 text-ngo-600" />
-                    <code className="font-mono text-sm font-semibold text-ink-900">{key.prefix}••••••</code>
+                    <code className="break-all font-mono text-sm font-semibold text-ink-900">{key.keyId ?? `${key.prefix}••••••`}</code>
+                    {key.keyId === null && <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-bold text-slate-600">Legacy</span>}
                     {key.revokedAt
                       ? <span className="rounded bg-red-50 px-2 py-0.5 text-xs font-bold text-red-700">Revoked</span>
                       : <span className="rounded bg-ngo-50 px-2 py-0.5 text-xs font-bold text-ngo-700">Active</span>}
                   </div>
                   <p className="mt-1 text-xs text-slate-500">
                     Created {formatDate(key.createdAt)} · {key.lastUsedAt ? `Last used ${formatDate(key.lastUsedAt)}` : "Never used"}
+                    {key.keyId ? " · secret hidden (digest only)" : ""}
                   </p>
                 </div>
                 {!key.revokedAt && (
@@ -185,14 +236,19 @@ export function ApiManagement() {
       <section className="panel p-5 sm:p-6">
         <h2 className="flex items-center gap-2 font-bold text-ink-900"><Sparkles className="h-5 w-5 text-ngo-600" />gramunnayan.com integration guide</h2>
         <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-600">
-          The NGO website sends multipart form data with one PDF per request to the unified public gateway endpoint using the
-          generated key in the <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs">X-AM-Storage-Key</code> header.
-          The bridge validates the key, streams the PDF to private Cloudflare R2, registers the document, and returns a signed URL.
+          The NGO website sends multipart form data with one PDF per request to the unified public gateway endpoint. Pass{" "}
+          <strong>both identifiers</strong> —{" "}
+          <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs">X-AM-Storage-Key-Id</code> and{" "}
+          <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs">X-AM-Storage-Key-Secret</code> — or use{" "}
+          <strong>HMAC signed mode</strong> (<code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs">X-AM-Storage-Signature</code> +{" "}
+          <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs">X-AM-Storage-Timestamp</code>) so the raw secret is
+          never sent after initial setup. The bridge validates the credential, streams the PDF to private Cloudflare R2, registers
+          the document, and returns a signed URL.
         </p>
 
         <div className="mt-5">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="text-sm font-bold text-ink-900">1 · cURL (quick test)</p>
+            <p className="text-sm font-bold text-ink-900">1 · cURL (dual-token, quick test)</p>
             <Button variant="secondary" onClick={() => void copy(curlSnippet, "curl")}>
               {copied === "curl" ? <Check className="h-4 w-4" /> : <Clipboard className="h-4 w-4" />}
               {copied === "curl" ? "Copied" : "Copy"}
@@ -214,8 +270,10 @@ export function ApiManagement() {
 
         <Notice type="info">
           <strong>Security boundary.</strong> The request above must be issued by the gramunnayan.com <em>server</em>. Keep{" "}
-          <code className="rounded bg-blue-100 px-1.5 py-0.5 font-mono text-xs">AM_STORAGE_API_KEY</code> and the Cloudflare R2
-          credentials out of browser JavaScript. Visitors should only ever receive the signed PDF URL the bridge returns.
+          <code className="rounded bg-blue-100 px-1.5 py-0.5 font-mono text-xs">AM_STORAGE_KEY_ID</code> and{" "}
+          <code className="rounded bg-blue-100 px-1.5 py-0.5 font-mono text-xs">AM_STORAGE_KEY_SECRET</code> (and the Cloudflare R2
+          credentials) out of browser JavaScript. Signed requests expire after a 5-minute clock-skew window, which blocks replay of
+          captured requests. Visitors should only ever receive the signed PDF URL the bridge returns.
         </Notice>
       </section>
     </div>

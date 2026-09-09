@@ -28,6 +28,13 @@ export interface SignedUploadOptions {
   metadata: Record<string, string>;
 }
 
+/** Result of a lightweight bucket connectivity probe (never throws). */
+export interface StorageHealth {
+  reachable: boolean;
+  latencyMs: number;
+  checkedAt: string;
+}
+
 /** Provider-neutral boundary for all object-store access. */
 export interface StorageService {
   upload(input: UploadObjectInput): Promise<void>;
@@ -39,4 +46,6 @@ export interface StorageService {
   getMetadata(key: string): Promise<ObjectMetadata>;
   getSignedUrl(key: string, options: SignedDownloadOptions): Promise<string>;
   getSignedUploadUrl(key: string, options: SignedUploadOptions): Promise<string>;
+  /** Bucket connectivity probe. Resolves (never rejects) so dashboards can always render. */
+  healthCheck(): Promise<StorageHealth>;
 }

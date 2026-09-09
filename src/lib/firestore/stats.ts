@@ -2,6 +2,7 @@ import "server-only";
 
 import { getUploadingFilesForReservation, listFilesForStats } from "@/lib/firestore/files";
 import { getSettings } from "@/lib/firestore/settings";
+import { DEFAULT_SETTINGS } from "@/types/settings";
 
 export interface StorageStats {
   totalPdfCount: number;
@@ -44,4 +45,48 @@ export async function getStorageStats(): Promise<StorageStats> {
     pendingUploadBytes,
     expiringSoonCount: active.filter((file) => file.autoDeleteEnabled && file.deleteAt && file.deleteAt > now && file.deleteAt <= inThirtyDays).length,
   };
+}
+
+export interface StorageStatsResult {
+  stats: StorageStats;
+  /** "live" = computed from Firestore metadata; "fallback" = documented mock metrics. */
+  source: "live" | "fallback";
+}
+
+/** Zeroed mock metrics used when Firestore (or its auth path) is unreachable. */
+export function fallbackStorageStats(): StorageStats {
+  return {
+    totalPdfCount: 0,
+    activeFileCount: 0,
+    trashFileCount: 0,
+    totalStorageBytes: 0,
+    storageLimitBytes: DEFAULT_SETTINGS.storageLimitBytes,
+    activeStorageBytes: 0,
+    trashStorageBytes: 0,
+    availableBytes: DEFAULT_SETTINGS.storageLimitBytes,
+    usagePercent: 0,
+    warningLevel: "normal",
+    expiringSoonCount: 0,
+    pendingUploadBytes: 0,
+  };
+}
+
+/**
+ * Dashboard-safe wrapper: any Firestore/Firebase failure (expired admin
+ * token, network loss, missing configuration) degrades to the fallback
+ * summary metrics (0 files, 0 B used) instead of throwing an unhandled
+ * exception that would 500 the dashboard.
+ */
+export async function getStorageStatsSafe(): Promise<StorageStatsResult> {
+  try {
+    return { stats: await getStorageStats(), source: "live" };
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: "warn",
+      message: "Storage statistics unavailable — serving fallback metrics",
+      area: "stats",
+      reason: error instanceof Error ? error.message : "unknown",
+    }));
+    return { stats: fallbackStorageStats(), source: "fallback" };
+  }
 }
