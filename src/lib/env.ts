@@ -51,6 +51,29 @@ export function getRequiredSecret(name: "INTEGRATION_API_KEY" | "CRON_SECRET"): 
   return value;
 }
 
+/**
+ * Optional 32-byte (base64) master key for API-secret encryption at rest.
+ * When present, dual-token keys store an AES-256-GCM copy of the secret so
+ * HMAC signed requests can be verified; when absent, dual-token header mode
+ * still works (digest only) and signature mode reports as unavailable.
+ */
+export function getMasterKey(): Buffer | null {
+  const value = process.env.AM_STORAGE_MASTER_KEY;
+  if (!value) return null;
+  const key = Buffer.from(value.trim(), "base64");
+  return key.length === 32 ? key : null;
+}
+
+/**
+ * Base URL of the FastAPI bridge used by the dashboard's connectivity probe.
+ * Falls back to the public NEXT_PUBLIC_BRIDGE_URL value (same origin shown in
+ * the integration guide) when no dedicated server-only variable is set.
+ */
+export function getBridgeUrl(): string | null {
+  const value = (process.env.BRIDGE_URL ?? process.env.NEXT_PUBLIC_BRIDGE_URL ?? "").trim().replace(/\/+$/, "");
+  return value || null;
+}
+
 /** Required shared administrator passphrase. It gates access to the admin sign-in form. */
 export function getAdminPass(): string {
   const value = process.env.ADMIN_PASS;

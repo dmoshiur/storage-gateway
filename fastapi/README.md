@@ -4,29 +4,42 @@ The **Storage Bridge** is the public, high-concurrency API boundary that
 gramunnayan.com uses to hand PDFs to **AM Storage Company**. It runs as its own
 async FastAPI service (uvicorn) next to the AM Storage gateway (Next.js
 control plane + Firestore metadata + dashboard), and it is the only component
-that talks directly to the NGO site with a dashboard-managed Custom API Key.
+that talks directly to the NGO site. Requests are authenticated with the
+dual-token API credential (key ID + secret, or an HMAC signature) issued by the
+dashboard.
 
 ```text
 gramunnayan.com (server)
-      │  POST multipart PDF + X-AM-Storage-Key: am_store_live_…
-      ▼
-┌───────────────────────────  AM Storage Bridge (FastAPI) ──────────────────────┐
-│ 1. Validates the Custom API Key via the gateway registry (revocation-aware)   │
-│ 2. Structural PDF gate: .pdf, application/pdf, %PDF header, %%EOF trailer    │
-│ 3. Streams bytes into private Cloudflare R2 (R2_* env — never client-facing) │
-│ 4. HEAD-verifies the stored object, then registers metadata with the gateway │
-│ 5. Returns { file, url } — url is a short-lived signed PDF URL               │
-└───────────────┬───────────────────────────────────────────────┬──────────────┘
-                │ X-Storage-Gateway-Key (server-to-server)       │ R2 credentials only here
-                ▼                                               ▼
-      AM Storage gateway (Next.js)                   Cloudflare R2 (private bucket)
-      Firestore metadata · audit · retention
+      |  POST multipart PDF + dual-token credential
+      |    X-AM-Storage-Key-Id + X-AM-Storage-Key-Secret
+      |    (or HMAC signed: X-AM-Storage-Signature + X-AM-Storage-Timestamp)
+      v
++--------------------------------------------------------------+
+|  AM Storage Bridge (FastAPI)                                 |
+| 1. Validates the API credential via the gateway registry     |
+|    (revocation-aware; digest or HMAC)                        |
+| 2. Structural PDF gate: .pdf, application/pdf, %PDF, %%EOF   |
+| 3. Streams bytes into private Cloudflare R2 (never client)   |
+| 4. HEAD-verifies the object, registers metadata w/ gateway   |
+| 5. Logs the attempt (success OR failure) to the dashboard    |
+| 6. Returns { file, url } - url is a short-lived signed URL   |
++------------+-----------------------------+------------------+
+             | X-Storage-Gateway-Key          | R2 credentials
+             | (server-to-server)             | only here
+             v                                v
+  AM Storage gateway (Next.js)      Cloudflare R2 (private bucket)
+  Firestore metadata / audit /
+  retention / API activity log
 ```
 
-The dashboard generates, lists, and revokes the `am_store_live_*` keys under
-**Admin → API Management**. Bridge uploads become normal active documents: they
+The dashboard generates, lists, and revokes the dual-token credentials under
+**Admin -> API Management**: a visible **API Key ID** (`am_store_live_...`) plus
+an **API Secret Key** (`am_sec_live_...`) displayed exactly once at generation
+(Cloudflare R2 style). Bridge uploads become normal active documents: they
 appear in the dashboard Files view, obey default retention, flow into Trash and
-cleanup, and are served by the gateway listing/download endpoints.
+cleanup, and are served by the gateway listing/download endpoints. Every
+upload attempt - including rejected ones - shows up in the dashboard's
+"API Upload Activity" log with a Success/Failed badge.
 
 ## Run it
 
@@ -65,14 +78,29 @@ Interactive OpenAPI docs: <http://localhost:8000/docs>.
 | `AM_STORAGE_SIGNED_URL_EXPIRY_SECONDS` | optional | `3600` | Lifetime of signed PDF URLs returned to the NGO site |
 | `CORS_ORIGINS` | optional | `https://gramunnayan.com,https://www.gramunnayan.com` | Browser origins allowed to call the bridge |
 
-Keys generated in the dashboard are stored in Firestore (SHA-256 digests only);
-the bridge verifies them through the gateway, so revocation is immediate and the
-bridge never needs Firebase credentials.
+Credentials generated in the dashboard are stored in Firestore as SHA-256
+digests (plus an AES-256-GCM encrypted copy when the gateway has
+`AM_STORAGE_MASTER_KEY` configured); the bridge verifies them through the
+gateway, so revocation is immediate and the bridge never needs Firebase
+credentials.
 
 ## Endpoints
 
-All endpoints (except `/health`) require the header
-`X-AM-Storage-Key: am_store_live_…` (Custom API Key from the dashboard).
+All endpoints (except `/health`) require one of these credentials (in priority
+order):
+
+1. **Dual-token (recommended)** — `X-AM-Storage-Key-Id: am_store_live_…`
+   plus `X-AM-Storage-Key-Secret: am_sec_live_…`
+2. **HMAC signed** — `X-AM-Storage-Key-Id` plus
+   `X-AM-Storage-Timestamp` (unix seconds, ±5 minute window) plus
+   `X-AM-Storage-Signature` = `HMAC-SHA256(keySecret,
+   "<timestamp>:<sha256hex(raw body bytes)>")` as lowercase hex. The raw
+   secret is never transmitted after initial setup.
+3. **Legacy single key** — `X-AM-Storage-Key: am_store_live_…`
+   (pre-upgrade integrations; rotate to dual-token)
+
+Self-hosted mode: keys listed in `AM_STORAGE_KEYS` are accepted locally
+(legacy header, or as the dual-token secret) without a gateway round-trip.
 
 ### `POST /api/v1/storage/upload` — the unified gateway endpoint
 
@@ -81,7 +109,8 @@ Multipart form data with a `file` field (PDF only). Optional fields: `title`,
 
 ```bash
 curl -X POST https://bridge.your-domain.example/api/v1/storage/upload \
-  -H 'X-AM-Storage-Key: am_store_live_xxxxxx' \
+  -H 'X-AM-Storage-Key-Id: am_store_live_xxxxxx' \
+  -H 'X-AM-Storage-Key-Secret: am_sec_live_yyyyyy' \
   -F 'file=@annual-report.pdf' \
   -F 'title=Annual Report 2026'
 ```
@@ -128,8 +157,16 @@ with the signed URL.
 
 - Errors use the gateway envelope: `{"success": false, "error": {"code", "message"}, "requestId"}`.
 - Every request gets an id (`X-Request-Id`), a structured access log line, and a
-  per-IP rate limit. Successful key checks refresh `lastUsedAt` in the dashboard.
+  per-IP rate limit. Successful credential checks refresh `lastUsedAt` and
+  increment the dashboard's per-day API request counter.
+- Every upload attempt (success **and** failure) is reported to
+  `POST /api/internal/bridge/upload-logs`, which powers the dashboard's
+  "API Upload Activity" widget with Success/Failed badges. This call is
+  best-effort: a logging failure never changes the upload outcome.
 - If metadata registration fails after an object was stored, the bridge deletes
   the object (compensation) so no orphaned bytes are left behind.
+- HMAC signed mode is only verifiable when the gateway has `AM_STORAGE_MASTER_KEY`
+  configured (the secret is stored AES-256-GCM encrypted). Without it, use the
+  dual-token headers. Signed timestamps are rejected outside a ±5-minute window.
 - For very large/frequent uploads put the bridge behind a proxy and pair the
   in-process limiter with a platform WAF; run multiple uvicorn workers.

@@ -1,4 +1,16 @@
-"""Key validation, per-client throttling, and request identity for the bridge."""
+"""Credential validation, per-client throttling, and request identity.
+
+gramunnayan.com authenticates with the dual-token pair issued by the dashboard:
+
+- dual_token : X-AM-Storage-Key-Id + X-AM-Storage-Key-Secret
+- signature  : X-AM-Storage-Key-Id + X-AM-Storage-Signature
+               (HMAC-SHA256 of ``<timestamp>:<sha256hex(body)>``)
+               + X-AM-Storage-Timestamp
+- legacy     : a single X-AM-Storage-Key (pre-upgrade keys, still supported)
+
+The raw values are forwarded to the AM Storage gateway registry (Firestore)
+for verification — this process never holds Firebase or raw key material.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -7,13 +19,35 @@ import hmac
 import time
 import uuid
 from collections import defaultdict, deque
+from dataclasses import dataclass
 
 from fastapi import HTTPException, Request
 
 from .config import get_settings
-from .gateway import GatewayRejected, GatewayUnavailable, verify_custom_key_with_gateway
+from .gateway import GatewayRejected, GatewayUnavailable, verify_api_credential_with_gateway
 
-UNAUTHORIZED = {"code": "INVALID_API_KEY", "message": "The X-AM-Storage-Key header is missing or invalid."}
+UNAUTHORIZED = {
+    "code": "INVALID_API_KEY",
+    "message": "Missing or invalid API credential. Send X-AM-Storage-Key-Id with X-AM-Storage-Key-Secret (dual-token) or with X-AM-Storage-Signature and X-AM-Storage-Timestamp (HMAC signed).",
+}
+
+
+@dataclass(frozen=True)
+class ApiCredential:
+    """Resolved request credential used by endpoints and upload logging."""
+
+    mode: str  # "legacy" | "dual_token" | "signature" | "static"
+    key_id: str | None
+    legacy_key: str | None = None
+
+    @property
+    def log_key(self) -> str:
+        """Identifier recorded in upload logs (never a raw key or secret)."""
+        if self.key_id:
+            return self.key_id
+        if self.legacy_key:
+            return f"{self.legacy_key[:16]}…"
+        return "unknown"
 
 
 def request_id_from(request: Request) -> str:
@@ -86,45 +120,104 @@ def _matches_static_key(supplied: str, static_keys: frozenset) -> bool:
     return matched
 
 
-async def require_custom_api_key(request: Request) -> str:
-    """FastAPI dependency: validates X-AM-Storage-Key and tracks usage.
+def _gateway_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail={
+            "code": "KEY_SERVICE_UNAVAILABLE",
+            "message": "The key registry is temporarily unavailable. Please retry shortly.",
+        },
+    )
+
+
+def parse_upload_credentials(request: Request) -> ApiCredential | None:
+    """Extracts a consistent credential from the request headers.
+
+    Returns None when no recognized credential is present (the caller raises
+    401). Priority: legacy single key > dual-token pair > HMAC signature.
+    """
+    legacy = (request.headers.get("X-AM-Storage-Key") or "").strip()
+    key_id = (request.headers.get("X-AM-Storage-Key-Id") or "").strip()
+    secret = (request.headers.get("X-AM-Storage-Key-Secret") or "").strip()
+    signature = (request.headers.get("X-AM-Storage-Signature") or "").strip()
+    timestamp_raw = (request.headers.get("X-AM-Storage-Timestamp") or "").strip()
+
+    if legacy:
+        return ApiCredential(mode="legacy", key_id=None, legacy_key=legacy)
+    if key_id and secret:
+        return ApiCredential(mode="dual_token", key_id=key_id)
+    if key_id and signature and timestamp_raw:
+        return ApiCredential(mode="signature", key_id=key_id)
+    return None
+
+
+async def _verify_via_gateway(credential: ApiCredential, request: Request) -> dict[str, str]:
+    """Builds the registry payload for the resolved credential and verifies it."""
+    request_id = request_id_from(request)
+    if credential.mode == "legacy":
+        payload: dict[str, object] = {"key": credential.legacy_key or ""}
+    elif credential.mode == "dual_token":
+        payload = {
+            "mode": "dual_token",
+            "keyId": credential.key_id or "",
+            "secret": (request.headers.get("X-AM-Storage-Key-Secret") or "").strip(),
+        }
+    else:  # signature
+        # The signature covers the raw body bytes, so hash the exact body.
+        body = await request.body()  # cached by Starlette; form parsing reuses it
+        body_hash = hashlib.sha256(body).hexdigest()
+        try:
+            timestamp = int(request.headers.get("X-AM-Storage-Timestamp") or "")
+        except ValueError as error:
+            raise HTTPException(status_code=401, detail=UNAUTHORIZED) from error
+        payload = {
+            "mode": "signature",
+            "keyId": credential.key_id or "",
+            "timestamp": timestamp,
+            "signature": (request.headers.get("X-AM-Storage-Signature") or "").strip().lower(),
+            "bodyHash": body_hash,
+        }
+    try:
+        return await verify_api_credential_with_gateway(payload, request_id)
+    except (GatewayUnavailable, GatewayRejected) as error:
+        # A reachable gateway only answers 2xx (with valid:false) for unknown
+        # or revoked credentials, so any transport/upstream failure means the
+        # registry is temporarily unavailable — never treat it as rejection.
+        raise _gateway_unavailable() from error
+
+
+async def require_api_credential(request: Request) -> ApiCredential:
+    """FastAPI dependency: validates the API credential and tracks usage.
 
     Resolution order:
-      1. A key listed in AM_STORAGE_KEYS (self-hosted static mode) is accepted
-         locally without a network call.
-      2. Otherwise the key is verified against the AM Storage gateway registry
-         (Firestore), which is where dashboard-generated `am_store_live_*` keys
-         live. Verification refreshes the key's lastUsedAt timestamp.
+      1. Static keys (AM_STORAGE_KEYS) are accepted locally without a network
+         call — legacy header, or a dual-token secret that matches a static key.
+      2. Otherwise the credential is verified against the AM Storage gateway
+         registry (Firestore), which is where dashboard-generated
+         `am_store_live_*` credentials live. Verification refreshes
+         `lastUsedAt` and records the request hit shown on the dashboard.
 
     Raises 401/429/503 HTTP errors with the API envelope shape.
     """
-    supplied = (request.headers.get("X-AM-Storage-Key") or "").strip()
-    if not supplied:
+    credential = parse_upload_credentials(request)
+    if credential is None:
         raise HTTPException(status_code=401, detail=UNAUTHORIZED)
 
     await enforce_bridge_rate_limit(request)
 
     settings = get_settings()
-    if settings.static_keys and _matches_static_key(supplied, settings.static_keys):
-        return supplied
+    if settings.static_keys:
+        if credential.mode == "legacy" and _matches_static_key(credential.legacy_key or "", settings.static_keys):
+            return ApiCredential(mode="static", key_id=None, legacy_key=credential.legacy_key)
+        if credential.mode == "dual_token":
+            secret = (request.headers.get("X-AM-Storage-Key-Secret") or "").strip()
+            if _matches_static_key(secret, settings.static_keys):
+                return ApiCredential(mode="static", key_id=credential.key_id)
 
-    try:
-        verified = await verify_custom_key_with_gateway(supplied, request_id_from(request))
-    except (GatewayUnavailable, GatewayRejected) as error:
-        # A reachable gateway only answers 2xx (with valid:false) for unknown or
-        # revoked keys, so any transport/upstream failure means the registry is
-        # temporarily unavailable — never treat it as a definitive rejection.
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "KEY_SERVICE_UNAVAILABLE",
-                "message": "The key registry is temporarily unavailable. Please retry shortly.",
-            },
-        ) from error
-
+    verified = await _verify_via_gateway(credential, request)
     if not verified.get("valid"):
         raise HTTPException(status_code=401, detail=UNAUTHORIZED)
-    return supplied
+    return credential
 
 
 def masked_key(key: str) -> str:

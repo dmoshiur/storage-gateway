@@ -72,18 +72,36 @@ async def _post_json(path: str, payload: dict[str, Any], request_id: str) -> dic
     return body.get("data") or {}
 
 
-async def verify_custom_key_with_gateway(key: str, request_id: str) -> dict[str, Any]:
-    """Validates a presented Custom API Key against the gateway registry.
+async def verify_api_credential_with_gateway(payload: dict[str, Any], request_id: str) -> dict[str, Any]:
+    """Validates a presented API credential against the gateway registry.
+
+    ``payload`` is one of:
+      - {"key": "<legacy am_store_live_…>"}
+      - {"mode": "dual_token", "keyId", "secret"}
+      - {"mode": "signature", "keyId", "timestamp", "signature", "bodyHash"}
 
     Returns {"valid": bool, "keyId": str | None}. Raises GatewayUnavailable or
     GatewayRejected on transport/upstream errors so callers can distinguish a
-    revoked key (valid=False) from a broken key service.
+    revoked credential (valid=False) from a broken key service.
     """
     return await _post_json(
         "/api/internal/bridge/verify-key",
-        {"key": key},
+        payload,
         request_id,
     )
+
+
+async def log_upload_with_gateway(payload: dict[str, Any], request_id: str) -> bool:
+    """Best-effort upload attempt log for the dashboard's API activity widget.
+
+    Never raises: logging is observability, and a registry hiccup must not
+    change the outcome of the upload itself. Returns True when recorded.
+    """
+    try:
+        await _post_json("/api/internal/bridge/upload-logs", payload, request_id)
+        return True
+    except Exception:
+        return False
 
 
 async def register_file_with_gateway(payload: dict[str, Any], request_id: str) -> dict[str, Any]:
@@ -93,7 +111,8 @@ async def register_file_with_gateway(payload: dict[str, Any], request_id: str) -
     size. Returns the serialized file record ({id, originalName, title, size,
     status: "active", ...}) on success.
     """
-    return await _post_json("/api/internal/bridge/files", payload, request_id)
+    data = await _post_json("/api/internal/bridge/files", payload, request_id)
+    return data.get("file") or {}
 
 
 _HOP_BY_HOP_HEADERS = {

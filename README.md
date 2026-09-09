@@ -28,8 +28,9 @@ migration.
 - Two sign-in methods: the shared administrator passphrase (`ADMIN_PASS`) alone, or Firebase email/password for any provisioned user — both issued as HTTP-only, server-verified session cookies, plus logout
 - Server-enforced admin RBAC (`admin`, `editor`, `viewer` policy is centralized and extendable)
 - An administrative dashboard branded **AM Storage Company**, with responsive file library, Trash, storage health, audit log, and settings screens
-- An **API Management** screen to generate/revoke/view high-entropy `am_store_live_…` Custom API Keys and copy a ready-made integration snippet for gramunnayan.com
-- A FastAPI **Storage Bridge** that validates `X-AM-Storage-Key` server-to-server, streams multipart PDFs into R2, registers them as managed documents, and returns signed PDF URLs
+- An **API Management** screen that generates/revokes dual-token credentials — a visible **API Key ID** (`am_store_live_…`) plus a high-entropy **API Secret Key** (`am_sec_live_…`) shown exactly once, Cloudflare R2 style — with ready-made integration snippets for gramunnayan.com
+- A dashboard with real-time metric cards (PDFs stored, storage used vs. the R2 limit, total API requests from gramunnayan.com), a live log of the last 5 API uploads with Success/Failed badges, and a "System Status: Operational" indicator that probes the FastAPI bridge
+- A FastAPI **Storage Bridge** that validates the dual-token credential (or an HMAC signature) server-to-server, streams multipart PDFs into R2, registers them as managed documents, logs every attempt to the dashboard, and returns signed PDF URLs
 - Direct browser-to-private-R2 signed uploads with progress indicators
 - Server-side finalization checks for extension, claimed/actual size, R2 content type, signed file identifier, `%PDF-x.y` header, and `%%EOF` trailer
 - Staging-to-final R2 copy on finalization so an expiring upload URL cannot overwrite an active PDF
@@ -55,10 +56,12 @@ migration.
 ```text
 gramunnayan.com (server)
       │  POST /api/v1/storage/upload  (multipart PDF)
-      │  Header: X-AM-Storage-Key: am_store_live_…
+      │  Headers: X-AM-Storage-Key-Id + X-AM-Storage-Key-Secret
+      │           (or HMAC: X-AM-Storage-Signature + X-AM-Storage-Timestamp)
       ▼
 ┌────────────────────────  AM Storage Bridge (FastAPI) ────────────────────────┐
-│ validates key (gateway registry) · PDF gate · streams to R2 · registers doc │
+│ validates credential (gateway registry) · PDF gate · streams to R2 ·        │
+│ registers doc · logs every attempt (success or failure) to the dashboard    │
 └───────┬──────────────────────────────────────────────┬──────────────────────┘
         │ X-Storage-Gateway-Key (server-to-server)      │ R2 credentials (private)
         ▼                                               ▼
@@ -66,13 +69,15 @@ gramunnayan.com (server)
   Firestore metadata · audit · retention       private PDF bytes
 ```
 
-1. Generate a key in the dashboard under **API Management** (Admin → API Management).
-2. Copy the snippet and set the two variables on the gramunnayan.com **server**
-   (`AM_STORAGE_BRIDGE_URL`, `AM_STORAGE_API_KEY`) — never in browser code.
-3. The bridge verifies the key through the gateway registry (revocation is
-   immediate, `lastUsedAt` is tracked), validates the PDF, streams it to R2,
-   registers the document, and returns `{ file, url }` where `url` is a
-   short-lived signed PDF URL for visitors.
+1. Generate a credential pair in the dashboard under **API Management** (Admin → API Management).
+2. Copy the snippet and set the variables on the gramunnayan.com **server**
+   (`AM_STORAGE_BRIDGE_URL`, `AM_STORAGE_KEY_ID`, `AM_STORAGE_KEY_SECRET`) —
+   never in browser code.
+3. The bridge verifies the credential through the gateway registry (revocation
+   is immediate, `lastUsedAt` is tracked, every attempt is logged on the
+   dashboard), validates the PDF, streams it to R2, registers the document, and
+   returns `{ file, url }` where `url` is a short-lived signed PDF URL for
+   visitors.
 
 See [`fastapi/README.md`](fastapi/README.md) for deployment, environment
 variables, and the full endpoint reference. The gateway-internal bridge routes
@@ -194,6 +199,7 @@ npm run dev
 | `R2_ENDPOINT` | yes | account-specific S3 endpoint |
 | `INTEGRATION_API_KEY` | yes | long random server-to-server website key |
 | `CRON_SECRET` | yes | long random secret for Vercel Cron Authorization header |
+| `AM_STORAGE_MASTER_KEY` | recommended | base64 32-byte key that AES-256-GCM encrypts each generated API Secret Key at rest (the SHA-256 hash is always stored; encryption enables bridge HMAC-signature verification). Generate with `openssl rand -base64 32` |
 | `NEXT_PUBLIC_APP_URL` | recommended | canonical per-environment app URL |
 
 Use separate Firebase projects, R2 buckets, and different `INTEGRATION_API_KEY` / `CRON_SECRET` values for development, preview, and production.

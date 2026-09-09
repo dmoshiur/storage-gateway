@@ -36,17 +36,36 @@ integration modes:
 
 1. **Recommended — through the AM Storage Bridge (FastAPI).** The public bridge
    endpoint `POST /api/v1/storage/upload` accepts multipart PDFs authenticated
-   with a Custom API Key generated in the dashboard:
+   with a **dual-token credential** generated in the dashboard (**Admin →
+   API Management**): a visible **API Key ID** (`am_store_live_…`) plus an
+   **API Secret Key** (`am_sec_live_…`, displayed exactly once, Cloudflare R2
+   style). The bridge validates the credential against the registry, streams
+   the PDF into private R2, registers the document, and returns a signed PDF
+   URL. It also exposes credential-protected `GET /api/files`,
+   `GET /api/files/{id}` and `GET /api/files/{id}/download`. See
+   `fastapi/README.md`.
+
+   Three credential forms are accepted (in priority order):
 
    ```http
-   X-AM-Storage-Key: am_store_live_xxxxxx
+   # a) Dual-token (recommended)
+   X-AM-Storage-Key-Id: am_store_live_xxxxxx
+   X-AM-Storage-Key-Secret: am_sec_live_yyyyyy
+
+   # b) HMAC signed (secret is never sent after setup; replay-protected by
+   #    the 5-minute timestamp window). signature = HMAC-SHA256(
+   #    keySecret, "<timestamp>:<sha256hex(raw body bytes)>") in lowercase hex.
+   X-AM-Storage-Key-Id: am_store_live_xxxxxx
+   X-AM-Storage-Timestamp: 1788888888
+   X-AM-Storage-Signature: <64-char hex>
+
+   # c) Legacy single key (pre-upgrade integrations, rotate to dual-token)
+   X-AM-Storage-Key: am_store_live_zzzzzz
    ```
 
-   The bridge validates the key against the registry, streams the PDF into
-   private R2, registers the document, and returns a signed PDF URL. It also
-   exposes key-protected `GET /api/files`, `GET /api/files/{id}` and
-   `GET /api/files/{id}/download`. See `fastapi/README.md`. The key is issued,
-   listed, and revoked under **Admin → API Management** in the dashboard.
+   Signed mode requires the gateway to have `AM_STORAGE_MASTER_KEY` configured
+   (the secret is then stored AES-256-GCM encrypted so HMACs can be verified
+   without persisting plaintext). Revocation takes effect on the next request.
 
 2. **Direct read-only gateway access** from the NGO server's own backend with:
 
@@ -308,7 +327,9 @@ When `redirect=true`, the gateway returns `302 Location: <temporary signed URL>`
 
 ### `GET /api/storage` (admin only)
 
-Returns metadata-based counts and capacity information:
+Returns metadata-based counts and capacity information, the result of the
+initial Cloudflare R2 bucket connectivity check, and the accumulated API
+request totals from gramunnayan.com:
 
 ```json
 {
@@ -324,7 +345,60 @@ Returns metadata-based counts and capacity information:
     "usagePercent": 82,
     "warningLevel": "warning",
     "expiringSoonCount": 5
-  }
+  },
+  "source": "live",
+  "r2": { "reachable": true, "latencyMs": 24, "checkedAt": "2026-09-09T11:40:00.000Z" },
+  "apiRequests": { "totalRequests": 1287, "lastRequestDate": "2026-09-09" }
+}
+```
+
+`source` is `"live"` when `stats` were computed from Firestore metadata and
+`"fallback"` when Firestore was unreachable — in that case `stats` contains
+documented mock metrics (`totalPdfCount: 0`, `totalStorageBytes: 0`, i.e.
+"0 files, 0 KB used") so the dashboard always renders. The R2 `HeadBucket`
+probe is bounded (3 s) and wrapped: any failure resolves to
+`r2.reachable: false` instead of an error response. This route therefore
+returns `200` for all degraded-dependency states; only authentication
+failures produce `4xx`.
+
+### `GET /api/health` (admin only)
+
+Dashboard system health: gateway runtime plus a live probe of the FastAPI
+bridge (`GET <BRIDGE_URL>/health`, bounded 4 s). The probe never throws; it
+degrades to `bridge.reachable: false`.
+
+```json
+{
+  "systemStatus": "operational",
+  "gateway": { "runtime": "nodejs", "uptimeSeconds": 3600, "checkedAt": "2026-09-09T11:40:00.000Z" },
+  "bridge": { "configured": true, "reachable": true, "latencyMs": 31, "version": "3.0.0", "checkedAt": "2026-09-09T11:40:00.000Z" }
+}
+```
+
+`systemStatus` is `"operational"` when the bridge is reachable (or no bridge
+origin is configured for this deployment) and `"degraded"` when a configured
+bridge does not answer.
+
+### `GET /api/api-logs` (admin only)
+
+Recent API (bridge) upload attempts for the dashboard's "API Upload Activity"
+widget. Query: `limit` (`1..50`, default `5`). The bridge records both
+successful and rejected attempts, so failures carry their `failureCode`.
+
+```json
+{
+  "logs": [
+    {
+      "id": "…",
+      "keyId": "am_store_live_xxxxxx",
+      "filename": "annual-report.pdf",
+      "sizeBytes": 432100,
+      "status": "success",
+      "failureCode": null,
+      "requestId": "…",
+      "timestamp": "2026-09-09T11:41:02.000Z"
+    }
+  ]
 }
 ```
 
@@ -430,11 +504,36 @@ browser. They authenticate with the `X-Storage-Gateway-Key` header (the same
 
 ### `POST /api/internal/bridge/verify-key`
 
-Body: `{ "key": "am_store_live_…" }`. Verifies the key against the Firestore
-registry (SHA-256 digest lookup), rejects revoked keys, and refreshes
-`lastUsedAt`. Responds `200` with `{ "valid": true, "keyId": "…" }` or
-`{ "valid": false, "keyId": null }` — transport/upstream failures raise `5xx`,
-never a false rejection.
+Accepts one of three payloads (verified against the Firestore registry):
+
+```json
+{ "key": "am_store_live_…" }
+```
+
+```json
+{ "mode": "dual_token", "keyId": "am_store_live_…", "secret": "am_sec_live_…" }
+```
+
+```json
+{ "mode": "signature", "keyId": "am_store_live_…", "timestamp": 1788888888, "signature": "<64-char hex>", "bodyHash": "<sha256hex of raw body>" }
+```
+
+Dual-token mode performs a constant-time SHA-256 digest comparison. Signature
+mode decrypts the stored secret (AES-256-GCM, requires `AM_STORAGE_MASTER_KEY`),
+recomputes `HMAC-SHA256(secret, "<timestamp>:<bodyHash>")` in constant time,
+and rejects timestamps outside the ±5-minute skew window (replay protection).
+A successful check refreshes `lastUsedAt` and increments the per-day request
+counter shown on the dashboard. Responds `200` with
+`{ "valid": true, "keyId": "…" }` or `{ "valid": false, "keyId": null }` —
+transport/upstream failures raise `5xx`, never a false rejection.
+
+### `POST /api/internal/bridge/upload-logs`
+
+Body: `{ keyId, filename, sizeBytes, status: "success" | "failed", failureCode, requestId, timestamp }`
+(ISO-8601 timestamp). Records one bridge upload attempt for the dashboard's
+API activity feed and keeps the collection capped at the 50 newest entries.
+Responds `200` with `{ "recorded": true }`. The bridge calls this
+best-effort — a failure here never changes the upload outcome.
 
 ### `POST /api/internal/bridge/files`
 
@@ -453,8 +552,9 @@ the serialized file record.
 | `400 INVALID_FILE_TYPE` / `INVALID_PDF` | File did not pass PDF validation |
 | `401 UNAUTHENTICATED` / `SESSION_EXPIRED` | Login/session missing or invalid |
 | `401 INVALID_INTEGRATION_KEY` | Website key missing/incorrect |
-| `401 INVALID_API_KEY` | Bridge `X-AM-Storage-Key` missing, revoked, or unknown |
+| `401 INVALID_API_KEY` | Bridge credential missing, revoked, unknown, or signature/timestamp invalid |
 | `503 KEY_SERVICE_UNAVAILABLE` | Bridge could not reach the key registry |
+| `503 SIGNATURE_VERIFICATION_UNAVAILABLE` | HMAC signed mode used but the key was created without a master key |
 | `403 ACCOUNT_NOT_PERMITTED` / `FORBIDDEN` | Identity lacks the required server-side role |
 | `403 INVALID_ORIGIN` | Cross-origin cookie mutation rejected |
 | `404 FILE_NOT_FOUND` | Document does not exist or is intentionally hidden |
