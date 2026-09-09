@@ -38,16 +38,21 @@ export async function requireAdminRequest(request: Request, capability: Capabili
   return actor;
 }
 
-export async function requireReadActor(request: Request): Promise<RequestActor> {
+/** Server-to-server trust boundary for internal bridge calls. The raw key travels only over TLS between our own services. */
+export function requireIntegrationKey(request: Request): IntegrationActor {
   const suppliedKey = request.headers.get("x-storage-gateway-key");
-  if (suppliedKey) {
-    const expectedKey = getRequiredSecret("INTEGRATION_API_KEY");
-    if (!secureEqual(suppliedKey, expectedKey)) {
-      throw new ApiError(401, "INVALID_INTEGRATION_KEY", "The integration credentials are invalid.");
-    }
-    const integration: IntegrationActor = { uid: "website-integration", email: null, role: "viewer", type: "integration" };
-    return integration;
+  if (!suppliedKey) {
+    throw new ApiError(401, "UNAUTHENTICATED", "The integration credentials are missing.");
   }
+  const expectedKey = getRequiredSecret("INTEGRATION_API_KEY");
+  if (!secureEqual(suppliedKey, expectedKey)) {
+    throw new ApiError(401, "INVALID_INTEGRATION_KEY", "The integration credentials are invalid.");
+  }
+  return { uid: "website-integration", email: null, role: "viewer", type: "integration" };
+}
+
+export async function requireReadActor(request: Request): Promise<RequestActor> {
+  if (request.headers.get("x-storage-gateway-key")) return requireIntegrationKey(request);
 
   const cookie = request.headers.get("cookie")?.match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE_NAME}=([^;]+)`))?.[1];
   const actor = await verifySessionCookie(cookie);

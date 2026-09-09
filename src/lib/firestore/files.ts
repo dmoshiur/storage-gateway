@@ -133,6 +133,60 @@ export async function getFileById(id: string): Promise<FileDocument | null> {
   return snapshot.exists ? toDocument(snapshot) : null;
 }
 
+/**
+ * Registers a PDF that the AM Storage bridge already streamed into R2 after its
+ * own server-side validation. The record is created directly in the `active`
+ * state (validatedAt is set) so bridge uploads appear in the dashboard, Trash,
+ * retention, and NGO website listings like any other managed document.
+ */
+export async function createBridgeFile(input: {
+  storageKey: string;
+  originalName: string;
+  title: string;
+  description: string;
+  category: string;
+  tags: string[];
+  size: number;
+  uploadedBy: string;
+  retention: RetentionInput;
+}): Promise<FileDocument> {
+  const db = getAdminDb();
+  const reference = db.collection(FILES).doc();
+  const now = new Date();
+  const document: FileDocument = {
+    id: reference.id,
+    storageKey: input.storageKey,
+    uploadKey: null,
+    originalName: cleanFilename(input.originalName),
+    title: input.title,
+    description: input.description,
+    category: input.category,
+    tags: [...new Set(input.tags.map((tag) => tag.toLowerCase()))],
+    mimeType: "application/pdf",
+    size: input.size,
+    createdAt: now,
+    updatedAt: now,
+    uploadedBy: input.uploadedBy,
+    autoDeleteEnabled: input.retention.autoDeleteEnabled,
+    retentionType: input.retention.retentionType,
+    customDeleteAt: input.retention.customDeleteAt ? new Date(`${input.retention.customDeleteAt}T00:00:00.000Z`) : null,
+    deleteAt: calculateDeleteAt(input.retention, now),
+    status: "active",
+    deletedAt: null,
+    permanentDeleteAt: null,
+    permanentlyDeletedAt: null,
+    deletionStartedAt: null,
+    deletionPreviousStatus: null,
+    deletionReason: null,
+    uploadExpiresAt: null,
+    validatedAt: now,
+    failureCode: null,
+    version: 1,
+  };
+  await reference.create(document);
+  return document;
+}
+
 export async function requireFileById(id: string): Promise<FileDocument> {
   const file = await getFileById(id);
   if (!file) throw new ApiError(404, "FILE_NOT_FOUND", "The requested PDF was not found.");
