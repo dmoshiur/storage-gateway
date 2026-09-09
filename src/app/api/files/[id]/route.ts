@@ -6,7 +6,7 @@ import { getFileById, serializeFile, updateFileDetails } from "@/lib/firestore/f
 import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
 import { requireAdminRequest, requireReadActor } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
-import { fileUpdateSchema } from "@/lib/validation/schemas";
+import { fileUpdateSchema, moveToTrashSchema } from "@/lib/validation/schemas";
 
 export const runtime = "nodejs";
 
@@ -51,6 +51,7 @@ export async function DELETE(request: Request, context: { params: Promise<{ id: 
   return apiRoute(request, async (requestId) => {
     const actor = await requireAdminRequest(request, "manage_files", true);
     enforceRateLimit(`files:trash:${actor.uid}`, 60);
+    await parseJson(request, moveToTrashSchema);
     const id = requireRouteId((await context.params).id);
     const { getSettings } = await import("@/lib/firestore/settings");
     const { moveFileToTrash } = await import("@/lib/firestore/files");

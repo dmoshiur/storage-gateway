@@ -78,7 +78,7 @@ function MoveToTrashDialogContents({ file, onClose, onMoved }: { file: Serialize
   const [error, setError] = useState<string | null>(null);
   async function move() {
     setBusy(true);
-    try { await apiFetch(`/api/files/${file.id}`, { method: "DELETE" }); onMoved(); onClose(); }
+    try { await apiFetch(`/api/files/${file.id}`, { method: "DELETE", body: JSON.stringify({ confirmation: "MOVE_TO_TRASH" }) }); onMoved(); onClose(); }
     catch (caught) { setError(errorText(caught, "The PDF could not be moved to Trash.")); setBusy(false); }
   }
   return <Dialog open onClose={() => !busy && onClose()} title="Move this PDF to Trash?" destructive labelledDescription="This file remains in private storage and can be restored until its scheduled permanent deletion."><div className="rounded-lg bg-slate-50 p-3 text-sm font-semibold text-ink-900">{file.originalName}</div>{error && <div className="mt-4"><Notice type="error">{error}</Notice></div>}<div className="mt-5 flex justify-end gap-3"><Button variant="secondary" onClick={onClose} disabled={busy}>Cancel</Button><Button variant="danger" onClick={move} disabled={busy}>{busy && <LoaderCircle className="h-4 w-4 animate-spin" />}<Trash2 className="h-4 w-4" />Move to Trash</Button></div></Dialog>;

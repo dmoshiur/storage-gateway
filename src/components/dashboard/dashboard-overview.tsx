@@ -16,6 +16,7 @@ interface Stats {
   activeFileCount: number;
   trashFileCount: number;
   totalStorageBytes: number;
+  storageLimitBytes: number;
   availableBytes: number;
   usagePercent: number;
   warningLevel: "normal" | "warning" | "critical";
@@ -54,7 +55,7 @@ export function DashboardOverview() {
     {(warning || critical) && <Notice type={critical ? "error" : "warning"}><strong>{critical ? "Critical storage warning." : "Storage warning."}</strong> Storage usage is {stats.usagePercent}%. {critical ? "Free space or increase the approved storage limit soon." : "Consider reviewing unnecessary PDFs."}</Notice>}
 
     <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="Storage summary">
-      <Metric icon={HardDrive} label="Storage" value={`${formatBytes(stats.totalStorageBytes)} used`} detail={`${stats.usagePercent}% of configured limit`} />
+      <Metric icon={HardDrive} label="Storage" value={`${formatBytes(stats.totalStorageBytes)} / ${formatBytes(stats.storageLimitBytes)}`} detail={`${stats.usagePercent}% of configured limit`} />
       <Metric icon={FileText} label="Total PDFs" value={String(stats.totalPdfCount)} detail={`${stats.activeFileCount} active documents`} />
       <Metric icon={CalendarClock} label="Expiring soon" value={String(stats.expiringSoonCount)} detail="Within the next 30 days" />
       <Metric icon={Archive} label="Trash" value={String(stats.trashFileCount)} detail="Recoverable private documents" />

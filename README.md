@@ -22,7 +22,7 @@ The intended scale is `≤ 10 GB` of PDFs. The design keeps operations simple an
 - Server-side finalization checks for extension, claimed/actual size, R2 content type, signed file identifier, `%PDF-x.y` header, and `%%EOF` trailer
 - Staging-to-final R2 copy on finalization so an expiring upload URL cannot overwrite an active PDF
 - Per-file retention: Never, 30 days, 3 months, 6 months, 1 year, custom date
-- Soft deletion / recovery and typed `DELETE` confirmation for permanent deletion
+- Soft deletion / recovery with server-confirmed move-to-Trash and typed `DELETE` confirmation for permanent deletion
 - Daily cleanup with a Firestore lock, per-file failure isolation, retryable `deleting` state, and audit records
 - Secure server-to-server website integration using `X-Storage-Gateway-Key`
 - Secure HTTP headers, bounded JSON request sizes, schema validation, same-origin checks for cookie mutations, and best-effort per-instance rate limiting

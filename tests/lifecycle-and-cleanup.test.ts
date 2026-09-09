@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { isDueForAutomaticCleanup, isDueForTrashExpiry, isStaleUpload } from "@/lib/cleanup/eligibility";
 import { canTransitionFileStatus } from "@/lib/files/lifecycle";
+import { moveToTrashSchema, permanentDeleteSchema } from "@/lib/validation/schemas";
 
 const now = new Date("2026-09-09T10:00:00.000Z");
 
@@ -9,6 +10,12 @@ describe("delete, restore, and cleanup lifecycle", () => {
     expect(canTransitionFileStatus("active", "trash")).toBe(true);
     expect(canTransitionFileStatus("trash", "active")).toBe(true);
     expect(canTransitionFileStatus("deleted", "active")).toBe(false);
+  });
+  it("requires an explicit server-side confirmation before either deletion operation", () => {
+    expect(moveToTrashSchema.safeParse({ confirmation: "MOVE_TO_TRASH" }).success).toBe(true);
+    expect(moveToTrashSchema.safeParse({}).success).toBe(false);
+    expect(permanentDeleteSchema.safeParse({ confirmation: "DELETE" }).success).toBe(true);
+    expect(permanentDeleteSchema.safeParse({ confirmation: "delete" }).success).toBe(false);
   });
   it("requires a transient deletion state before permanent deletion", () => {
     expect(canTransitionFileStatus("trash", "deleting")).toBe(true);

@@ -8,6 +8,7 @@ export interface StorageStats {
   activeFileCount: number;
   trashFileCount: number;
   totalStorageBytes: number;
+  storageLimitBytes: number;
   activeStorageBytes: number;
   trashStorageBytes: number;
   availableBytes: number;
@@ -34,6 +35,7 @@ export async function getStorageStats(): Promise<StorageStats> {
     activeFileCount: active.length,
     trashFileCount: trash.length,
     totalStorageBytes,
+    storageLimitBytes: settings.storageLimitBytes,
     activeStorageBytes,
     trashStorageBytes,
     availableBytes: Math.max(0, settings.storageLimitBytes - totalStorageBytes),

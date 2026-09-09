@@ -41,7 +41,7 @@ Before production, use a dedicated test bucket and a harmless valid PDF:
 3. Attempt a `.txt` file renamed `.pdf`, invalid header, missing EOF marker, and an oversize PDF. Confirm no active record is created.
 4. View and download an active PDF. Confirm the returned R2 URL expires and the bucket is not anonymously browseable/public.
 5. Update title/category/tags and each retention option. Confirm `deleteAt` is set by the server and `CHANGE_RETENTION` is logged.
-6. Move a PDF to Trash. Confirm the R2 object remains, Restore works, and the original object need not be re-uploaded.
+6. Move a PDF to Trash. Confirm an omitted/wrong `MOVE_TO_TRASH` confirmation is rejected, the R2 object remains, Restore works, and the original object need not be re-uploaded.
 7. Move it back to Trash and enter an incorrect permanent-delete confirmation. Confirm it is rejected. Enter `DELETE`; confirm R2 object is gone and metadata is `deleted`.
 8. Create an expired active test record only through a controlled test helper, then invoke cron dry-run and real cleanup. Confirm safety mode moves it to Trash and a failure on one stubbed object does not stop other records.
 9. Repeat with `trashEnabled: false` only in test, then restore the safe default afterward.

@@ -132,6 +132,9 @@ Return one metadata record. Admin callers can read active or Trash records; inte
 
 ### `POST /api/files/upload/init` (admin only)
 
+`POST /api/files/upload` is a compatibility alias for this upload-authorization step. Both routes return the same direct-to-R2 upload contract; neither accepts raw PDF bytes.
+
+
 Authorize a direct, short-lived staging upload. The PDF payload itself does **not** pass through this API or Vercel.
 
 **Body**
@@ -213,7 +216,11 @@ At least one supported field is required. Retention dates are calculated using t
 
 ### `DELETE /api/files/:id` (admin only)
 
-Moves an **active** document to Trash. This is a soft deletion: its private R2 object remains available for recovery until `permanentDeleteAt`. No browser confirmation is accepted as an authorization control; the dashboard also shows an accessible custom confirmation dialog.
+Moves an **active** document to Trash. This is a soft deletion: its private R2 object remains available for recovery until `permanentDeleteAt`. The route requires an explicit server-side confirmation body in addition to the dashboard’s accessible custom confirmation dialog:
+
+```json
+{ "confirmation": "MOVE_TO_TRASH" }
+```
 
 **Success `200`** returns the record with `status: "trash"` and a scheduled permanent deletion timestamp.
 
@@ -231,7 +238,7 @@ Permanently removes a Trash object. The body must contain an exact server-side c
 { "confirmation": "DELETE" }
 ```
 
-The gateway first moves metadata through `deleting`, then deletes the R2 object, and only then marks the record `deleted`. R2 deletion failures return `502 DELETE_FAILED` and metadata returns to Trash for retry. If a Firestore completion is interrupted, `deleting` is safely retried by cleanup because S3 delete is idempotent.
+The gateway first moves metadata through `deleting`, then deletes the R2 object, and only then marks the record `deleted`. R2 deletion failures return `502 DELETE_FAILED` and metadata returns to Trash for retry when possible. If Firestore completion is interrupted, the record remains `deleting` and is safely retried by cleanup because S3 delete is idempotent.
 
 ### `GET /api/files/:id/download`
 
@@ -270,6 +277,7 @@ Returns metadata-based counts and capacity information:
     "activeFileCount": 335,
     "trashFileCount": 12,
     "totalStorageBytes": 8804682957,
+    "storageLimitBytes": 10737418240,
     "activeStorageBytes": 8000000000,
     "trashStorageBytes": 804682957,
     "availableBytes": 1932735283,
@@ -379,6 +387,7 @@ If the public website itself serves visitors, add its own authorization rules be
 | Status / code | Meaning |
 | --- | --- |
 | `400 VALIDATION_ERROR` | Input/query/body did not match schema |
+| `415 UNSUPPORTED_MEDIA_TYPE` | A JSON control-plane endpoint received a non-JSON body |
 | `400 INVALID_FILE_TYPE` / `INVALID_PDF` | File did not pass PDF validation |
 | `401 UNAUTHENTICATED` / `SESSION_EXPIRED` | Login/session missing or invalid |
 | `401 INVALID_INTEGRATION_KEY` | Website key missing/incorrect |

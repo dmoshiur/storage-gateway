@@ -29,7 +29,12 @@ export function actorFromClaims(decoded: DecodedIdToken): SessionActor {
 
 export async function createAdminSession(idToken: string): Promise<{ cookie: string; actor: SessionActor }> {
   const auth = getAdminAuth();
-  const decoded = await auth.verifyIdToken(idToken, true);
+  let decoded: DecodedIdToken;
+  try {
+    decoded = await auth.verifyIdToken(idToken, true);
+  } catch {
+    throw new ApiError(401, "INVALID_ID_TOKEN", "Your sign-in could not be verified. Please sign in again.");
+  }
   const actor = actorFromClaims(decoded);
   if (!can(actor.role, "manage_files")) {
     throw new ApiError(403, "ADMIN_REQUIRED", "This account is not authorized to access the storage gateway.");
