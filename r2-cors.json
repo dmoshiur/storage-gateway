@@ -1,0 +1,12 @@
+[
+  {
+    "AllowedOrigins": [
+      "http://localhost:3000",
+      "https://your-gateway.vercel.app"
+    ],
+    "AllowedMethods": ["PUT", "GET", "HEAD"],
+    "AllowedHeaders": ["content-type", "x-amz-meta-file-id"],
+    "ExposeHeaders": ["etag"],
+    "MaxAgeSeconds": 300
+  }
+]
