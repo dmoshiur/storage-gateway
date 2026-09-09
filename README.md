@@ -15,7 +15,7 @@ The intended scale is `≤ 10 GB` of PDFs. The design keeps operations simple an
 
 ## What is included
 
-- Firebase email/password sign-in, logout, and server-side Firebase session verification
+- Two sign-in methods: the shared administrator passphrase (`ADMIN_PASS`) alone, or Firebase email/password for any provisioned user — both issued as HTTP-only, server-verified session cookies, plus logout
 - Server-enforced admin RBAC (`admin`, `editor`, `viewer` policy is centralized and extendable)
 - An administrative dashboard, responsive file library, Trash, storage health, audit log, and settings screens
 - Direct browser-to-private-R2 signed uploads with progress indicators
@@ -59,13 +59,12 @@ The Firebase Web SDK configuration is intentionally `NEXT_PUBLIC_*`: it identifi
 
 ### Authentication and roles
 
-1. The login page first asks for the shared administrator passphrase (`ADMIN_PASS`). It is checked server-side by `POST /api/auth/gate` using a constant-time comparison; the form is not revealed until it passes.
-2. The login page then uses Firebase Auth email/password.
-3. It sends the short-lived Firebase ID token to `POST /api/auth/session` over same origin.
-4. The server verifies it with Firebase Admin, evaluates the custom role claim (or documented `ADMIN_EMAILS` bootstrap allowlist), and creates an HTTP-only, SameSite=Lax session cookie only for an `admin`.
-5. Every dashboard mutation verifies that cookie on the server. The browser’s UI state is never trusted for authorization.
+The login page offers two independent sign-in methods:
 
-The passphrase is a gate in front of sign-in, not the authorization boundary: the real access control remains the server-verified Firebase admin session.
+1. **Shared passphrase.** The shared administrator passphrase (`ADMIN_PASS`) signs in directly with full administrator access — no Firebase account is required. It is checked server-side by `POST /api/auth/pass` using a constant-time comparison, rate limited per client IP, and returns an HTTP-only, SameSite=Lax session cookie holding an HMAC-signed shared-pass session. Rotating `ADMIN_PASS` invalidates every such session.
+2. **Firebase email/password.** Any user created in Firebase Authentication signs in with their email and password. The page sends the short-lived Firebase ID token to `POST /api/auth/session` over same origin, the server verifies it with Firebase Admin and evaluates the custom role claim (or documented `ADMIN_EMAILS` bootstrap allowlist), and issues an HTTP-only, SameSite=Lax Firebase session cookie.
+
+Every dashboard route verifies the cookie server-side and enforces the actor role: `admin` has full control, `editor` and `viewer` get read-only access (browse, view, download; no uploads, edits, deletion, settings, or audit log). The browser’s UI state is never trusted for authorization.
 
 Use Firebase custom claims for production roles, e.g. `{ role: "admin" }`. `ADMIN_EMAILS` is a convenient bootstrap fallback, not a replacement for controlled role provisioning.
 
@@ -136,7 +135,7 @@ npm run dev
 | `FIREBASE_CLIENT_EMAIL` | yes | Firebase Admin service account email |
 | `FIREBASE_PRIVATE_KEY` | yes | Firebase Admin service account private key; preserve escaped newlines |
 | `ADMIN_EMAILS` | bootstrap | comma-separated initial admins; custom claim is preferred |
-| `ADMIN_PASS` | yes | shared administrator passphrase gating the sign-in form |
+| `ADMIN_PASS` | yes | shared administrator passphrase; signs in directly with full admin access |
 | `R2_ACCOUNT_ID` | yes | Cloudflare account ID |
 | `R2_ACCESS_KEY_ID` | yes | R2 S3 API access key, server only |
 | `R2_SECRET_ACCESS_KEY` | yes | R2 S3 API secret, server only |

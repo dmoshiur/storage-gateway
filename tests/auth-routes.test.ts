@@ -4,6 +4,7 @@ import { ApiError } from "@/lib/api/errors";
 vi.mock("server-only", () => ({}));
 
 const createAdminSession = vi.fn();
+const createSharedPassSession = vi.fn();
 const getSessionActorFromCookies = vi.fn();
 const writeAuditLog = vi.fn();
 const writeAuditLogSafely = vi.fn();
@@ -15,6 +16,7 @@ vi.mock("@/lib/auth/session", () => ({
   createAdminSession,
   getSessionActorFromCookies,
 }));
+vi.mock("@/lib/auth/shared-session", () => ({ createSharedPassSession }));
 vi.mock("@/lib/firestore/audit", () => ({
   writeAuditLog,
   writeAuditLogSafely,
@@ -24,7 +26,7 @@ vi.mock("@/lib/firestore/users", () => ({ recordAdminLogin }));
 
 const sessionRoute = await import("@/app/api/auth/session/route");
 const logoutRoute = await import("@/app/api/auth/logout/route");
-const gateRoute = await import("@/app/api/auth/gate/route");
+const passRoute = await import("@/app/api/auth/pass/route");
 
 function sameOriginRequest(url: string, init: RequestInit): Request {
   return new Request(url, {
@@ -48,20 +50,20 @@ describe("admin session routes", () => {
     getSessionActorFromCookies.mockResolvedValue({ uid: "admin-1", email: "admin@ngo.test", role: "admin", type: "admin" });
   });
 
-  it("creates an HTTP-only server session after an authorized Firebase login", async () => {
+  it("creates an HTTP-only server session after a provisioned Firebase login", async () => {
     const response = await sessionRoute.POST(sameOriginRequest("https://gateway.test/api/auth/session", { method: "POST", body: JSON.stringify({ idToken: "x".repeat(200) }) }));
     expect(response.status).toBe(200);
     expect((await response.json()).data.actor.role).toBe("admin");
     expect(response.headers.get("set-cookie")).toContain("ngo_gateway_session=verified-session-cookie");
     expect(response.headers.get("set-cookie")).toContain("HttpOnly");
-    expect(writeAuditLog).toHaveBeenCalledWith(expect.objectContaining({ action: "LOGIN" }));
+    expect(writeAuditLog).toHaveBeenCalledWith(expect.objectContaining({ action: "LOGIN", details: { method: "firebase" } }));
   });
 
   it("returns a safe authorization error and no session for an unauthorized login", async () => {
-    createAdminSession.mockRejectedValueOnce(new ApiError(403, "ADMIN_REQUIRED", "This account is not authorized to access the storage gateway."));
+    createAdminSession.mockRejectedValueOnce(new ApiError(403, "ACCOUNT_NOT_PERMITTED", "This account is not permitted to sign in to the storage gateway."));
     const response = await sessionRoute.POST(sameOriginRequest("https://gateway.test/api/auth/session", { method: "POST", body: JSON.stringify({ idToken: "x".repeat(200) }) }));
     expect(response.status).toBe(403);
-    expect((await response.json()).error.code).toBe("ADMIN_REQUIRED");
+    expect((await response.json()).error.code).toBe("ACCOUNT_NOT_PERMITTED");
     expect(response.headers.get("set-cookie")).toBeNull();
   });
 
@@ -73,7 +75,7 @@ describe("admin session routes", () => {
   });
 });
 
-describe("admin passphrase gate route", () => {
+describe("shared passphrase login route", () => {
   const original = process.env.ADMIN_PASS;
 
   beforeAll(() => {
@@ -84,15 +86,26 @@ describe("admin passphrase gate route", () => {
     else process.env.ADMIN_PASS = original;
   });
 
-  it("accepts the correct administrator passphrase", async () => {
-    const response = await gateRoute.POST(sameOriginRequest("https://gateway.test/api/auth/gate", { method: "POST", body: JSON.stringify({ adminPass: "correct-admin-passphrase" }) }));
-    expect(response.status).toBe(200);
-    expect((await response.json()).data.passphraseAccepted).toBe(true);
+  beforeEach(() => {
+    createSharedPassSession.mockReturnValue({ cookie: "signed-shared-session", actor: { uid: "shared-pass-admin", email: null, role: "admin", type: "admin" } });
   });
 
-  it("rejects an incorrect passphrase without granting access", async () => {
-    const response = await gateRoute.POST(sameOriginRequest("https://gateway.test/api/auth/gate", { method: "POST", body: JSON.stringify({ adminPass: "wrong-passphrase" }) }));
+  it("signs in the shared administrator and sets an HTTP-only session cookie", async () => {
+    const response = await passRoute.POST(sameOriginRequest("https://gateway.test/api/auth/pass", { method: "POST", body: JSON.stringify({ adminPass: "correct-admin-passphrase" }) }));
+    expect(response.status).toBe(200);
+    expect((await response.json()).data.actor).toEqual({ uid: "shared-pass-admin", email: null, role: "admin" });
+    expect(response.headers.get("set-cookie")).toContain("ngo_gateway_session=signed-shared-session");
+    expect(response.headers.get("set-cookie")).toContain("HttpOnly");
+    expect(createSharedPassSession).toHaveBeenCalledWith(60);
+    expect(writeAuditLog).toHaveBeenCalledWith(expect.objectContaining({ action: "LOGIN", details: { method: "shared_pass" } }));
+  });
+
+  it("rejects an incorrect passphrase without granting a session", async () => {
+    const response = await passRoute.POST(sameOriginRequest("https://gateway.test/api/auth/pass", { method: "POST", body: JSON.stringify({ adminPass: "wrong-passphrase" }) }));
     expect(response.status).toBe(401);
     expect((await response.json()).error.code).toBe("ADMIN_PASS_INVALID");
+    expect(response.headers.get("set-cookie")).toBeNull();
+    expect(createSharedPassSession).not.toHaveBeenCalled();
+    expect(writeAuditLog).not.toHaveBeenCalled();
   });
 });

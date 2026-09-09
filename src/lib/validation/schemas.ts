@@ -63,7 +63,7 @@ export const settingsPatchSchema = z.object({
 });
 
 export const sessionSchema = z.object({ idToken: z.string().min(100).max(12_000) });
-export const adminGateSchema = z.object({ adminPass: z.string().min(1).max(256) });
+export const adminPassSchema = z.object({ adminPass: z.string().min(1).max(256) });
 export const moveToTrashSchema = z.object({ confirmation: z.literal("MOVE_TO_TRASH", { errorMap: () => ({ message: "Confirm moving this PDF to Trash." }) }) });
 export const permanentDeleteSchema = z.object({ confirmation: z.literal("DELETE", { errorMap: () => ({ message: "Type DELETE to confirm." }) }) });
 export const cleanupQuerySchema = z.object({ dryRun: z.enum(["true", "false"]).optional().default("false") });

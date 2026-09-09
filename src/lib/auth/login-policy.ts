@@ -14,7 +14,3 @@ export function resolveRoleFromIdentityClaims(claims: IdentityClaims, bootstrapA
   if (claims.email && bootstrapAdmins.has(claims.email.toLowerCase())) return "admin";
   return "viewer";
 }
-
-export function shouldCreateAdminSession(claims: IdentityClaims, bootstrapAdmins: ReadonlySet<string>): boolean {
-  return resolveRoleFromIdentityClaims(claims, bootstrapAdmins) === "admin";
-}

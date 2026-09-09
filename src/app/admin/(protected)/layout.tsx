@@ -5,6 +5,8 @@ import { can } from "@/lib/auth/authorization";
 
 export default async function ProtectedAdminLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   const actor = await getSessionActorFromCookies();
-  if (!actor || !can(actor.role, "manage_files")) redirect("/admin/login");
-  return <AdminShell actorEmail={actor.email}>{children}</AdminShell>;
+  // Any signed-in actor (shared pass or provisioned Firebase user) may enter;
+  // each page and API route still enforces its own capability.
+  if (!actor || !can(actor.role, "read_files")) redirect("/admin/login");
+  return <AdminShell actorEmail={actor.email} actorRole={actor.role}>{children}</AdminShell>;
 }

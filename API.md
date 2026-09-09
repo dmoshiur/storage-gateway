@@ -25,7 +25,7 @@ Save `requestId` when reporting an issue. API responses use `Cache-Control: no-s
 
 ### Admin dashboard API
 
-The browser signs in through Firebase email/password and exchanges the Firebase ID token for an HTTP-only session cookie at `POST /api/auth/session`. All dashboard mutation routes require that verified cookie, an `admin` role, and a same-origin request.
+The admin browser signs in one of two ways: the shared `ADMIN_PASS` passphrase at `POST /api/auth/pass` (full administrator, no Firebase account), or Firebase email/password exchanged for a server-verified session cookie at `POST /api/auth/session`. Every dashboard route requires that verified cookie and enforces the actor role; mutation routes additionally require a same-origin request.
 
 Never construct an admin-only request based on a browser-side `isAdmin` value.
 
@@ -40,6 +40,29 @@ X-Storage-Gateway-Key: <INTEGRATION_API_KEY>
 This key must never be sent to the NGO website browser, committed to source, logged, or put in `NEXT_PUBLIC_*`. An integration caller can access active, non-expired metadata and request a short-lived download URL. It cannot access Trash, settings, logs, uploads, or any destructive endpoint.
 
 ## Admin auth
+
+### `POST /api/auth/pass`
+
+Sign in the shared administrator with the environment passphrase alone. Requires a same-origin request and is rate limited per client IP.
+
+**Body**
+
+```json
+{ "adminPass": "shared-passphrase" }
+```
+
+**Success `200`**
+
+```json
+{
+  "success": true,
+  "data": {
+    "actor": { "uid": "shared-pass-admin", "email": null, "role": "admin" }
+  }
+}
+```
+
+Sets the HTTP-only session cookie holding an HMAC-signed shared-pass session with full administrator access. Rotating `ADMIN_PASS` invalidates every shared-pass session. `401 ADMIN_PASS_INVALID` is returned for a wrong passphrase.
 
 ### `POST /api/auth/session`
 
@@ -62,7 +85,7 @@ Exchange a Firebase ID token for a server-verified session cookie.
 }
 ```
 
-`401` is returned for an invalid/revoked ID token; `403 ADMIN_REQUIRED` is returned for a valid non-admin identity.
+`401` is returned for an invalid/revoked ID token. Any user created in Firebase Authentication may sign in; the resolved role (`admin` custom claim, `ADMIN_EMAILS` bootstrap, else `viewer`) decides route-level capabilities, with `editor`/`viewer` limited to read-only access.
 
 ### `POST /api/auth/logout`
 
@@ -391,7 +414,7 @@ If the public website itself serves visitors, add its own authorization rules be
 | `400 INVALID_FILE_TYPE` / `INVALID_PDF` | File did not pass PDF validation |
 | `401 UNAUTHENTICATED` / `SESSION_EXPIRED` | Login/session missing or invalid |
 | `401 INVALID_INTEGRATION_KEY` | Website key missing/incorrect |
-| `403 ADMIN_REQUIRED` / `FORBIDDEN` | Identity lacks the required server-side role |
+| `403 ACCOUNT_NOT_PERMITTED` / `FORBIDDEN` | Identity lacks the required server-side role |
 | `403 INVALID_ORIGIN` | Cross-origin cookie mutation rejected |
 | `404 FILE_NOT_FOUND` | Document does not exist or is intentionally hidden |
 | `409 STORAGE_LIMIT_EXCEEDED` | New upload would exceed configured capacity |

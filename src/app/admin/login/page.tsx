@@ -14,7 +14,7 @@ export default function LoginPage() {
       <section className="flex items-center justify-center p-5 sm:p-10">
         <div className="w-full max-w-md">
           <div className="mb-7 flex items-center gap-3 lg:hidden"><span className="grid h-10 w-10 place-items-center rounded-xl bg-ngo-600 text-white"><FileText className="h-5 w-5" /></span><span className="font-bold text-ink-900">NGO PDF Storage</span></div>
-          <div className="panel p-6 sm:p-8"><p className="text-sm font-semibold uppercase tracking-wider text-ngo-600">Administrator access</p><h1 className="mt-2 text-2xl font-bold text-ink-900">Sign in to storage</h1><p className="mt-2 text-sm leading-6 text-slate-600">Enter the administrator passphrase, then sign in with your authorized Firebase account. Unauthenticated visitors cannot access documents or settings.</p><div className="mt-7"><LoginForm /></div></div>
+          <div className="panel p-6 sm:p-8"><p className="text-sm font-semibold uppercase tracking-wider text-ngo-600">Administrator access</p><h1 className="mt-2 text-2xl font-bold text-ink-900">Sign in to storage</h1><p className="mt-2 text-sm leading-6 text-slate-600">Sign in with the shared administrator passphrase, or with the email and password of an account created for you in Firebase Authentication. Unauthenticated visitors cannot access documents or settings.</p><div className="mt-7"><LoginForm /></div></div>
         </div>
       </section>
     </main>
