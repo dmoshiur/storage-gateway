@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, FileUp, LoaderCircle, UploadCloud, X, XCircle } from "lucide-react";
+import { uploadPresigned } from "@vercel/blob/client";
 import { useToast } from "@/components/providers";
 import { Dialog } from "@/components/ui/overlays";
 import { apiFetch, ClientApiError } from "@/lib/client/api";
@@ -29,24 +30,23 @@ async function sha256Hex(file: File): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function putWithProgress(url: string, file: File, contentType: string, onProgress: (percent: number) => void, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("PUT", url);
-    xhr.setRequestHeader("Content-Type", contentType);
-    xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
-    };
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`Upload failed with status ${xhr.status}.`));
-    };
-    xhr.onerror = () => reject(new Error("Network error during upload."));
-    xhr.onabort = () => reject(new Error("Upload cancelled."));
-    signal.addEventListener("abort", () => xhr.abort());
-    xhr.send(file);
-  });
-}
+/**
+ * OIDC-compatible upload using Vercel Blob presigned URLs.
+ *
+ * Previous implementation used raw XMLHttpRequest PUT to a presigned URL
+ * generated via issueSignedToken+presignUrl. That flow broke under OIDC-only
+ * deployments because:
+ * 1. handleUpload requires BLOB_READ_WRITE_TOKEN and fails with OIDC
+ * 2. Direct XHR PUT to presigned URL surfaces as "Network error" on CORS/preflight
+ * 3. Missing handleUploadPresigned route that works with OIDC + BLOB_WEBHOOK_PUBLIC_KEY
+ *
+ * Fixed flow (Vercel recommended for OIDC):
+ * - POST /api/files/upload/init -> creates Firestore file record, returns pathname (pdfs/YYYY/MM/<uuid>.ext)
+ * - uploadPresigned(pathname, file, { handleUploadUrl: '/api/blob/upload', ... }) 
+ *   -> calls /api/blob/upload which uses handleUploadPresigned + issueSignedToken (OIDC compatible)
+ *   -> browser PUTs directly to Blob via presigned URL (no token in flight)
+ * - POST /api/files/[id]/complete -> validates PDF header/trailer and activates file
+ */
 
 export function UploadModal({ onClose }: { onClose: () => void }) {
   const { toast } = useToast();
@@ -69,9 +69,11 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
       patch(item.key, { status: "hashing", error: null });
       const contentHash = await sha256Hex(item.file).catch(() => null);
       if (controller.signal.aborted) return;
+
       patch(item.key, { status: "authorizing" });
       const init = await apiFetch<{
         file: SerializedFile;
+        pathname: string;
         uploadUrl: string;
         uploadHeaders: Record<string, string>;
         duplicateOf: { id: string; originalName: string } | null;
@@ -86,15 +88,23 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
         }),
         signal: controller.signal,
       });
+
       if (controller.signal.aborted) return;
       patch(item.key, { status: "uploading", progress: 0, duplicateOf: init.duplicateOf, fileId: init.file.id });
-      await putWithProgress(
-        init.uploadUrl,
-        item.file,
-        init.uploadHeaders["Content-Type"] ?? item.file.type ?? "application/pdf",
-        (progress) => patch(item.key, { progress }),
-        controller.signal,
-      );
+
+      // OIDC-compatible client upload via @vercel/blob/client
+      // Uses /api/blob/upload which implements handleUploadPresigned
+      // Works with BOTH BLOB_READ_WRITE_TOKEN and OIDC (BLOB_STORE_ID + VERCEL_OIDC_TOKEN)
+      await uploadPresigned(init.pathname, item.file, {
+        access: "private",
+        handleUploadUrl: "/api/blob/upload",
+        clientPayload: JSON.stringify({ fileId: init.file.id, originalName: item.file.name }),
+        abortSignal: controller.signal,
+        onUploadProgress: ({ percentage }) => {
+          patch(item.key, { progress: Math.round(percentage) });
+        },
+      });
+
       if (controller.signal.aborted) return;
       patch(item.key, { status: "finalizing", progress: 100 });
       const completed = await apiFetch<{ file: SerializedFile; duplicateOf: { id: string; originalName: string } | null }>(
@@ -107,9 +117,20 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
         patch(item.key, { status: "error", error: "Upload cancelled." });
         return;
       }
+      // @vercel/blob/client throws BlobError with message "Failed to retrieve the client token" when
+      // handleUpload (not presigned) is used with OIDC. Our new route uses handleUploadPresigned so this
+      // should not happen, but we surface the message clearly.
+      const message =
+        error instanceof ClientApiError
+          ? error.message
+          : error instanceof Error
+            ? error.message.includes("Failed to retrieve the client token")
+              ? "Upload token generation failed (OIDC requires handleUploadPresigned). Please retry."
+              : error.message
+            : "Upload failed.";
       patch(item.key, {
         status: "error",
-        error: error instanceof ClientApiError ? error.message : error instanceof Error ? error.message : "Upload failed.",
+        error: message,
       });
     } finally {
       aborters.current.delete(item.key);
@@ -120,9 +141,6 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
     if (activeKey || activeStartRef.current) return;
     const next = items.find((item) => item.status === "queued");
     if (!next) return;
-    // Track the active queue item in state so completion always schedules the
-    // next item. The deferred start avoids a cascading render while preserving
-    // a synchronous ref guard against Strict Mode effect replays.
     activeStartRef.current = next.key;
     const timer = window.setTimeout(() => {
       setActiveKey(next.key);
@@ -199,7 +217,7 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
         >
           <UploadCloud className="h-8 w-8 text-ink-faint" />
           <p className="mt-2 text-sm font-medium text-ink">Drop files here or click to browse</p>
-          <p className="mt-0.5 text-xs text-ink-muted">Up to 10 files at a time · direct-to-storage upload</p>
+          <p className="mt-0.5 text-xs text-ink-muted">Up to 10 files at a time · direct-to-storage upload (OIDC)</p>
           <input ref={inputRef} type="file" multiple accept={ACCEPT} className="hidden" onChange={(event) => { if (event.target.files) addFiles(event.target.files); event.target.value = ""; }} />
         </div>
 
