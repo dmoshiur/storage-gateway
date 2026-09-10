@@ -102,6 +102,15 @@ describe("dual-token API credentials", () => {
     expect(recordApiRequestSafe).toHaveBeenCalledWith(created.keyId);
   });
 
+  it("accepts second-precision HMAC timestamps as well as milliseconds", async () => {
+    const created = await createApiKey("admin-1");
+    const timestamp = Math.floor(Date.now() / 1000);
+    const bodyHash = "a".repeat(64);
+    const signature = createHmac("sha256", created.keySecret).update(`${timestamp}:${bodyHash}`).digest("hex");
+    const recordId = await verifyApiSignature({ keyId: created.keyId, timestamp, signature, bodyHash });
+    expect(recordId).toBe(created.id);
+  });
+
   it("reports signature verification unavailable when no master key is configured", async () => {
     getMasterKey.mockReturnValue(null);
     const created = await createApiKey("admin-1");

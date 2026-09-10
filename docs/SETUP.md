@@ -103,14 +103,15 @@ openssl rand -base64 48
 
 Use one output for `INTEGRATION_API_KEY` and a different output for `CRON_SECRET`.
 
-## 5. Vercel deployment
+## 5. Vercel deployment (single deployment: dashboard + bridge + cron)
 
 1. Import the repository into Vercel.
 2. Add every variable in `.env.example` through **Settings → Environment Variables**. Scope values correctly to Development, Preview, and Production. Use different Firebase projects/buckets/secrets per environment when possible.
-3. Set `NEXT_PUBLIC_APP_URL` to the deployed gateway URL in each environment.
+3. Set `NEXT_PUBLIC_APP_URL` to the deployed app URL in each environment. The Storage Bridge is embedded in this same deployment — no second service is required. Optionally tune `AM_STORAGE_MAX_DOCUMENT_BYTES`, `AM_STORAGE_SIGNED_URL_EXPIRY_SECONDS`, and `CORS_ORIGINS` (all documented in `.env.example`).
 4. Deploy. Vercel uses the standard `npm run build` script.
 5. After deployment, open `/admin/login`, sign in using an admin custom claim / bootstrap email, and complete the smoke tests in [TESTING.md](TESTING.md).
 6. Set `CRON_SECRET` in the Vercel project. Vercel Cron discovers [`../vercel.json`](../vercel.json) and sends the matching Bearer authorization header to the daily cleanup route.
+7. On the gramunnayan.com **server**, set `AM_STORAGE_BRIDGE_URL` to this same deployed app URL and verify `GET <app-url>/api/v1/health` returns `"bridge": "ready"`.
 
 ### Preview deployment note
 

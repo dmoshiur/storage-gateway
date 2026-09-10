@@ -1,6 +1,8 @@
-# Render Blueprint for the AM Storage Bridge (FastAPI).
+# Render Blueprint for the OPTIONAL standalone AM Storage Bridge (FastAPI).
 #
-# This deploys ONLY the bridge. The Next.js gateway keeps running on Vercel.
+# New deployments do NOT need this: the bridge is embedded in the Next.js app
+# on Vercel, and gramunnayan.com calls the Vercel app URL directly. Only apply
+# this Blueprint if you explicitly want a separate external bridge host.
 # After the first deploy, copy the service's public URL (for example
 # https://am-storage-bridge.onrender.com, or your custom bridge domain) into:
 #   - the gateway:   NEXT_PUBLIC_BRIDGE_URL and BRIDGE_URL

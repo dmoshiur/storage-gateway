@@ -2,39 +2,33 @@ import { NextResponse } from "next/server";
 import { requestIdFrom } from "@/lib/api/response";
 
 /**
- * JSON diagnostic for requests that reach the Next.js gateway on a path that is
- * owned by the FastAPI bridge (for example `/api/v1/storage/upload`).
+ * JSON diagnostic for unknown `/api/v1/*` subpaths.
  *
- * The gateway does not parse document bytes itself. It exposes a compatibility
- * proxy at `/api/v1/storage/upload` that forwards to `BRIDGE_URL`; this helper
- * is returned when no bridge origin is configured (or when a caller hits a
- * `/api/v1/*` path that has no proxy). Returning a structured JSON response
- * (instead of the default Next.js HTML 404 page) makes a misconfigured
- * `AM_STORAGE_BRIDGE_URL` immediately actionable for callers.
+ * The Storage Bridge is embedded in this same deployment: integrations call
+ * `POST /api/v1/storage/upload` (multipart, up to ~4 MB), the presigned
+ * `POST /api/v1/storage/upload/init` → PUT → `POST /api/v1/storage/upload/complete`
+ * flow for larger documents, `GET /api/files*` for reads, and
+ * `GET /api/v1/health` for liveness. Anything else under `/api/v1/*` lands
+ * here with a structured JSON error instead of the default Next.js HTML 404.
  */
 export function bridgeRouteNotAtGateway(request: Request): NextResponse {
-  const publicBridgeUrl = (process.env.NEXT_PUBLIC_BRIDGE_URL ?? "")
-    .trim()
-    .replace(/\/+$/, "");
   const requestId = requestIdFrom(request);
-
-  const baseMessage =
-    "POST /api/v1/storage/upload is served by the AM Storage Bridge (FastAPI), not by this Next.js gateway. " +
-    "Send the upload to the FastAPI bridge origin, or configure the gateway's BRIDGE_URL / NEXT_PUBLIC_BRIDGE_URL " +
-    "so the gateway compatibility proxy can forward it.";
-  const message = publicBridgeUrl
-    ? `${baseMessage} The public bridge origin currently configured for the dashboard is ${publicBridgeUrl}. ` +
-      `If that value is this gateway origin, update NEXT_PUBLIC_BRIDGE_URL / BRIDGE_URL on the gateway and ` +
-      `AM_STORAGE_BRIDGE_URL on the integration server to the deployed FastAPI bridge origin.`
-    : `${baseMessage} No bridge origin is configured on this gateway. Deploy the FastAPI bridge and set ` +
-      `NEXT_PUBLIC_BRIDGE_URL (public) / BRIDGE_URL (server-side) / AM_STORAGE_BRIDGE_URL (integration server) to its origin.`;
-
+  let path = "";
+  try {
+    path = new URL(request.url).pathname;
+  } catch {
+    path = "";
+  }
   return NextResponse.json(
     {
       success: false,
       error: {
-        code: "BRIDGE_ENDPOINT_NOT_AT_GATEWAY",
-        message,
+        code: "UNKNOWN_BRIDGE_ROUTE",
+        message:
+          `No bridge route matches '${path || request.url}'. ` +
+          "The Storage Bridge runs in this same deployment: POST /api/v1/storage/upload for multipart uploads " +
+          "(up to ~4 MB), POST /api/v1/storage/upload/init then PUT then POST /api/v1/storage/upload/complete for " +
+          "larger documents, GET /api/files and GET /api/files/{id}/download for reads, and GET /api/v1/health for liveness.",
       },
       requestId,
     },

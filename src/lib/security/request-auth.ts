@@ -5,6 +5,7 @@ import { ApiError } from "@/lib/api/errors";
 import { can, type Capability } from "@/lib/auth/authorization";
 import { verifySessionCookie, SESSION_COOKIE_NAME } from "@/lib/auth/session";
 import { getRequiredSecret } from "@/lib/env";
+import { hasBridgeCredentialHeaders, requireBridgeCredential } from "@/lib/bridge/auth";
 import type { IntegrationActor, RequestActor, SessionActor } from "@/types/auth";
 
 function secureEqual(left: string, right: string): boolean {
@@ -53,6 +54,15 @@ export function requireIntegrationKey(request: Request): IntegrationActor {
 
 export async function requireReadActor(request: Request): Promise<RequestActor> {
   if (request.headers.get("x-storage-gateway-key")) return requireIntegrationKey(request);
+
+  // Embedded-bridge parity with the historical standalone bridge relay: the
+  // dashboard-managed dual-token / HMAC / legacy credential also authorizes
+  // read-only listing and download URLs. HMAC verification over an empty body
+  // hash matches the standalone bridge's GET handling (no request body).
+  if (hasBridgeCredentialHeaders(request)) {
+    await requireBridgeCredential(request);
+    return { uid: "website-integration", email: null, role: "viewer", type: "integration" };
+  }
 
   const cookie = request.headers.get("cookie")?.match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE_NAME}=([^;]+)`))?.[1];
   const actor = await verifySessionCookie(cookie);

@@ -1,12 +1,24 @@
-# AM Storage Company — Storage Bridge (FastAPI)
+# AM Storage Company — Storage Bridge (FastAPI, optional legacy)
 
-The **Storage Bridge** is the public, high-concurrency API boundary that
-gramunnayan.com uses to hand PDF/DOC/DOCX/TXT/PPT/PPTX documents to
+> **New deployments do not need this service.** The Storage Bridge is embedded
+> in the Next.js app itself (`POST /api/v1/storage/upload` on the same Vercel
+> deployment, plus a presigned init → PUT → complete flow for larger documents).
+> This standalone FastAPI bridge remains only for operators who explicitly want
+> a separate high-concurrency upload host. Everything below describes that
+> optional external deployment.
+
+The standalone **Storage Bridge** is a public, high-concurrency API boundary
+that gramunnayan.com can use to hand PDF/DOC/DOCX/TXT/PPT/PPTX documents to
 **AM Storage Company**. It runs as its own async FastAPI service (uvicorn) next
 to the AM Storage gateway (Next.js control plane + Firestore metadata +
-dashboard), and it is the only component that talks directly to the NGO site.
-Requests are authenticated with the dual-token API credential (key ID + secret,
+dashboard). Requests are authenticated with the dual-token API credential (key ID + secret,
 or an HMAC signature) issued by the dashboard.
+
+When this external bridge is used, point the gateway's `BRIDGE_URL` /
+`NEXT_PUBLIC_BRIDGE_URL` and the integration server's `AM_STORAGE_BRIDGE_URL`
+at the FastAPI origin, and verify `GET <bridge-origin>/health` returns
+`"bridge": "ready"`. Otherwise leave those variables unset and the embedded
+bridge serves all `/api/v1/*` traffic on the Vercel app itself.
 
 ```text
 gramunnayan.com (server)

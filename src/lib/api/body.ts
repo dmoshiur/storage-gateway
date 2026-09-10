@@ -3,7 +3,8 @@ import { ApiError } from "@/lib/api/errors";
 
 /**
  * Parses small JSON control-plane payloads with both declared-length and actual
- * stream limits. Document bytes are never accepted by this parser or a Vercel route.
+ * stream limits. Document bytes are never accepted by this parser; the embedded
+ * bridge parses multipart bodies separately with its own size discipline.
  */
 export async function parseJson<T extends z.ZodTypeAny>(
   request: Request,

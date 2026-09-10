@@ -46,7 +46,7 @@ Before production, use a dedicated test bucket and harmless test documents (PDF,
 8. Create an expired active test record only through a controlled test helper, then invoke cron dry-run and real cleanup. Confirm safety mode moves it to Trash and a failure on one stubbed object does not stop other records.
 9. Repeat with `trashEnabled: false` only in test, then restore the safe default afterward.
 10. Use the NGO website server (not browser) with `X-Storage-Gateway-Key`; verify read/download work, while Trash/settings/upload endpoints reject it.
-11. Bridge routing smoke test: start the FastAPI bridge, set the gateway's `NEXT_PUBLIC_BRIDGE_URL`/`BRIDGE_URL` to it, then `POST <gateway>/api/v1/storage/upload` and confirm the JSON response (for example `503 STORAGE_UNAVAILABLE` for the expected not-configured R2 state, never HTML 404). Also confirm `GET <gateway>/api/v1/storage/upload` returns the JSON `BRIDGE_ENDPOINT_NOT_AT_GATEWAY` diagnostic when `BRIDGE_URL` is unset.
+11. Embedded bridge smoke test (same deployment, no separate bridge server): `GET <app>/api/v1/health` returns `{"status":"ok","bridge":"ready","mode":"embedded",...}`. `POST <app>/api/v1/storage/upload` with a dual-token credential and a small PDF returns `201` with `{ file, url }`; without a credential it returns JSON `401 INVALID_API_KEY` (never HTML). `GET <app>/api/v1/storage/upload` returns JSON `405 METHOD_NOT_ALLOWED`, an unknown `/api/v1/*` subpath returns JSON `404 UNKNOWN_BRIDGE_ROUTE`, and a document over ~4 MB goes through `POST .../upload/init` → `PUT` to R2 → `POST .../upload/complete` and appears in the dashboard with a Success entry in API Upload Activity.
 
 ## Accessibility and mobile verification
 
