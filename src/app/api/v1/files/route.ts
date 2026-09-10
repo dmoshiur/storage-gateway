@@ -16,7 +16,7 @@ export async function GET(request: Request) {
  */
 export async function POST(request: Request) {
   return apiRoute(request, async (requestId) =>
-    withBridgeCors(await handleBridgeDirectUpload(request, requestId, "files:upload"), request),
+    withBridgeCors(await handleBridgeDirectUpload(request, requestId, { requiredScope: "files:upload", allowBearer: true }), request),
   { route: "v1/files/upload" });
 }
 

@@ -29,7 +29,7 @@ export async function GET(request: Request) {
         bridge: "ready",
         mode: "embedded",
         version: appVersion,
-        auth: "dual-token|hmac|legacy",
+        auth: "bearer|dual-token|hmac|legacy",
         blobConfigured: blobConfigured(),
       },
       { status: 200, headers: { "X-Request-Id": requestId, "Cache-Control": "no-store" } },

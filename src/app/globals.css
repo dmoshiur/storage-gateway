@@ -56,6 +56,7 @@ button:not(:disabled), [role="button"]:not([aria-disabled="true"]) { cursor: poi
   .card-pad { @apply rounded-xl border border-line bg-surface-raised p-5; }
   .panel-title { @apply text-sm font-semibold text-ink; }
   .panel-sub { @apply mt-0.5 text-[13px] text-ink-muted; }
+  .section-title { @apply text-sm font-semibold text-ink; }
 
   /* ---------- buttons ---------- */
   .btn { @apply inline-flex min-h-[36px] items-center justify-center gap-2 whitespace-nowrap rounded-lg px-3.5 text-[13px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50; }
@@ -100,7 +101,9 @@ button:not(:disabled), [role="button"]:not([aria-disabled="true"]) { cursor: poi
   .nav-section { @apply px-2.5 pb-1 pt-4 text-[11px] font-semibold uppercase tracking-wider text-ink-faint first:pt-1; }
 
   /* ---------- overlays ---------- */
-  .overlay { @apply fixed inset-0 z-50 bg-slate-950/50 backdrop-blur-[2px] animate-fade-in; }
+  /* Subtle dim, no blur: the app behind a dialog stays visually understandable. */
+  .overlay { @apply fixed inset-0 z-50 animate-fade-in; background: rgba(2, 6, 23, 0.4); }
+  .dark .overlay { background: rgba(0, 0, 0, 0.5); }
   .dialog-panel { @apply card w-full max-w-lg p-6 shadow-pop animate-slide-up dark:shadow-popdark; }
   .drawer-panel { @apply fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col border-l border-line bg-surface-raised shadow-pop animate-slide-in-right dark:shadow-popdark; }
 

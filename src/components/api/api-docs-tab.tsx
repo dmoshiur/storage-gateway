@@ -1,160 +1,213 @@
 "use client";
 
-import { CodeBlock } from "@/components/ui/data";
+import { useState } from "react";
+import { ChevronDown, ChevronUp } from "lucide-react";
+import { V1_ENDPOINTS, endpointUrl, type EndpointDef } from "@/lib/api/endpoints";
+import { CodeBlock, CopyButton } from "@/components/ui/data";
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="card-pad space-y-3">
-      <h2 className="section-title">{title}</h2>
-      {children}
-    </section>
-  );
+function MethodBadge({ method }: { method: EndpointDef["method"] }) {
+  const tone = method === "GET" ? "badge-info" : method === "POST" ? "badge-success" : method === "PATCH" ? "badge-warning" : "badge-danger";
+  return <span className={`${tone} font-mono`}>{method}</span>;
 }
 
-function Endpoint({ method, path, scopes, description, example }: {
-  method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
-  path: string;
-  scopes: string;
-  description: string;
-  example?: string;
-}) {
-  const tone = method === "GET" || method === "DELETE"
-    ? "badge-neutral"
-    : method === "POST" ? "badge-success" : "badge-info";
+function curlExample(baseUrl: string, def: EndpointDef): string {
+  const url = endpointUrl(baseUrl, def).replace(":id", "FILE_ID");
+  const lines = [`curl -X ${def.method} "${url}"`, `  -H "Authorization: Bearer ng_live_YOUR_API_KEY"`];
+  if (def.requestBody?.includes("multipart/form-data")) {
+    lines.push(`  -F "file=@./report.pdf"`);
+  } else if (def.method === "POST" || def.method === "PATCH") {
+    lines.push(`  -H "Content-Type: application/json"`);
+    lines.push(`  -d '${(def.requestBody ?? "{}").replace(/\n/g, " ").replace(/  +/g, " ")}'`);
+  }
+  return lines.join(" \\\n");
+}
+
+function jsExample(baseUrl: string, def: EndpointDef): string {
+  const url = endpointUrl(baseUrl, def).replace(":id", "FILE_ID");
+  const method = def.method;
+  if (def.requestBody?.includes("multipart/form-data")) {
+    return `const form = new FormData();
+form.append("file", fileInput.files[0]);
+
+const res = await fetch("${url}", {
+  method: "${method}",
+  headers: { Authorization: "Bearer ng_live_YOUR_API_KEY" },
+  body: form,
+});
+const json = await res.json();`;
+  }
+  const body = def.method === "POST" || def.method === "PATCH" ? `\n  body: JSON.stringify(${def.requestBody ?? "{}"}),` : "";
+  return `const res = await fetch("${url}", {
+  method: "${method}",
+  headers: {
+    Authorization: "Bearer ng_live_YOUR_API_KEY",
+    "Content-Type": "application/json",
+  },${body}
+});
+const json = await res.json();`;
+}
+
+function EndpointCard({ def, baseUrl }: { def: EndpointDef; baseUrl: string }) {
+  const [open, setOpen] = useState(false);
+  const url = endpointUrl(baseUrl, def);
+
   return (
-    <div className="rounded-lg border border-line p-3.5">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className={`${tone} font-mono`}>{method}</span>
-        <code className="font-mono text-[13px] text-ink">{path}</code>
-      </div>
-      <p className="mt-1.5 text-[13px] text-ink-muted">{description} <span className="font-mono text-xs">Scopes: {scopes}</span></p>
-      {example && <div className="mt-2"><CodeBlock code={example} /></div>}
+    <div className="rounded-lg border border-line">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 px-3.5 py-3 text-left hover:bg-surface-sunken"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+      >
+        <MethodBadge method={def.method} />
+        <code className="min-w-0 flex-1 truncate font-mono text-[13px] text-ink">{def.path}</code>
+        {def.scope && <span className="hidden font-mono text-[11px] text-ink-faint sm:inline">{def.scope}</span>}
+        {open ? <ChevronUp className="h-4 w-4 shrink-0 text-ink-faint" /> : <ChevronDown className="h-4 w-4 shrink-0 text-ink-faint" />}
+      </button>
+      {open && (
+        <div className="space-y-4 border-t border-line px-3.5 py-4">
+          <p className="text-[13px] leading-6 text-ink-muted">{def.description}</p>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wider text-ink-faint">Endpoint URL</span>
+            <code className="font-mono text-xs text-ink">{url}</code>
+            <CopyButton value={url} label="Copy endpoint" />
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wider text-ink-faint">Authentication</p>
+              <p className="mt-1 font-mono text-xs text-ink">Authorization: Bearer {"<API_KEY>"}</p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wider text-ink-faint">Required scope</p>
+              <p className="mt-1 font-mono text-xs text-ink">{def.scope ?? "— (unauthenticated)"}</p>
+            </div>
+          </div>
+
+          {def.params.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wider text-ink-faint">Parameters</p>
+              <div className="mt-1.5 overflow-x-auto rounded-lg border border-line">
+                <table className="w-full border-collapse text-left text-xs">
+                  <thead className="bg-surface-sunken">
+                    <tr>
+                      <th className="px-2.5 py-1.5 font-mono font-medium text-ink-muted">Name</th>
+                      <th className="px-2.5 py-1.5 font-mono font-medium text-ink-muted">In</th>
+                      <th className="px-2.5 py-1.5 font-mono font-medium text-ink-muted">Required</th>
+                      <th className="px-2.5 py-1.5 font-medium text-ink-muted">Description</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-line">
+                    {def.params.map((param) => (
+                      <tr key={param.name}>
+                        <td className="px-2.5 py-1.5 font-mono text-ink">{param.name}</td>
+                        <td className="px-2.5 py-1.5 text-ink-muted">{param.in}</td>
+                        <td className="px-2.5 py-1.5 text-ink-muted">{param.required ? "yes" : "no"}</td>
+                        <td className="px-2.5 py-1.5 text-ink-muted">{param.description}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {def.requestBody && (
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wider text-ink-faint">Request body</p>
+              <div className="mt-1.5"><CodeBlock code={def.requestBody} language="request" /></div>
+            </div>
+          )}
+
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wider text-ink-faint">Response</p>
+            <div className="mt-1.5"><CodeBlock code={def.responseExample} language="json" /></div>
+          </div>
+
+          {def.errorResponses.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wider text-ink-faint">Error responses</p>
+              <div className="mt-1.5 space-y-1">
+                {def.errorResponses.map((err) => (
+                  <p key={err.code} className="text-xs text-ink-muted">
+                    <span className="badge-danger font-mono">{err.status}</span>{" "}
+                    <span className="font-mono">{err.code}</span> — {err.description}
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="flex flex-wrap gap-2">
+            <CopyButton value={curlExample(baseUrl, def)} label="Copy cURL" />
+            <button type="button" className="btn-secondary btn-sm" onClick={() => navigator.clipboard.writeText(jsExample(baseUrl, def))}>Copy JavaScript</button>
+          </div>
+
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wider text-ink-faint">cURL</p>
+            <div className="mt-1.5"><CodeBlock code={curlExample(baseUrl, def)} language="bash" /></div>
+          </div>
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wider text-ink-faint">JavaScript</p>
+            <div className="mt-1.5"><CodeBlock code={jsExample(baseUrl, def)} language="javascript" /></div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-export function ApiDocsTab() {
+export function ApiDocsTab({ baseUrl }: { baseUrl: string }) {
+  const origin = baseUrl || "https://YOUR-PRODUCTION-DOMAIN";
+
   return (
     <div className="space-y-4">
-      <Section title="Authentication">
+      <section className="card-pad space-y-3">
+        <h2 className="section-title">Authentication</h2>
         <p className="text-[13px] leading-6 text-ink-muted">
-          Send your key ID and secret with every request, either as headers or query parameters. All keys are
-          scoped; requests using a scope the key does not have are rejected with <code className="font-mono text-xs">403</code>.
+          Every request to <code className="font-mono text-xs">/api/v1</code> is authenticated with an API key sent as a bearer token.
+          Keys are scoped; a request that uses a scope the key does not have receives <code className="font-mono text-xs">403</code>.
         </p>
         <CodeBlock
-          code={`# Headers (recommended)
-curl "https://cloud.your-domain.org/api/bridge/files" \\
-  -H "X-AM-Storage-Key-Id: YOUR_KEY_ID" \\
-  -H "X-AM-Storage-Key-Secret: YOUR_KEY_SECRET"
-
-# Or query parameters
-curl "https://cloud.your-domain.org/api/bridge/files?apiKeyId=YOUR_KEY_ID&apiKeySecret=YOUR_KEY_SECRET"`}
+          code={`curl "${origin}/api/v1/files" \\
+  -H "Authorization: Bearer ng_live_YOUR_API_KEY"`}
         />
         <p className="text-[13px] leading-6 text-ink-muted">
-          Secrets are write-only: they can be created and rotated but never viewed again. Failed authentication
-          is rate-limited, waits <code className="font-mono text-xs">429</code> when you exceed limits, and returns
-          standard JSON errors: <code className="font-mono text-xs">{"{ error: string, message?: string }"}</code>.
+          Secrets are write-only: they can be created and rotated but never viewed again. Failed authentication is
+          rate-limited, and every error response includes a <code className="font-mono text-xs">requestId</code> for
+          production debugging.
         </p>
-      </Section>
+      </section>
 
-      <Section title="Endpoints">
-        <div className="space-y-3">
-          <Endpoint
-            method="GET" path="/api/bridge/files" scopes="files:read"
-            description="List active documents. Supports search, category, tag, sort, page, and pageSize."
-            example={`curl "https://cloud.your-domain.org/api/bridge/files?search=budget&category=Finance&page=1&pageSize=20" \\
-  -H "X-AM-Storage-Key-Id: KEY_ID" -H "X-AM-Storage-Key-Secret: SECRET"`}
-          />
-          <Endpoint
-            method="POST" path="/api/bridge/files" scopes="files:write"
-            description="Add a document by URL (PDF only, 50 MB max) or by base64 data."
-          />
-          <Endpoint
-            method="GET" path="/api/bridge/files?id=…" scopes="files:read"
-            description="Fetch one document's metadata. Use download or preview for bytes."
-          />
-          <Endpoint
-            method="PATCH" path="/api/bridge/files?id=…" scopes="files:write"
-            description="Update title, description, category, tags, or retention policy."
-          />
-          <Endpoint
-            method="DELETE" path="/api/bridge/files?id=…" scopes="files:delete"
-            description="Move a document to Trash. Add ?permanent=true with files:permanent_delete to destroy it."
-          />
-          <Endpoint
-            method="GET" path="/api/bridge/files/download?id=…" scopes="files:read"
-            description="Stream the PDF bytes with an attachment filename."
-          />
-          <Endpoint
-            method="GET" path="/api/bridge/files/preview?id=…" scopes="files:read"
-            description="Get a short-lived signed preview URL for embedding in an iframe."
-          />
-          <Endpoint
-            method="GET" path="/api/bridge/files/download-link?id=…&ttlSeconds=3600" scopes="files:read"
-            description="Mint a scoped, temporary download link (60 s – 7 days)."
-          />
-          <Endpoint
-            method="GET" path="/api/bridge/files/favorite" scopes="favorites:read"
-            description="List favorite documents for the calling context."
-          />
-          <Endpoint
-            method="POST" path="/api/bridge/files/favorite?id=…" scopes="favorites:write"
-            description="Add or remove a favorite with { favorite: true | false }."
-          />
-          <Endpoint
-            method="GET" path="/api/bridge/categories" scopes="files:read"
-            description="List categories with file counts."
-          />
-          <Endpoint
-            method="POST" path="/api/bridge/upload" scopes="files:upload"
-            description="Three-step direct browser upload: init → PUT to signed URL → complete. Multiparts never touch this server."
-            example={`# 1. Init — returns uploadId + signedUrl
-curl -X POST "https://cloud.your-domain.org/api/bridge/upload" \\
-  -H "X-AM-Storage-Key-Id: KEY_ID" -H "X-AM-Storage-Key-Secret: SECRET" \\
-  -H "Content-Type: application/json" \\
-  -d '{"action":"init","fileName":"report.pdf","fileSize":102400,"contentType":"application/pdf"}'
-
-# 2. PUT the raw bytes straight to the returned URL
-curl -X PUT "<signedUrl>" -H "Content-Type: application/pdf" --data-binary "@report.pdf"
-
-# 3. Complete — validates and registers the document
-curl -X POST "https://cloud.your-domain.org/api/bridge/upload" \\
-  -H "X-AM-Storage-Key-Id: KEY_ID" -H "X-AM-Storage-Key-Secret: SECRET" \\
-  -H "Content-Type: application/json" \\
-  -d '{"action":"complete","uploadId":"…","title":"Annual report"}'`}
-          />
+      <section className="card-pad space-y-3">
+        <h2 className="section-title">Endpoints</h2>
+        <p className="text-[13px] text-ink-muted">
+          Only endpoints that are implemented and deployed are listed here.
+        </p>
+        <div className="space-y-2">
+          {V1_ENDPOINTS.map((def) => (
+            <EndpointCard key={`${def.method} ${def.path}`} def={def} baseUrl={origin} />
+          ))}
         </div>
-      </Section>
+      </section>
 
-      <Section title="Versioned REST API (/api/v1)">
-        <p className="text-[13px] leading-6 text-ink-muted">
-          A RESTful alternative to the bridge with HMAC-signed requests: each request carries
-          <code className="font-mono text-xs"> X-AM-Key-Id</code>, <code className="font-mono text-xs">X-AM-Timestamp</code>,
-          and <code className="font-mono text-xs">X-AM-Signature</code> (HMAC-SHA256 of method, path, timestamp, and body over the secret).
-        </p>
-        <div className="space-y-3">
-          <Endpoint method="GET" path="/api/v1/files" scopes="files:read" description="Cursor-paginated document listing." />
-          <Endpoint method="POST" path="/api/v1/files" scopes="files:write" description="Register a document from a signed upload or URL." />
-          <Endpoint method="GET" path="/api/v1/files/{id}" scopes="files:read" description="Fetch one document." />
-          <Endpoint method="PATCH" path="/api/v1/files/{id}" scopes="files:write" description="Update metadata or retention." />
-          <Endpoint method="DELETE" path="/api/v1/files/{id}" scopes="files:delete" description="Trash, or permanently destroy with files:permanent_delete." />
-        </div>
-      </Section>
+      <section className="card-pad space-y-3">
+        <h2 className="section-title">Example: search</h2>
+        <p className="text-[13px] text-ink-muted">Search active files by free text:</p>
+        <CodeBlock
+          code={`curl "${origin}/api/v1/files?search=annual-report" \\
+  -H "Authorization: Bearer ng_live_YOUR_API_KEY"`}
+        />
+      </section>
 
-      <Section title="Scopes & rate limits">
+      <section className="card-pad space-y-3">
+        <h2 className="section-title">Scopes</h2>
         <p className="text-[13px] leading-6 text-ink-muted">
-          Available scopes: <code className="font-mono text-xs">files:read · files:write · files:upload · files:delete · files:permanent_delete · favorites:read · favorites:write · categories:manage · tags:manage · webhooks:manage · audit:read</code>.
-          Requests are rate-limited per key; repeated failures lock the key out briefly to slow brute-force attacks.
+          Available scopes: <code className="font-mono text-xs">files:read · files:upload · files:update · files:download · files:delete · metadata:read · metadata:write</code>.
+          Assign the smallest set an integration needs.
         </p>
-      </Section>
-
-      <Section title="Webhooks">
-        <p className="text-[13px] leading-6 text-ink-muted">
-          Subscribe to <code className="font-mono text-xs">file.uploaded · file.updated · file.trashed · file.restored · file.deleted · file.expiring</code> from the
-          Webhooks page. Payloads are posted as JSON with an <code className="font-mono text-xs">X-Webhook-Signature</code> HMAC header and
-          <code className="font-mono text-xs"> X-Webhook-Event</code> name, with exponential-backoff retries on failure.
-        </p>
-      </Section>
+      </section>
     </div>
   );
 }

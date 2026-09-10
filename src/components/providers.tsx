@@ -4,6 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useRouter } from "next/navigation";
 import { CheckCircle2, Info, LoaderCircle, TriangleAlert, X, XCircle } from "lucide-react";
 import { apiFetch } from "@/lib/client/api";
+import { useOverlayBehavior } from "@/components/ui/overlays";
 import type { Role } from "@/types/auth";
 
 /* ---------------- theme ---------------- */
@@ -32,14 +33,23 @@ function applyTheme(theme: Theme): "light" | "dark" {
 
 export type ToastTone = "success" | "error" | "warning" | "info" | "loading";
 
+export interface ToastOptions {
+  /** Request id shown with error toasts for production debugging. */
+  requestId?: string;
+  /** Optional retry handler rendered as a button on the toast. */
+  retry?: () => void;
+}
+
 interface Toast {
   id: number;
   tone: ToastTone;
   message: string;
+  requestId?: string;
+  retry?: () => void;
 }
 
 const ToastContext = createContext<{
-  toast: (message: string, tone?: ToastTone) => number;
+  toast: (message: string, tone?: ToastTone, options?: ToastOptions) => number;
   dismiss: (id: number) => void;
 }>({ toast: () => 0, dismiss: () => undefined });
 
@@ -80,6 +90,10 @@ export function useConfirm() {
   return useContext(ConfirmContext);
 }
 
+interface ConfirmState extends ConfirmOptions {
+  resolve: (value: boolean) => void;
+}
+
 /* ---------------- session ---------------- */
 
 export interface Session {
@@ -98,6 +112,58 @@ export function useSession() {
   return useContext(SessionContext);
 }
 
+/* ---------------- confirm dialog (focus-managed) ---------------- */
+
+function ConfirmDialog({ state, onResolve }: { state: ConfirmOptions; onResolve: (value: boolean) => void }) {
+  const [input, setInput] = useState("");
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useOverlayBehavior({ onClose: () => onResolve(false) });
+  const confirmed = Boolean(state.requireText && input === state.requireText);
+
+  // Focus the confirmation control as soon as the dialog opens.
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      if (state.requireText) panelRef.current?.querySelector<HTMLInputElement>("input")?.focus();
+      else confirmRef.current?.focus();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [state.requireText, panelRef]);
+
+  return (
+    <div className="fixed inset-0 z-[90] grid place-items-center p-4" role="alertdialog" aria-modal="true" aria-label={state.title}>
+      <div className="overlay" onClick={() => onResolve(false)} aria-hidden="true" />
+      <div ref={panelRef} tabIndex={-1} className="dialog-panel relative">
+        <h2 className="text-[15px] font-semibold text-ink">{state.title}</h2>
+        {state.description && <p className="mt-1.5 text-sm leading-6 text-ink-muted">{state.description}</p>}
+        {state.requireText && (
+          <label className="mt-4 block">
+            <span className="field-label">Type <span className="mono font-semibold">{state.requireText}</span> to confirm</span>
+            <input
+              className="field-input mono"
+              value={input}
+              autoComplete="off"
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Enter" && confirmed) onResolve(true); }}
+            />
+          </label>
+        )}
+        <div className="mt-5 flex justify-end gap-2.5">
+          <button type="button" className="btn-secondary" onClick={() => onResolve(false)}>Cancel</button>
+          <button
+            ref={confirmRef}
+            type="button"
+            disabled={Boolean(state.requireText && !confirmed)}
+            className={state.tone === "danger" ? "btn-danger" : "btn-primary"}
+            onClick={() => onResolve(true)}
+          >
+            {state.confirmLabel ?? "Confirm"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- provider ---------------- */
 
 export function Providers({ children }: { children: ReactNode }) {
@@ -105,8 +171,7 @@ export function Providers({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>("system");
   const [resolved, setResolved] = useState<"light" | "dark">("light");
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [confirmState, setConfirmState] = useState<(ConfirmOptions & { resolve: (value: boolean) => void }) | null>(null);
-  const [confirmInput, setConfirmInput] = useState("");
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
   const toastId = useRef(0);
@@ -138,28 +203,20 @@ export function Providers({ children }: { children: ReactNode }) {
     setToasts((current) => current.filter((toast) => toast.id !== id));
   }, []);
 
-  const toast = useCallback((message: string, tone: ToastTone = "success") => {
+  const toast = useCallback((message: string, tone: ToastTone = "success", options: ToastOptions = {}) => {
     toastId.current += 1;
     const id = toastId.current;
-    setToasts((current) => [...current.slice(-3), { id, tone, message }]);
+    setToasts((current) => [...current.slice(-3), { id, tone, message, requestId: options.requestId, retry: options.retry }]);
     if (tone !== "loading") {
       window.setTimeout(() => {
         setToasts((current) => current.filter((item) => item.id !== id));
-      }, tone === "error" ? 6000 : 4000);
+      }, tone === "error" ? 9000 : 5000);
     }
     return id;
   }, []);
 
   const confirm = useCallback((options: ConfirmOptions) => {
-    setConfirmInput("");
     return new Promise<boolean>((resolve) => setConfirmState({ ...options, resolve }));
-  }, []);
-
-  const closeConfirm = useCallback((value: boolean) => {
-    setConfirmState((current) => {
-      current?.resolve(value);
-      return null;
-    });
   }, []);
 
   const loadSession = useCallback(() => {
@@ -198,7 +255,21 @@ export function Providers({ children }: { children: ReactNode }) {
                 return (
                   <div key={item.id} role="status" className="card pointer-events-auto flex items-start gap-2.5 p-3.5 shadow-pop animate-slide-up dark:shadow-popdark">
                     <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${TOAST_COLOR[item.tone]} ${item.tone === "loading" ? "animate-spin" : ""}`} />
-                    <p className="flex-1 text-[13px] font-medium leading-5 text-ink">{item.message}</p>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[13px] font-medium leading-5 text-ink">{item.message}</p>
+                      {item.requestId && (
+                        <p className="mt-0.5 font-mono text-[11px] text-ink-faint">Request ID: {item.requestId}</p>
+                      )}
+                      {item.retry && item.tone === "error" && (
+                        <button
+                          type="button"
+                          className="mt-1.5 inline-flex items-center gap-1 rounded-md bg-red-500/10 px-2 py-1 text-xs font-semibold text-red-600 transition-colors hover:bg-red-500/20 dark:text-red-400"
+                          onClick={() => { dismiss(item.id); item.retry?.(); }}
+                        >
+                          Retry
+                        </button>
+                      )}
+                    </div>
                     <button type="button" aria-label="Dismiss notification" onClick={() => dismiss(item.id)} className="-mr-1 -mt-1 rounded-md p-1 text-ink-faint hover:text-ink">
                       <X className="h-4 w-4" />
                     </button>
@@ -208,38 +279,13 @@ export function Providers({ children }: { children: ReactNode }) {
             </div>
             {/* confirm dialog */}
             {confirmState && (
-              <div className="fixed inset-0 z-[90] grid place-items-center p-4" role="alertdialog" aria-modal="true" aria-label={confirmState.title}>
-                <div className="overlay" onClick={() => closeConfirm(false)} />
-                <div className="dialog-panel relative">
-                  <h2 className="text-[15px] font-semibold text-ink">{confirmState.title}</h2>
-                  {confirmState.description && <p className="mt-1.5 text-sm leading-6 text-ink-muted">{confirmState.description}</p>}
-                  {confirmState.requireText && (
-                    <label className="mt-4 block">
-                      <span className="field-label">Type <span className="mono font-semibold">{confirmState.requireText}</span> to confirm</span>
-                      <input
-                        autoFocus
-                        className="field-input mono"
-                        value={confirmInput}
-                        autoComplete="off"
-                        onChange={(event) => setConfirmInput(event.target.value)}
-                        onKeyDown={(event) => { if (event.key === "Enter" && confirmInput === confirmState.requireText) closeConfirm(true); }}
-                      />
-                    </label>
-                  )}
-                  <div className="mt-5 flex justify-end gap-2.5">
-                    <button type="button" className="btn-secondary" onClick={() => closeConfirm(false)}>Cancel</button>
-                    <button
-                      type="button"
-                      autoFocus={!confirmState.requireText}
-                      disabled={Boolean(confirmState.requireText && confirmInput !== confirmState.requireText)}
-                      className={confirmState.tone === "danger" ? "btn-danger" : "btn-primary"}
-                      onClick={() => closeConfirm(true)}
-                    >
-                      {confirmState.confirmLabel ?? "Confirm"}
-                    </button>
-                  </div>
-                </div>
-              </div>
+              <ConfirmDialog
+                state={confirmState}
+                onResolve={(value) => {
+                  confirmState.resolve(value);
+                  setConfirmState(null);
+                }}
+              />
             )}
           </SessionContext.Provider>
         </ConfirmContext.Provider>

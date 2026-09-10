@@ -12,6 +12,7 @@ const BRIDGE_CORS_ALLOW_HEADERS = [
   "X-AM-Storage-Key-Secret",
   "X-AM-Storage-Signature",
   "X-AM-Storage-Timestamp",
+  "Authorization",
   "Content-Type",
   "X-Request-Id",
 ].join(", ");

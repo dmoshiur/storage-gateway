@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArchiveRestore, Download, Eye, Heart, Link2, Pencil, Trash2 } from "lucide-react";
 import { useConfirm, useSession, useToast } from "@/components/providers";
-import { apiFetch, ClientApiError } from "@/lib/client/api";
+import { apiErrorOptions, apiFetch } from "@/lib/client/api";
 import type { SerializedFile } from "@/types/file";
 import { formatRetention } from "@/utils/format";
 
@@ -43,11 +43,11 @@ export function useFileActions(refresh: () => void) {
   const canManage = session?.role === "admin" || session?.role === "editor";
   const canDestroy = session?.role === "admin";
 
-  const preview = useCallback((file: SerializedFile) => {
+  const preview = (file: SerializedFile) => {
     router.push(`/admin/files?preview=${file.id}`);
-  }, [router]);
+  };
 
-  const download = useCallback(async (file: SerializedFile) => {
+  const download = async (file: SerializedFile) => {
     try {
       const data = await apiFetch<{ url: string }>(`/api/files/${file.id}/download`);
       const link = document.createElement("a");
@@ -59,21 +59,23 @@ export function useFileActions(refresh: () => void) {
       link.remove();
       toast("Download started.");
     } catch (error) {
-      toast(error instanceof ClientApiError ? error.message : "Download failed.", "error");
+      const opts = apiErrorOptions(error, "Download failed.");
+      toast(opts.message, "error", { requestId: opts.requestId, retry: () => void download(file) });
     }
-  }, [toast]);
+  };
 
-  const copyLink = useCallback(async (file: SerializedFile) => {
+  const copyLink = async (file: SerializedFile) => {
     try {
       const data = await apiFetch<{ url: string; expiresAt: string }>(`/api/files/${file.id}/download?disposition=inline`);
       await navigator.clipboard.writeText(data.url);
       toast("Temporary link copied. It expires soon.");
-    } catch {
-      toast("Could not create a temporary link.", "error");
+    } catch (error) {
+      const opts = apiErrorOptions(error, "Could not create a temporary link.");
+      toast(opts.message, "error", { requestId: opts.requestId, retry: () => void copyLink(file) });
     }
-  }, [toast]);
+  };
 
-  const toggleFavorite = useCallback(async (file: SerializedFile) => {
+  const toggleFavorite = async (file: SerializedFile) => {
     try {
       await apiFetch(`/api/files/${file.id}/favorite`, {
         method: "POST",
@@ -82,11 +84,12 @@ export function useFileActions(refresh: () => void) {
       toast(file.isFavorite ? "Removed from favorites." : "Added to favorites.");
       refresh();
     } catch (error) {
-      toast(error instanceof ClientApiError ? error.message : "Update failed.", "error");
+      const opts = apiErrorOptions(error, "Update failed.");
+      toast(opts.message, "error", { requestId: opts.requestId, retry: () => void toggleFavorite(file) });
     }
-  }, [toast, refresh]);
+  };
 
-  const trash = useCallback(async (file: SerializedFile) => {
+  const trash = async (file: SerializedFile) => {
     const ok = await confirm({
       title: "Move to Trash",
       description: `“${displayName(file)}” will be moved to Trash. It stays recoverable until its Trash retention expires.`,
@@ -98,21 +101,23 @@ export function useFileActions(refresh: () => void) {
       toast("File moved to Trash.");
       refresh();
     } catch (error) {
-      toast(error instanceof ClientApiError ? error.message : "Move to Trash failed.", "error");
+      const opts = apiErrorOptions(error, "Move to Trash failed.");
+      toast(opts.message, "error", { requestId: opts.requestId, retry: () => void trash(file) });
     }
-  }, [confirm, toast, refresh]);
+  };
 
-  const restore = useCallback(async (file: SerializedFile) => {
+  const restore = async (file: SerializedFile) => {
     try {
       await apiFetch(`/api/files/${file.id}/restore`, { method: "POST" });
       toast("File restored.");
       refresh();
     } catch (error) {
-      toast(error instanceof ClientApiError ? error.message : "Restore failed.", "error");
+      const opts = apiErrorOptions(error, "Restore failed.");
+      toast(opts.message, "error", { requestId: opts.requestId, retry: () => void restore(file) });
     }
-  }, [toast, refresh]);
+  };
 
-  const destroy = useCallback(async (file: SerializedFile) => {
+  const destroy = async (file: SerializedFile) => {
     const ok = await confirm({
       title: "Delete permanently?",
       description: `“${displayName(file)}” and its private stored bytes will be permanently deleted. This action cannot be undone.`,
@@ -129,9 +134,10 @@ export function useFileActions(refresh: () => void) {
       toast("File permanently deleted.");
       refresh();
     } catch (error) {
-      toast(error instanceof ClientApiError ? error.message : "Permanent deletion failed.", "error");
+      const opts = apiErrorOptions(error, "Permanent deletion failed.");
+      toast(opts.message, "error", { requestId: opts.requestId, retry: () => void destroy(file) });
     }
-  }, [confirm, toast, refresh]);
+  };
 
   return { preview, download, copyLink, toggleFavorite, trash, restore, destroy, canManage, canDestroy };
 }

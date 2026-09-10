@@ -26,17 +26,9 @@ const collection = () => getAdminDb().collection("apiKeys");
 export const API_KEY_ID_PREFIX = "am_store_live_";
 export const API_SECRET_PREFIX = "am_sec_live_";
 
-/** Granular scopes enforced on the versioned external API (`/api/v1/*`). */
-export const API_SCOPES = [
-  "files:read",
-  "files:upload",
-  "files:update",
-  "files:delete",
-  "files:download",
-  "metadata:read",
-  "metadata:write",
-] as const;
-export type ApiScope = (typeof API_SCOPES)[number];
+import { API_SCOPES, type ApiScope } from "@/lib/security/scopes";
+
+export { API_SCOPES, type ApiScope };
 /** Legacy and static credentials predate scopes and retain full access. */
 export const FULL_API_SCOPES: readonly ApiScope[] = API_SCOPES;
 /** Signed requests outside this clock-skew window are rejected. */

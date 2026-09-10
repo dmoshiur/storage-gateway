@@ -220,6 +220,15 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
                   {item.status === "done" && "Uploaded and verified."}
                   {item.status === "error" && <span className="text-red-600 dark:text-red-400">{item.error}</span>}
                 </p>
+                {item.status === "error" && (
+                  <button
+                    type="button"
+                    className="btn-secondary btn-sm mt-1.5"
+                    onClick={() => patch(item.key, { status: "queued", progress: 0, error: null })}
+                  >
+                    Retry upload
+                  </button>
+                )}
                 {item.duplicateOf && item.status === "done" && (
                   <p className="mt-1.5 flex items-start gap-1.5 rounded-md bg-amber-500/10 px-2 py-1.5 text-xs text-amber-700 dark:text-amber-300">
                     <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />

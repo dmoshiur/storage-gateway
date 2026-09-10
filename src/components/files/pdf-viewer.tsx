@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Download, ExternalLink, LoaderCircle, Maximize2, Minimize2, RotateCw, X } from "lucide-react";
 import { useToast } from "@/components/providers";
+import { useOverlayBehavior } from "@/components/ui/overlays";
 import { apiFetch, ClientApiError } from "@/lib/client/api";
 import type { SerializedFile } from "@/types/file";
 import { displayName } from "@/components/files/file-helpers";
@@ -35,17 +36,7 @@ export function PdfViewer({ file, onClose }: { file: SerializedFile; onClose: ()
     void Promise.resolve().then(() => load());
   }, [load]);
 
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = "";
-    };
-  }, [onClose]);
+  const panelRef = useOverlayBehavior({ onClose });
 
   // Refresh the signed URL a minute before it expires so long reads never break.
   useEffect(() => {
@@ -73,7 +64,7 @@ export function PdfViewer({ file, onClose }: { file: SerializedFile; onClose: ()
   return (
     <div className="fixed inset-0 z-[80]" role="dialog" aria-modal="true" aria-label={`Preview ${displayName(file)}`}>
       <div className="overlay" onClick={onClose} />
-      <div className={`absolute bg-surface-raised shadow-pop animate-slide-up dark:shadow-popdark ${fullscreen ? "inset-0" : "inset-2 rounded-xl border border-line sm:inset-4 lg:inset-x-10 lg:inset-y-6"}`}>
+      <div ref={panelRef} tabIndex={-1} className={`absolute bg-surface-raised shadow-pop animate-slide-up dark:shadow-popdark ${fullscreen ? "inset-0" : "inset-2 rounded-xl border border-line sm:inset-4 lg:inset-x-10 lg:inset-y-6"}`}>
         <div className="flex h-full flex-col overflow-hidden rounded-xl">
           <div className="flex h-14 shrink-0 items-center gap-2 border-b border-line px-3 sm:px-4">
             <div className="min-w-0 flex-1">

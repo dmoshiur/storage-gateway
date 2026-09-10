@@ -9,6 +9,7 @@ export interface ApiFailure {
   error: {
     code: string;
     message: string;
+    requestId?: string;
     fields?: Record<string, string>;
   };
   requestId: string;
