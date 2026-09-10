@@ -21,6 +21,9 @@ import {
   revertPermanentDeletion,
 } from "@/lib/firestore/files";
 import { getSettings } from "@/lib/firestore/settings";
+import { getStorageStats } from "@/lib/firestore/stats";
+import { createNotificationSafe, pruneNotifications } from "@/lib/firestore/notifications";
+import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
 import { logger } from "@/lib/logging/logger";
 import { isDueForAutomaticCleanup, isDueForTrashExpiry, isStaleUpload } from "@/lib/cleanup/eligibility";
 import { getStorageService } from "@/lib/storage";
@@ -167,6 +170,8 @@ export async function runCleanup(options: { dryRun?: boolean } = {}): Promise<Cl
       }
     }
 
+    if (!options.dryRun) await emitRunNotifications(summary);
+
     // Finalized records with a leftover staging key are safe to clean without touching the real document.
     for (const file of activeStaging) {
       summary.checked += 1;
@@ -187,6 +192,61 @@ export async function runCleanup(options: { dryRun?: boolean } = {}): Promise<Cl
     logger.error("Cleanup run failed before completion", { error: releaseError });
     throw error;
   } finally {
+    if (!options.dryRun) {
+      try { await pruneNotifications(); } catch { /* best-effort */ }
+    }
     await releaseCleanupLock({ ...summary }, releaseError);
+  }
+}
+
+/** Post-run notifications: summary, failures, storage thresholds, expiring files. Never throws. */
+async function emitRunNotifications(summary: CleanupSummary): Promise<void> {
+  try {
+    if (summary.failed > 0) {
+      await createNotificationSafe({
+        type: "cleanup_failed",
+        title: "Scheduled cleanup reported failures",
+        message: `${summary.failed} item(s) failed during automatic cleanup. Review the audit log for details.`,
+        link: "/admin/audit",
+      });
+    } else if (summary.movedToTrash + summary.permanentlyDeleted + summary.staleUploadsRemoved > 0) {
+      await createNotificationSafe({
+        type: "cleanup_completed",
+        title: "Scheduled cleanup completed",
+        message: `${summary.movedToTrash} moved to Trash, ${summary.permanentlyDeleted} permanently deleted, ${summary.staleUploadsRemoved} stale uploads removed.`,
+        link: "/admin/activity",
+      });
+    }
+    const stats = await getStorageStats().catch(() => null);
+    if (stats) {
+      if (stats.warningLevel === "critical") {
+        await createNotificationSafe({
+          type: "storage_critical",
+          title: "Storage critically full",
+          message: `Storage is ${stats.usagePercent}% full. Uploads may soon be rejected.`,
+          link: "/admin/storage",
+          dedupeKey: "storage-critical",
+        });
+      } else if (stats.warningLevel === "warning") {
+        await createNotificationSafe({
+          type: "storage_warning",
+          title: "Storage almost full",
+          message: `Storage is ${stats.usagePercent}% full. Consider raising the limit or cleaning up.`,
+          link: "/admin/storage",
+          dedupeKey: "storage-warning",
+        });
+      }
+      if (stats.expiringSoonCount > 0) {
+        await createNotificationSafe({
+          type: "file_expiring",
+          title: "Files expiring soon",
+          message: `${stats.expiringSoonCount} file(s) will be automatically moved to Trash within 30 days.`,
+          link: "/admin/retention",
+          dedupeKey: "expiring-30d",
+        });
+      }
+    }
+  } catch {
+    /* notifications never break cleanup */
   }
 }

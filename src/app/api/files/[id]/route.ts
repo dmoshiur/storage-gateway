@@ -7,6 +7,7 @@ import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
 import { requireAdminRequest, requireReadActor } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { fileUpdateSchema, moveToTrashSchema } from "@/lib/validation/schemas";
+import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
 
 export const runtime = "nodejs";
 
@@ -42,6 +43,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     if (result.changedRetention) {
       await writeAuditLogSafely({ action: "CHANGE_RETENTION", actor: auditActorFrom(actor), fileId: result.file.id, fileName: result.file.originalName, details: { retentionType: result.file.retentionType, autoDeleteEnabled: result.file.autoDeleteEnabled } });
     }
+    emitWebhookEvent("file.updated", { fileId: result.file.id, fileName: result.file.originalName });
     return success({ file: serializeFile(result.file) }, requestId);
   }, { route: "files/update" });
 }
@@ -58,6 +60,7 @@ export async function DELETE(request: Request, context: { params: Promise<{ id: 
     const settings = await getSettings();
     const file = await moveFileToTrash(id, settings.trashRetentionDays, "manual", actor.uid);
     await writeAuditLogSafely({ action: "MOVE_TO_TRASH", actor: auditActorFrom(actor), fileId: file.id, fileName: file.originalName, details: { permanentDeleteAt: file.permanentDeleteAt?.toISOString() ?? null } });
+    emitWebhookEvent("file.trashed", { fileId: file.id, fileName: file.originalName });
     return success({ file: serializeFile(file) }, requestId);
   }, { route: "files/trash" });
 }

@@ -36,6 +36,8 @@ import {
 import { auditActorFrom, writeAuditLogSafely } from "@/lib/firestore/audit";
 import { defaultRetention } from "@/lib/retention";
 import { createHash } from "node:crypto";
+import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
+import { getApiKeyScopesByKeyId, requireScope, type ApiScope } from "@/lib/security/api-keys";
 import { getStorageService } from "@/lib/storage";
 import type { FileDocument } from "@/types/file";
 
@@ -105,7 +107,7 @@ async function signBridgeDocumentUrl(file: Pick<FileDocument, "storagePath" | "o
  * code runs, so the 413 guidance below only triggers for the configured
  * document cap.
  */
-export async function handleBridgeDirectUpload(request: Request, requestId: string): Promise<Response> {
+export async function handleBridgeDirectUpload(request: Request, requestId: string, requiredScope?: ApiScope): Promise<Response> {
   // Rate limiting runs before authentication so unauthenticated floods cannot
   // bypass the per-instance budget by omitting credentials.
   enforceRateLimit(`bridge:upload:${getClientIp(request)}`, 240);
@@ -115,6 +117,7 @@ export async function handleBridgeDirectUpload(request: Request, requestId: stri
   try {
     const rawBody = isSignedRequest(request) ? new Uint8Array(await request.arrayBuffer()) : undefined;
     credential = await requireBridgeCredential(request, rawBody);
+    if (requiredScope) requireScope(await getApiKeyScopesByKeyId(credential.keyId), requiredScope);
 
     const contentType = request.headers.get("content-type") ?? "";
     if (!contentType.toLowerCase().includes("multipart/form-data")) {
@@ -230,6 +233,7 @@ export async function handleBridgeDirectUpload(request: Request, requestId: stri
       details: { size: file.size },
     });
     await logBridgeUploadAttempt({ keyId: credential.logKey, filename, sizeBytes: size, status: "success", failureCode: null, requestId });
+    emitWebhookEvent("file.uploaded", { fileId: file.id, fileName: file.originalName, size: file.size, via: "api" });
 
     return success({ file: serializeFile(file), url: signed.url, expiresAt: signed.expiresAt, filename, size }, requestId, 201);
   } catch (error) {
@@ -372,6 +376,7 @@ export async function handleBridgeUploadComplete(request: Request, requestId: st
 
     const signed = await signBridgeDocumentUrl(active);
     await logBridgeUploadAttempt({ keyId: credential.logKey, filename, sizeBytes: active.size, status: "success", failureCode: null, requestId });
+    emitWebhookEvent("file.uploaded", { fileId: active.id, fileName: active.originalName, size: active.size, via: "api" });
     return success({ file: serializeFile(active), url: signed.url, expiresAt: signed.expiresAt, filename, size: active.size }, requestId);
   } catch (error) {
     await logBridgeUploadAttempt({

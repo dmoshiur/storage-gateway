@@ -7,6 +7,7 @@ import { requireFileById, restoreFileFromTrash, serializeFile } from "@/lib/fire
 import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
 import { getStorageService } from "@/lib/storage";
 import { calculateDeleteAt } from "@/lib/retention";
+import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
 
 export const runtime = "nodejs";
 
@@ -27,6 +28,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
     const restored = await restoreFileFromTrash(file.id, { nextDeleteAt, resetElapsedCustomRetention });
     await writeAuditLogSafely({ action: "RESTORE", actor: auditActorFrom(actor), fileId: restored.id, fileName: restored.originalName, details: { resetElapsedCustomRetention } });
+    emitWebhookEvent("file.restored", { fileId: restored.id, fileName: restored.originalName });
     return success({ file: serializeFile(restored) }, requestId);
   }, { route: "files/restore" });
 }

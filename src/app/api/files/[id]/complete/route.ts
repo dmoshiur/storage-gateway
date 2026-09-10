@@ -15,6 +15,7 @@ import {
 } from "@/lib/firestore/files";
 import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
 import { getStorageService } from "@/lib/storage";
+import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
 import { assertValidatedBlobDocument } from "@/lib/validation/documents";
 
 export const runtime = "nodejs";
@@ -71,6 +72,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       if (existing && existing.id !== active.id) duplicateOf = { id: existing.id, originalName: existing.originalName };
     }
     await writeAuditLogSafely({ action: "UPLOAD", actor: auditActorFrom(actor), fileId: active.id, fileName: active.originalName, details: { size: active.size } });
+    emitWebhookEvent("file.uploaded", { fileId: active.id, fileName: active.originalName, size: active.size });
     return success({ file: serializeFile(active), duplicateOf }, requestId);
   }, { route: "files/upload/complete" });
 }
