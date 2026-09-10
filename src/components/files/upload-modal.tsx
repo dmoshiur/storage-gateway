@@ -21,6 +21,7 @@ interface QueueItem {
 }
 
 const ACCEPT = ".pdf,.doc,.docx,.txt,.ppt,.pptx,application/pdf";
+const SUPPORTED_NAME = /\.(pdf|doc|docx|txt|ppt|pptx)$/i;
 
 async function sha256Hex(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
@@ -52,7 +53,8 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
   const [items, setItems] = useState<QueueItem[]>([]);
   const [dragging, setDragging] = useState(false);
   const [category, setCategory] = useState("");
-  const running = useRef(false);
+  const [activeKey, setActiveKey] = useState<string | null>(null);
+  const activeStartRef = useRef<string | null>(null);
   const aborters = useRef(new Map<string, AbortController>());
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -82,6 +84,7 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
           category,
           ...(contentHash ? { contentHash } : {}),
         }),
+        signal: controller.signal,
       });
       if (controller.signal.aborted) return;
       patch(item.key, { status: "uploading", progress: 0, duplicateOf: init.duplicateOf, fileId: init.file.id });
@@ -96,7 +99,7 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
       patch(item.key, { status: "finalizing", progress: 100 });
       const completed = await apiFetch<{ file: SerializedFile; duplicateOf: { id: string; originalName: string } | null }>(
         `/api/files/${init.file.id}/complete`,
-        { method: "POST", body: JSON.stringify(contentHash ? { contentHash } : {}) },
+        { method: "POST", body: JSON.stringify(contentHash ? { contentHash } : {}), signal: controller.signal },
       );
       patch(item.key, { status: "done", progress: 100, duplicateOf: completed.duplicateOf ?? init.duplicateOf });
     } catch (error) {
@@ -114,20 +117,35 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
   }, [patch, category]);
 
   useEffect(() => {
-    if (running.current) return;
+    if (activeKey || activeStartRef.current) return;
     const next = items.find((item) => item.status === "queued");
     if (!next) return;
-    running.current = true;
-    // Deferred so state updates never run synchronously inside the effect.
-    void Promise.resolve()
-      .then(() => processItem(next))
-      .finally(() => {
-        running.current = false;
-      });
-  }, [items, processItem]);
+    // Track the active queue item in state so completion always schedules the
+    // next item. The deferred start avoids a cascading render while preserving
+    // a synchronous ref guard against Strict Mode effect replays.
+    activeStartRef.current = next.key;
+    const timer = window.setTimeout(() => {
+      setActiveKey(next.key);
+      void processItem(next)
+        .catch(() => undefined)
+        .finally(() => {
+          activeStartRef.current = null;
+          setActiveKey((current) => current === next.key ? null : current);
+        });
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      if (activeStartRef.current === next.key && !activeKey) activeStartRef.current = null;
+    };
+  }, [activeKey, items, processItem]);
 
   const addFiles = (files: FileList | File[]) => {
-    const list = [...files].filter((file) => file.size > 0).slice(0, 10);
+    const candidates = [...files];
+    const emptyFiles = candidates.filter((file) => file.size === 0);
+    const unsupported = candidates.filter((file) => !SUPPORTED_NAME.test(file.name));
+    if (emptyFiles.length > 0) toast("Empty files cannot be uploaded.", "warning");
+    if (unsupported.length > 0) toast("Only PDF, DOC, DOCX, TXT, PPT, and PPTX files can be uploaded.", "warning");
+    const list = candidates.filter((file) => file.size > 0 && SUPPORTED_NAME.test(file.name)).slice(0, 10);
     if (list.length === 0) return;
     setItems((current) => [
       ...current,

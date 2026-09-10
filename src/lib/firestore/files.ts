@@ -468,6 +468,17 @@ function matchesText(file: FileDocument, search: string): boolean {
     .some((value) => value.toLowerCase().includes(needle));
 }
 
+function matchesCategory(file: FileDocument, category?: string): boolean {
+  if (!category) return true;
+  return file.category.trim().toLocaleLowerCase() === category.trim().toLocaleLowerCase();
+}
+
+function matchesRetention(file: FileDocument, retention?: RetentionType | ""): boolean {
+  if (!retention) return true;
+  if (retention === "never") return !file.autoDeleteEnabled || file.retentionType === "never";
+  return file.autoDeleteEnabled && file.retentionType === retention;
+}
+
 function matchesDerivedFilter(file: FileDocument, filter: FileFilter, now: Date, onlyAccessible = false): boolean {
   if (onlyAccessible && file.autoDeleteEnabled && file.deleteAt && file.deleteAt <= now) return false;
   if (filter === "auto_delete") return file.autoDeleteEnabled;
@@ -517,6 +528,8 @@ export interface ListFilesInput {
   filter: FileFilter;
   sort: FileSort;
   search: string;
+  category?: string;
+  retention?: RetentionType | "";
   onlyAccessible?: boolean;
 }
 
@@ -524,16 +537,22 @@ export async function listFiles(input: ListFilesInput): Promise<{ files: Seriali
   const db = getAdminDb();
   const resolvedStatus = statusFor(input);
   const needsDerivedScan = input.filter === "expiring_soon" || input.filter === "expired" || input.filter === "auto_delete" || input.filter === "never_delete" || input.filter === "favorites" || input.filter === "recent";
-  const requiresScan = Boolean(input.search) || needsDerivedScan || Boolean(input.onlyAccessible);
+  const requiresScan = Boolean(input.search || input.category || input.retention) || needsDerivedScan || Boolean(input.onlyAccessible);
   const order = sortDefinition(input.sort, resolvedStatus);
   let query: Query = db.collection(FILES);
   if (resolvedStatus !== "all") query = query.where("status", "==", resolvedStatus);
 
   if (requiresScan) {
     // Search/filter stays server-side for a small NGO dataset without a separate search service.
-    const snapshot = await query.limit(SEARCH_SCAN_LIMIT).get();
+    // Bound text/derived scans to the newest records deterministically. The
+    // matching sort is applied below after filtering, while this keeps the
+    // "searchLimited" notice truthful and uses the existing status/createdAt
+    // composite index.
+    const snapshot = await query.orderBy("createdAt", "desc").limit(SEARCH_SCAN_LIMIT).get();
     const all = snapshot.docs.map(toDocument)
       .filter((file) => matchesText(file, input.search))
+      .filter((file) => matchesCategory(file, input.category))
+      .filter((file) => matchesRetention(file, input.retention))
       .filter((file) => matchesDerivedFilter(file, input.filter, new Date(), input.onlyAccessible))
       .sort((left, right) => compareFiles(left, right, order.field, order.direction));
     const cursorId = decodeCursor(input.cursor);

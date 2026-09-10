@@ -46,13 +46,17 @@ export async function apiFetch<T>(url: string, options: RequestInit = {}): Promi
         ...options.headers,
       },
     });
-  } catch {
+  } catch (error) {
+    // Aborted requests are normal when a page/filter changes. Let the query
+    // hook ignore them instead of turning them into a user-facing error.
+    if (error instanceof Error && error.name === "AbortError") throw error;
     throw new ClientApiError("NETWORK_ERROR", "Network connection failed. Check your connection and try again.");
   }
 
   let payload: ErrorEnvelope;
   try {
-    payload = (await response.json()) as ErrorEnvelope;
+    const body = await response.text();
+    payload = JSON.parse(body) as ErrorEnvelope;
   } catch {
     throw new ClientApiError("INVALID_RESPONSE", "The service returned an unexpected response. Please try again.", {
       status: response.status,

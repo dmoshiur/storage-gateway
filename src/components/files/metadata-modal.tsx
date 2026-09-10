@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useToast } from "@/components/providers";
 import { Dialog } from "@/components/ui/overlays";
 import { Spinner } from "@/components/ui/feedback";
-import { apiFetch, ClientApiError } from "@/lib/client/api";
+import { apiErrorOptions, apiFetch } from "@/lib/client/api";
 import type { SerializedFile } from "@/types/file";
 import type { RetentionType } from "@/types/file";
 
@@ -37,9 +37,12 @@ export function MetadataModal({
   const [retentionType, setRetentionType] = useState<RetentionType>(file.retentionType);
   const [customDate, setCustomDate] = useState(file.customDeleteAt ? file.customDeleteAt.slice(0, 10) : "");
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
   const save = async () => {
+    if (savingRef.current) return;
+    savingRef.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -61,14 +64,15 @@ export function MetadataModal({
       toast("Metadata updated.");
       onSaved();
     } catch (saveError) {
-      setError(saveError instanceof ClientApiError ? saveError.message : "Update failed.");
+      setError(apiErrorOptions(saveError, "Update failed. Try again.").message);
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
 
   return (
-    <Dialog title="Edit metadata" description={file.originalName} onClose={onClose} wide>
+    <Dialog title="Edit metadata" description={file.originalName} onClose={onClose} wide dismissable={!saving}>
       <div className="space-y-4">
         <div>
           <label className="field-label" htmlFor="meta-title">Display title</label>
@@ -121,11 +125,16 @@ export function MetadataModal({
             </div>
           )}
         </div>
-        {error && <p role="alert" className="rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">{error}</p>}
+        {error && (
+          <div role="alert" className="flex items-center justify-between gap-3 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
+            <span>{error}</span>
+            <button type="button" className="btn-ghost btn-sm shrink-0" onClick={() => void save()}>Retry</button>
+          </div>
+        )}
         <div className="flex justify-end gap-2.5">
           <button type="button" className="btn-secondary" onClick={onClose} disabled={saving}>Cancel</button>
-          <button type="button" className="btn-primary" onClick={save} disabled={saving}>
-            {saving && <Spinner />} Save changes
+          <button type="button" className="btn-primary" onClick={() => void save()} disabled={saving} aria-busy={saving}>
+            {saving && <Spinner />} {saving ? "Saving…" : "Save changes"}
           </button>
         </div>
       </div>

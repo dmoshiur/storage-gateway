@@ -50,6 +50,11 @@ export const listFilesQuerySchema = z.object({
   filter: z.enum(["all", "active", "trash", "auto_delete", "never_delete", "expiring_soon", "expired", "favorites", "recent"]).default("all"),
   sort: z.enum(["newest", "oldest", "largest", "smallest", "delete_date", "name"]).default("newest"),
   search: z.string().trim().max(100).optional().default(""),
+  // These are separate filters rather than part of the free-text query. Keeping
+  // them separate prevents a category such as "Finance" from being treated as
+  // a search term and makes the Files page filters deterministic.
+  category: safeText(80).optional().default(""),
+  retention: z.enum(["", ...RETENTION_TYPES]).optional().default(""),
 });
 
 const defaultRetentionTypes = ["never", "30_days", "3_months", "6_months", "1_year"] as const;

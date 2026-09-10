@@ -5,6 +5,8 @@ import {
   BlobNotFoundError,
   copy as blobCopy,
   del as blobDelete,
+  get as blobGet,
+  getDownloadUrl,
   head as blobHead,
   issueSignedToken,
   list as blobList,
@@ -37,9 +39,13 @@ import type {
 
 const PRIVATE_ACCESS = "private" as const;
 
-function blobOptions(): { token?: string } {
-  const { token } = getBlobStoreConfig();
-  return token ? { token } : {};
+function blobOptions(): { token?: string; storeId?: string; oidcToken?: string } {
+  const { token, storeId, oidcToken } = getBlobStoreConfig();
+  return {
+    ...(token ? { token } : {}),
+    ...(storeId ? { storeId } : {}),
+    ...(oidcToken && !token ? { oidcToken } : {}),
+  };
 }
 
 function isNotFound(error: unknown): boolean {
@@ -87,16 +93,20 @@ export class VercelBlobStorageService implements StorageService {
   async download(pathname: string, range?: string): Promise<Uint8Array> {
     try {
       const url = await this.requireUrl(pathname);
-      const response = await fetch(url, {
-        headers: {
-          ...(range ? { Range: range } : {}),
-          // Private blobs require the store token when fetched directly.
-          ...(blobOptions().token ? { Authorization: `Bearer ${blobOptions().token}` } : {}),
-        },
+      // Use the SDK's private read path rather than fetching the canonical URL
+      // manually. This keeps token and Vercel OIDC authentication working in
+      // both local and deployed environments and preserves range validation.
+      const result = await blobGet(url, {
+        ...blobOptions(),
+        access: PRIVATE_ACCESS,
+        useCache: false,
+        ...(range ? { headers: { Range: range } } : {}),
       });
-      if (response.status === 404) throw new ApiError(404, "BLOB_NOT_FOUND", "The stored object no longer exists.");
-      if (!response.ok) throw new ApiError(502, "BLOB_REQUEST_FAILED", "The download from Blob storage failed.");
-      return new Uint8Array(await response.arrayBuffer());
+      if (!result) throw new ApiError(404, "BLOB_NOT_FOUND", "The stored object no longer exists.");
+      if (result.statusCode === 304 || !result.stream) {
+        throw new ApiError(502, "BLOB_REQUEST_FAILED", "The download from Blob storage returned no content.");
+      }
+      return new Uint8Array(await new Response(result.stream).arrayBuffer());
     } catch (error) {
       throw toApiError(error, "The download from Blob storage failed.");
     }
@@ -171,6 +181,10 @@ export class VercelBlobStorageService implements StorageService {
         validUntil,
         useCache: false,
       });
+      // Vercel Blob uses this flag to select its download disposition while
+      // keeping the object private. The authorization remains the short-lived
+      // signed delegation above; no permanent URL is exposed.
+      if (options.disposition === "attachment") return getDownloadUrl(url);
       return url;
     } catch (error) {
       throw toApiError(error, "Could not create a temporary download link.");

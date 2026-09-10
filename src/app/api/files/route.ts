@@ -1,5 +1,6 @@
 import { apiRoute } from "@/lib/api/route";
 import { success } from "@/lib/api/response";
+import { ApiError } from "@/lib/api/errors";
 import { parseQuery } from "@/lib/api/body";
 import { listFiles } from "@/lib/firestore/files";
 import { requireReadActor } from "@/lib/security/request-auth";
@@ -14,13 +15,18 @@ export async function GET(request: Request) {
     enforceRateLimit(`files:list:${actor.type}:${actor.uid}`, actor.type === "integration" ? 120 : 240);
     const values = Object.fromEntries(request.url ? new URL(request.url).searchParams.entries() : []);
     const query = parseQuery(values, listFilesQuerySchema);
-    const result = await listFiles({
-      ...query,
-      // Website integrations never receive trash/deleted/uploading metadata and do not see documents already due for deletion.
-      status: actor.type === "integration" ? "active" : query.status,
-      filter: actor.type === "integration" && query.filter === "trash" ? "active" : query.filter,
-      onlyAccessible: actor.type === "integration",
-    });
-    return success(result, requestId);
+    try {
+      const result = await listFiles({
+        ...query,
+        // Website integrations never receive trash/deleted/uploading metadata and do not see documents already due for deletion.
+        status: actor.type === "integration" ? "active" : query.status,
+        filter: actor.type === "integration" && query.filter === "trash" ? "active" : query.filter,
+        onlyAccessible: actor.type === "integration",
+      });
+      return success(result, requestId);
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(503, "FILES_UNAVAILABLE", "Files could not be loaded right now. Please retry shortly.");
+    }
   }, { route: "files/list" });
 }

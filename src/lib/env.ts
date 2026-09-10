@@ -37,18 +37,21 @@ export function getFirebaseAdminEnv() {
  * injected automatically. On Vercel runtimes without an explicit token, the
  * SDK authenticates with OIDC (`VERCEL_OIDC_TOKEN` + `BLOB_STORE_ID`).
  */
-export function getBlobStoreConfig(): { token: string | null; storeId: string | null } {
+export function getBlobStoreConfig(): { token: string | null; storeId: string | null; oidcToken: string | null } {
   const parsed = blobSchema.safeParse({
     BLOB_READ_WRITE_TOKEN: process.env.BLOB_READ_WRITE_TOKEN || undefined,
     BLOB_STORE_ID: process.env.BLOB_STORE_ID || undefined,
   });
   if (!parsed.success) return configurationError("blob", parsed.error.issues.map((issue) => issue.path.join(".")));
   const explicitToken = parsed.data.BLOB_READ_WRITE_TOKEN ?? null;
-  const oidcAvailable = Boolean(process.env.VERCEL_OIDC_TOKEN?.trim());
-  if (!explicitToken && !oidcAvailable) {
-    return configurationError("blob", ["BLOB_READ_WRITE_TOKEN"]);
+  const oidcToken = process.env.VERCEL_OIDC_TOKEN?.trim() || null;
+  if (!explicitToken && !oidcToken) {
+    return configurationError("blob", ["BLOB_READ_WRITE_TOKEN or VERCEL_OIDC_TOKEN"]);
   }
-  return { token: explicitToken, storeId: parsed.data.BLOB_STORE_ID ?? null };
+  if (!explicitToken && oidcToken && !parsed.data.BLOB_STORE_ID) {
+    return configurationError("blob", ["BLOB_STORE_ID"]);
+  }
+  return { token: explicitToken, storeId: parsed.data.BLOB_STORE_ID ?? null, oidcToken };
 }
 
 export function getRequiredSecret(name: "INTEGRATION_API_KEY" | "CRON_SECRET"): string {

@@ -132,7 +132,7 @@ function ConfirmDialog({ state, onResolve }: { state: ConfirmOptions; onResolve:
   return (
     <div className="fixed inset-0 z-[90] grid place-items-center p-4" role="alertdialog" aria-modal="true" aria-label={state.title}>
       <div className="overlay" onClick={() => onResolve(false)} aria-hidden="true" />
-      <div ref={panelRef} tabIndex={-1} className="dialog-panel relative">
+      <div ref={panelRef} tabIndex={-1} className="dialog-panel relative z-10">
         <h2 className="text-[15px] font-semibold text-ink">{state.title}</h2>
         {state.description && <p className="mt-1.5 text-sm leading-6 text-ink-muted">{state.description}</p>}
         {state.requireText && (

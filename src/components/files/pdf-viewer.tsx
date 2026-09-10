@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Download, ExternalLink, LoaderCircle, Maximize2, Minimize2, RotateCw, X } from "lucide-react";
 import { useToast } from "@/components/providers";
 import { useOverlayBehavior } from "@/components/ui/overlays";
-import { apiFetch, ClientApiError } from "@/lib/client/api";
+import { apiErrorOptions, apiFetch } from "@/lib/client/api";
 import type { SerializedFile } from "@/types/file";
 import { displayName } from "@/components/files/file-helpers";
 
@@ -12,75 +12,117 @@ export function PdfViewer({ file, onClose }: { file: SerializedFile; onClose: ()
   const { toast } = useToast();
   const [url, setUrl] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [tokenLoading, setTokenLoading] = useState(true);
+  const [frameLoading, setFrameLoading] = useState(false);
+  const [downloadBusy, setDownloadBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
   const [frameKey, setFrameKey] = useState(0);
+  const loadBusyRef = useRef(false);
+  const downloadBusyRef = useRef(false);
 
   const load = useCallback(async () => {
-    setLoading(true);
+    // The reload control, expiry timer, and retry button can all race. Keep
+    // one signed-URL request per viewer and let the iframe remain local to the
+    // viewer rather than blocking the Files page.
+    if (loadBusyRef.current) return;
+    loadBusyRef.current = true;
+    setTokenLoading(true);
+    setFrameLoading(true);
     setError(null);
+    setUrl(null);
     try {
       const data = await apiFetch<{ url: string; expiresAt: string }>(`/api/files/${file.id}/preview`);
       setUrl(data.url);
       setExpiresAt(data.expiresAt);
     } catch (fetchError) {
-      setError(fetchError instanceof ClientApiError ? fetchError.message : "Preview could not be loaded.");
+      const options = apiErrorOptions(fetchError, "Preview could not be loaded. Try again.");
+      setError(options.message);
+      setFrameLoading(false);
     } finally {
-      setLoading(false);
+      loadBusyRef.current = false;
+      setTokenLoading(false);
     }
   }, [file.id]);
 
   useEffect(() => {
-    // Deferred so state updates never run synchronously inside the effect.
-    void Promise.resolve().then(() => load());
+    const timer = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(timer);
   }, [load]);
 
   const panelRef = useOverlayBehavior({ onClose });
 
-  // Refresh the signed URL a minute before it expires so long reads never break.
+  // Refresh the signed URL before it expires so long reads never break. A
+  // minimum delay also handles settings configured with a very short lifetime.
   useEffect(() => {
     if (!expiresAt) return;
-    const ms = new Date(expiresAt).getTime() - Date.now() - 60000;
-    if (ms <= 0) return;
-    const timer = setTimeout(() => void load(), ms);
+    const expiresIn = new Date(expiresAt).getTime() - Date.now();
+    if (!Number.isFinite(expiresIn)) return;
+    if (expiresIn <= 0) {
+      const timer = window.setTimeout(() => void load(), 0);
+      return () => window.clearTimeout(timer);
+    }
+    // Refresh 20 percent before expiry, capped at one minute. Using a fixed
+    // one-minute lead would create a one-second request loop for the valid
+    // 60-second minimum setting.
+    const refreshLead = Math.min(60_000, Math.max(5_000, expiresIn * 0.2));
+    const timer = setTimeout(() => void load(), Math.max(1_000, expiresIn - refreshLead));
     return () => clearTimeout(timer);
   }, [expiresAt, load]);
 
   const download = async () => {
+    if (downloadBusyRef.current) return;
+    downloadBusyRef.current = true;
+    setDownloadBusy(true);
     try {
       const data = await apiFetch<{ url: string }>(`/api/files/${file.id}/download`);
       const link = document.createElement("a");
       link.href = data.url;
       link.download = file.originalName;
+      link.rel = "noopener";
       document.body.appendChild(link);
       link.click();
       link.remove();
-    } catch {
-      toast("Download failed.", "error");
+      toast("Download started.");
+    } catch (downloadError) {
+      const options = apiErrorOptions(downloadError, "Download failed. Try again.");
+      toast(options.message, "error", { requestId: options.requestId, retry: () => void download() });
+    } finally {
+      downloadBusyRef.current = false;
+      setDownloadBusy(false);
     }
   };
 
+  const loading = tokenLoading || frameLoading;
+
   return (
     <div className="fixed inset-0 z-[80]" role="dialog" aria-modal="true" aria-label={`Preview ${displayName(file)}`}>
-      <div className="overlay" onClick={onClose} />
-      <div ref={panelRef} tabIndex={-1} className={`absolute bg-surface-raised shadow-pop animate-slide-up dark:shadow-popdark ${fullscreen ? "inset-0" : "inset-2 rounded-xl border border-line sm:inset-4 lg:inset-x-10 lg:inset-y-6"}`}>
+      <div className="overlay" onClick={onClose} aria-hidden="true" />
+      <div ref={panelRef} tabIndex={-1} className={`absolute z-10 bg-surface-raised shadow-pop animate-slide-up dark:shadow-popdark ${fullscreen ? "inset-0" : "inset-2 rounded-xl border border-line sm:inset-4 lg:inset-x-10 lg:inset-y-6"}`}>
         <div className="flex h-full flex-col overflow-hidden rounded-xl">
           <div className="flex h-14 shrink-0 items-center gap-2 border-b border-line px-3 sm:px-4">
             <div className="min-w-0 flex-1">
               <h2 className="truncate text-sm font-semibold text-ink">{displayName(file)}</h2>
               <p className="truncate font-mono text-[11px] text-ink-faint">{file.originalName}</p>
             </div>
-            <button type="button" onClick={() => { setFrameKey((key) => key + 1); void load(); }} aria-label="Reload preview" title="Reload preview" className="btn-icon">
-              <RotateCw className="h-4 w-4" />
+            <button
+              type="button"
+              onClick={() => { setFrameKey((key) => key + 1); void load(); }}
+              disabled={loading}
+              aria-busy={loading}
+              aria-label="Reload preview"
+              title="Reload preview"
+              className="btn-icon"
+            >
+              {loading ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <RotateCw className="h-4 w-4" />}
             </button>
             {url && (
               <a href={url} target="_blank" rel="noopener noreferrer" aria-label="Open in new tab" title="Open in new tab" className="btn-icon">
                 <ExternalLink className="h-4 w-4" />
               </a>
             )}
-            <button type="button" onClick={download} aria-label="Download" title="Download" className="btn-icon">
-              <Download className="h-4 w-4" />
+            <button type="button" onClick={() => void download()} disabled={downloadBusy} aria-busy={downloadBusy} aria-label="Download" title="Download" className="btn-icon">
+              {downloadBusy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
             </button>
             <button
               type="button"
@@ -97,7 +139,7 @@ export function PdfViewer({ file, onClose }: { file: SerializedFile; onClose: ()
           </div>
           <div className="relative flex-1 bg-slate-500/10">
             {loading && (
-              <div className="absolute inset-0 grid place-items-center">
+              <div className="absolute inset-0 z-10 grid place-items-center bg-surface-raised/60">
                 <div className="flex items-center gap-2 text-sm text-ink-muted">
                   <LoaderCircle className="h-5 w-5 animate-spin" /> Loading secure preview…
                 </div>
@@ -117,7 +159,8 @@ export function PdfViewer({ file, onClose }: { file: SerializedFile; onClose: ()
                 key={frameKey}
                 src={url}
                 title={`Preview of ${displayName(file)}`}
-                onLoad={() => setLoading(false)}
+                onLoad={() => setFrameLoading(false)}
+                onError={() => { setFrameLoading(false); setError("The secure preview could not be displayed."); }}
                 className="h-full w-full border-0 bg-white"
                 allow="fullscreen"
               />

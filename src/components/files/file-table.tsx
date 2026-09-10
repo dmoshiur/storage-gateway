@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { Dropdown } from "@/components/ui/overlays";
 import { Pagination } from "@/components/ui/data";
-import { EmptyState } from "@/components/ui/feedback";
+import { EmptyState, Spinner } from "@/components/ui/feedback";
 import type { SerializedFile } from "@/types/file";
 import { formatBytes, formatDate, formatRelative, truncateMiddle } from "@/utils/format";
 import { RetentionLabel, StatusBadge, displayName, useFileActions, FileTypeIcon, FILE_ACTION_ICONS } from "@/components/files/file-helpers";
@@ -79,6 +79,7 @@ export function FileTable({
   empty,
   refresh,
   trashView,
+  loading = false,
 }: {
   files: SerializedFile[];
   selected: Set<string>;
@@ -99,6 +100,7 @@ export function FileTable({
   empty: { title: string; description: string };
   refresh: () => void;
   trashView?: boolean;
+  loading?: boolean;
 }) {
   const actions = useFileActions(refresh);
 
@@ -216,28 +218,81 @@ export function FileTable({
                         {!trashView && (
                           <>
                             <button type="button" className="menu-item" onClick={() => onOpen(file)}><PreviewIcon className="h-4 w-4" /> Open preview</button>
-                            <button type="button" className="menu-item" onClick={() => actions.download(file)}><DownloadIcon className="h-4 w-4" /> Download</button>
-                            <button type="button" className="menu-item" onClick={() => actions.copyLink(file)}><LinkIcon className="h-4 w-4" /> Copy temporary link</button>
+                            <button
+                              type="button"
+                              className="menu-item"
+                              data-keep-menu="true"
+                              disabled={actions.isBusy(file, "download")}
+                              aria-busy={actions.isBusy(file, "download")}
+                              onClick={() => void actions.download(file)}
+                            >
+                              {actions.isBusy(file, "download") ? <Spinner className="h-4 w-4" /> : <DownloadIcon className="h-4 w-4" />} Download
+                            </button>
+                            <button
+                              type="button"
+                              className="menu-item"
+                              data-keep-menu="true"
+                              disabled={actions.isBusy(file, "copyLink")}
+                              aria-busy={actions.isBusy(file, "copyLink")}
+                              onClick={() => void actions.copyLink(file)}
+                            >
+                              {actions.isBusy(file, "copyLink") ? <Spinner className="h-4 w-4" /> : <LinkIcon className="h-4 w-4" />} Copy temporary link
+                            </button>
                             <button type="button" className="menu-item" onClick={() => onDetails(file)}><Eye className="h-4 w-4" /> View details</button>
                             <div className="menu-sep" />
                           </>
                         )}
                         {actions.canManage && !trashView && (
                           <>
-                            <button type="button" className="menu-item" onClick={() => actions.toggleFavorite(file)}>
-                              <FavoriteIcon className="h-4 w-4" /> {file.isFavorite ? "Remove favorite" : "Add to favorites"}
+                            <button
+                              type="button"
+                              className="menu-item"
+                              data-keep-menu="true"
+                              disabled={actions.isBusy(file, "favorite")}
+                              aria-busy={actions.isBusy(file, "favorite")}
+                              onClick={() => void actions.toggleFavorite(file)}
+                            >
+                              {actions.isBusy(file, "favorite") ? <Spinner className="h-4 w-4" /> : <FavoriteIcon className="h-4 w-4" />} {file.isFavorite ? "Remove favorite" : "Add to favorites"}
                             </button>
                             <button type="button" className="menu-item" onClick={() => onEdit(file)}><EditIcon className="h-4 w-4" /> Edit metadata</button>
                             <button type="button" className="menu-item" onClick={() => onEdit(file)}><EditIcon className="h-4 w-4" /> Change retention</button>
                             <div className="menu-sep" />
-                            <button type="button" className="menu-item" onClick={() => actions.trash(file)}><TrashIcon className="h-4 w-4" /> Move to Trash</button>
+                            <button
+                              type="button"
+                              className="menu-item"
+                              data-keep-menu="true"
+                              disabled={actions.isBusy(file, "trash")}
+                              aria-busy={actions.isBusy(file, "trash")}
+                              onClick={() => void actions.trash(file)}
+                            >
+                              {actions.isBusy(file, "trash") ? <Spinner className="h-4 w-4" /> : <TrashIcon className="h-4 w-4" />} Move to Trash
+                            </button>
                           </>
                         )}
                         {trashView && actions.canManage && (
-                          <button type="button" className="menu-item" onClick={() => actions.restore(file)}><RestoreIcon className="h-4 w-4" /> Restore</button>
+                          <button
+                            type="button"
+                            className="menu-item"
+                            data-keep-menu="true"
+                            disabled={actions.isBusy(file, "restore")}
+                            aria-busy={actions.isBusy(file, "restore")}
+                            onClick={() => void actions.restore(file)}
+                          >
+                            {actions.isBusy(file, "restore") ? <Spinner className="h-4 w-4" /> : <RestoreIcon className="h-4 w-4" />} Restore
+                          </button>
                         )}
                         {actions.canDestroy && (
-                          <button type="button" className="menu-item" data-danger="true" onClick={() => actions.destroy(file)}><TrashIcon className="h-4 w-4" /> Delete permanently</button>
+                          <button
+                            type="button"
+                            className="menu-item"
+                            data-danger="true"
+                            data-keep-menu="true"
+                            disabled={actions.isBusy(file, "destroy")}
+                            aria-busy={actions.isBusy(file, "destroy")}
+                            onClick={() => void actions.destroy(file)}
+                          >
+                            {actions.isBusy(file, "destroy") ? <Spinner className="h-4 w-4" /> : <TrashIcon className="h-4 w-4" />} Delete permanently
+                          </button>
                         )}
                       </Dropdown>
                     </div>
@@ -270,7 +325,7 @@ export function FileTable({
           </div>
         ))}
       </div>
-      <Pagination hasPrev={hasPrev} hasNext={hasNext} onPrev={onPrev} onNext={onNext} label={pageLabel} />
+      <Pagination hasPrev={hasPrev} hasNext={hasNext} onPrev={onPrev} onNext={onNext} label={pageLabel} busy={loading} />
     </div>
   );
 }

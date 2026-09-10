@@ -57,7 +57,7 @@ export function Topbar({ onOpenPalette, onOpenMenu }: { onOpenPalette: () => voi
   };
 
   return (
-    <header className="sticky top-0 z-40 border-b border-line bg-surface-raised/90 backdrop-blur">
+    <header className="sticky top-0 z-40 border-b border-line bg-surface-raised/95">
       <div className="flex h-14 items-center gap-2 px-3 sm:px-5">
         <button type="button" aria-label="Open navigation" onClick={onOpenMenu} className="btn-icon lg:hidden">
           <Menu className="h-5 w-5" />
