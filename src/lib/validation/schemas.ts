@@ -27,6 +27,10 @@ export const uploadInitSchema = z.object({
   // Optional client-computed SHA-256 hex of the bytes, used for duplicate detection hints only.
   contentHash: z.string().regex(/^[0-9a-f]{64}$/i, "Use a SHA-256 hex digest.").optional(),
   retention: retentionInputSchema.optional(),
+  // When true, the client uploads via the OIDC presigned client flow
+  // (/api/blob/upload + uploadPresigned) and init skips minting a legacy
+  // server-side presigned PUT URL.
+  directToStorage: z.boolean().optional().default(false),
 });
 
 export const completeUploadSchema = z.object({
