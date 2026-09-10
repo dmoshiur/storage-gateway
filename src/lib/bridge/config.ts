@@ -17,7 +17,7 @@ export const DEFAULT_BRIDGE_SIGNED_URL_EXPIRY_SECONDS = 3600;
  * Guidance threshold for direct multipart uploads. A Vercel Serverless Function
  * invocation rejects request payloads above ~4.5 MB before application code
  * runs, so integrations must send larger documents through the presigned
- * init → PUT → complete flow, which streams bytes straight to R2.
+ * init → PUT → complete flow, which streams bytes straight to the private Blob store.
  */
 export const DIRECT_UPLOAD_GUIDANCE_BYTES = 4 * 1024 * 1024;
 

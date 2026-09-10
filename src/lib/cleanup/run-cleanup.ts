@@ -57,13 +57,13 @@ async function permanentlyDeleteTrash(file: FileDocument, summary: CleanupSummar
     return;
   }
   try {
-    // S3 DELETE is idempotent, so an interrupted completion is safely retried.
-    await storage.delete(pending.storageKey);
+    // Blob DELETE is idempotent, so an interrupted completion is safely retried.
+    await storage.delete(pending.storagePath);
     const deleted = await completePermanentDeletion(pending.id);
     summary.permanentlyDeleted += 1;
     await writeAuditLogSafely({ action: "TRASH_EXPIRY_DELETE", actor: auditActorFrom(SYSTEM_ACTOR), fileId: deleted.id, fileName: deleted.originalName });
   } catch (error) {
-    try { await revertPermanentDeletion(pending.id, "R2_DELETE_FAILED"); } catch { /* retry stays pending if rollback fails */ }
+    try { await revertPermanentDeletion(pending.id, "BLOB_DELETE_FAILED"); } catch { /* retry stays pending if rollback fails */ }
     summary.failed += 1;
     logger.error("Cleanup permanent deletion failed", { fileId: pending.id, stage: "permanent_delete", error: error instanceof Error ? error.message : "unknown" });
     try { await auditFailure(pending, "permanent_delete"); } catch { /* preserve cleanup progress */ }
@@ -74,12 +74,12 @@ async function permanentlyDeleteActive(file: FileDocument, summary: CleanupSumma
   const pending = await beginActivePermanentDeletion(file.id);
   if (pending.status === "deleted") { summary.skipped += 1; return; }
   try {
-    await getStorageService().delete(pending.storageKey);
+    await getStorageService().delete(pending.storagePath);
     const deleted = await markActivePermanentlyDeleted(pending.id);
     summary.permanentlyDeleted += 1;
     await writeAuditLogSafely({ action: "AUTO_DELETE", actor: auditActorFrom(SYSTEM_ACTOR), fileId: deleted.id, fileName: deleted.originalName, details: { outcome: "permanently_deleted" } });
   } catch (error) {
-    try { await revertActivePermanentDeletion(pending.id, "R2_DELETE_FAILED"); } catch { /* retry handling logged below */ }
+    try { await revertActivePermanentDeletion(pending.id, "BLOB_DELETE_FAILED"); } catch { /* retry handling logged below */ }
     summary.failed += 1;
     logger.error("Cleanup direct deletion failed", { fileId: pending.id, stage: "direct_delete", error: error instanceof Error ? error.message : "unknown" });
     try { await auditFailure(pending, "direct_delete"); } catch { /* continue */ }
@@ -155,7 +155,7 @@ export async function runCleanup(options: { dryRun?: boolean } = {}): Promise<Cl
       summary.checked += 1;
       if (options.dryRun) { summary.skipped += 1; continue; }
       try {
-        await getStorageService().delete(file.uploadKey ?? file.storageKey);
+        await getStorageService().delete(file.uploadKey ?? file.storagePath);
         if (file.status === "uploading") await markUploadFailed(file.id, "UPLOAD_EXPIRED");
         else await markDeletedAfterFailedUpload(file.id);
         summary.staleUploadsRemoved += 1;

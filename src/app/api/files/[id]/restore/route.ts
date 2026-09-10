@@ -16,7 +16,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     enforceRateLimit(`files:restore:${actor.uid}`, 60);
     const file = await requireFileById(requireRouteId((await context.params).id));
     if (file.status !== "trash") throw new ApiError(409, "FILE_NOT_IN_TRASH", "Only documents in Trash can be restored.");
-    if (!await getStorageService().exists(file.storageKey)) {
+    if (!await getStorageService().exists(file.storagePath)) {
       throw new ApiError(409, "FILE_CONTENT_UNAVAILABLE", "This document can no longer be restored because its private object is unavailable.");
     }
     // A restored file must not immediately be swept again. Recalculate elapsed policies server-side.

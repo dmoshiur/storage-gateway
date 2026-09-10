@@ -57,7 +57,7 @@ export function parseBridgeTags(raw: string | null): string[] {
 export function buildBridgeObjectKey(extension: SupportedDocumentExtension): string {
   const now = new Date();
   const month = String(now.getUTCMonth() + 1).padStart(2, "0");
-  return `documents/${now.getUTCFullYear()}/${month}/${crypto.randomUUID()}.${extension}`;
+  return `pdfs/${now.getUTCFullYear()}/${month}/${crypto.randomUUID()}.${extension}`;
 }
 
 /** Staging key for the presigned init → PUT → complete flow (never served directly). */

@@ -9,11 +9,18 @@ export interface ObjectMetadata {
 }
 
 export interface UploadObjectInput {
-  key: string;
-  body: Uint8Array | ReadableStream | NodeJS.ReadableStream;
+  /** Blob pathname, e.g. `pdfs/2026/09/<uuid>.pdf`. UUID-based, never user input. */
+  pathname: string;
+  body: Uint8Array | ReadableStream | Blob;
   contentType: string;
   contentLength?: number;
   metadata?: Record<string, string>;
+}
+
+export interface UploadObjectResult {
+  /** Canonical private Blob URL (server-only, never expose to browsers). */
+  url: string;
+  pathname: string;
 }
 
 export interface SignedDownloadOptions {
@@ -30,24 +37,30 @@ export interface SignedUploadOptions {
   metadata: Record<string, string>;
 }
 
-/** Result of a lightweight bucket connectivity probe (never throws). */
+/** Result of a lightweight store connectivity probe (never throws). */
 export interface StorageHealth {
   reachable: boolean;
   latencyMs: number;
   checkedAt: string;
 }
 
-/** Provider-neutral boundary for all object-store access. */
+/**
+ * Provider boundary for all object-store access.
+ * Vercel Private Blob is the only implementation (`vercel-blob.ts`).
+ */
 export interface StorageService {
-  upload(input: UploadObjectInput): Promise<void>;
-  download(key: string, range?: string): Promise<Uint8Array>;
-  delete(key: string): Promise<void>;
-  /** Optional source ETag makes staging-to-final publication conditional and race-safe. */
-  copy(sourceKey: string, destinationKey: string, sourceEtag?: string): Promise<void>;
-  exists(key: string): Promise<boolean>;
-  getMetadata(key: string): Promise<ObjectMetadata>;
-  getSignedUrl(key: string, options: SignedDownloadOptions): Promise<string>;
-  getSignedUploadUrl(key: string, options: SignedUploadOptions): Promise<string>;
-  /** Bucket connectivity probe. Resolves (never rejects) so dashboards can always render. */
+  upload(input: UploadObjectInput): Promise<UploadObjectResult>;
+  download(pathname: string, range?: string): Promise<Uint8Array>;
+  delete(pathname: string): Promise<void>;
+  copy(sourcePathname: string, destinationPathname: string): Promise<UploadObjectResult>;
+  exists(pathname: string): Promise<boolean>;
+  getMetadata(pathname: string): Promise<ObjectMetadata>;
+  /** Short-lived single-path `GET` signed URL (preview / download). */
+  getSignedUrl(pathname: string, options: SignedDownloadOptions): Promise<string>;
+  /** Short-lived single-path `PUT` signed URL (direct browser upload). */
+  getSignedUploadUrl(pathname: string, options: SignedUploadOptions): Promise<string>;
+  /** Short-lived single-path `DELETE` signed URL (controlled cleanup). */
+  getSignedDeleteUrl(pathname: string, expiresInSeconds: number): Promise<string>;
+  /** Store connectivity probe. Resolves (never rejects) so dashboards can always render. */
   healthCheck(): Promise<StorageHealth>;
 }

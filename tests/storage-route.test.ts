@@ -44,7 +44,7 @@ describe("GET /api/storage — dashboard initialization never 500s", () => {
     requireAdminRequest.mockResolvedValue({ uid: "admin-1", email: "a@ngo.example", role: "admin", type: "admin" });
   });
 
-  it("returns live stats, R2 health, and API request totals on a healthy system", async () => {
+  it("returns live stats, Blob health, and API request totals on a healthy system", async () => {
     getStorageStatsSafe.mockResolvedValue({ stats: LIVE_STATS, source: "live" });
     getApiRequestTotals.mockResolvedValue({ totalRequests: 42, lastRequestDate: "2026-09-09" });
     getStorageService.mockReturnValue({ healthCheck: vi.fn(async () => ({ reachable: true, latencyMs: 12, checkedAt: "2026-09-09T00:00:00.000Z" })) });
@@ -55,7 +55,7 @@ describe("GET /api/storage — dashboard initialization never 500s", () => {
     expect(body.success).toBe(true);
     expect(body.data.stats).toEqual(LIVE_STATS);
     expect(body.data.source).toBe("live");
-    expect(body.data.r2.reachable).toBe(true);
+    expect(body.data.blob.reachable).toBe(true);
     expect(body.data.apiRequests).toEqual({ totalRequests: 42, lastRequestDate: "2026-09-09" });
   });
 
@@ -73,7 +73,7 @@ describe("GET /api/storage — dashboard initialization never 500s", () => {
     expect(body.data.source).toBe("fallback");
     expect(body.data.stats.totalPdfCount).toBe(0);
     expect(body.data.stats.totalStorageBytes).toBe(0);
-    expect(body.data.r2.reachable).toBe(false);
+    expect(body.data.blob.reachable).toBe(false);
   });
 
   it("swallows R2 health-check throws so the dashboard still renders", async () => {
@@ -84,7 +84,7 @@ describe("GET /api/storage — dashboard initialization never 500s", () => {
     const response = await storageRoute.GET(adminRequest());
     expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body.data.r2.reachable).toBe(false);
+    expect(body.data.blob.reachable).toBe(false);
     expect(body.data.apiRequests).toEqual({ totalRequests: 0, lastRequestDate: null });
     expect(body.data.source).toBe("live");
   });

@@ -9,7 +9,7 @@ import { toIso } from "@/utils/date";
 const collection = () => getAdminDb().collection("apiKeys");
 
 /**
- * Dual-token credential model (Cloudflare R2 style):
+ * Dual-token credential model:
  *
  * - `keyId`   — visible identifier (`am_store_live_…`). Shown in the dashboard
  *               list and sent in the `X-AM-Storage-Key-Id` header.

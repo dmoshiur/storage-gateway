@@ -1,7 +1,7 @@
 import "server-only";
 
 const sensitiveKey = /password|secret|token|authorization|cookie|credential|private.?key|signed.?url/i;
-const signedUrl = /(?:X-Amz-(?:Credential|Signature|Security-Token)|[?&](?:token|signature)=)/i;
+const signedUrl = /(?:vercel-blob-(?:delegation|signature)|[?&](?:token|signature)=)/i;
 
 function sanitize(value: unknown, key = ""): unknown {
   if (sensitiveKey.test(key)) return "[REDACTED]";

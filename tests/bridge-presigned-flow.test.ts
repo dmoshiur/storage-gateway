@@ -79,7 +79,7 @@ describe("POST /api/v1/storage/upload/init — presigned upload step 1", () => {
     getStorageService.mockReturnValue(storage);
     serializeFile.mockImplementation((file: { id: string }) => ({ id: file.id, status: "uploading" }));
     createUploadingFile.mockImplementation(async (input: Record<string, unknown>) => ({ id: "upload-1", ...input }));
-    storage.getSignedUploadUrl.mockResolvedValue("https://r2.example/put?sig=upload");
+    storage.getSignedUploadUrl.mockResolvedValue("https://blob.example/put?sig=upload");
   });
 
   it("rejects unauthenticated init requests", async () => {
@@ -135,8 +135,9 @@ describe("POST /api/v1/storage/upload/init — presigned upload step 1", () => {
     expect(response.status).toBe(201);
     const body = await response.json();
     expect(body.success).toBe(true);
-    expect(body.data.uploadUrl).toBe("https://r2.example/put?sig=upload");
-    expect(body.data.uploadHeaders).toEqual({ "Content-Type": "application/pdf", "x-amz-meta-file-id": "upload-1" });
+    expect(body.data.uploadUrl).toBe("https://blob.example/put?sig=upload");
+    expect(body.data.uploadHeaders).toEqual({ "Content-Type": "application/pdf" });
+    expect(body.data.uploadMethod).toBe("PUT");
     expect(body.data.file).toMatchObject({ id: "upload-1", status: "uploading" });
     expect(body.data.directUploadRecommended).toBe(true);
     expect(body.data.expiresAt).toBeTruthy();
@@ -150,9 +151,9 @@ describe("POST /api/v1/storage/upload/init — presigned upload step 1", () => {
       size: 1024,
       uploadedBy: `bridge:${KEY_ID}`,
     }));
-    const created = createUploadingFile.mock.calls[0]![0] as { storageKey: string; uploadKey: string };
-    expect(created.storageKey).toMatch(/^documents\/\d{4}\/\d{2}\/.+\.pdf$/);
-    expect(created.uploadKey).toMatch(/^uploads\/\d{4}\/\d{2}\/.+\.pdf$/);
+    const created = createUploadingFile.mock.calls[0]![0] as { storagePath: string; uploadKey: string | null };
+    expect(created.storagePath).toMatch(/^pdfs\/\d{4}\/\d{2}\/.+\.pdf$/);
+    expect(created.uploadKey).toBeNull();
     expect(markUploadFailed).not.toHaveBeenCalled();
   });
 
@@ -169,7 +170,7 @@ describe("POST /api/v1/storage/upload/init — presigned upload step 1", () => {
 
   it("marks the reservation failed when URL signing fails", async () => {
     verifyApiCredential.mockResolvedValue("rec-1");
-    storage.getSignedUploadUrl.mockRejectedValue(new Error("r2 down"));
+    storage.getSignedUploadUrl.mockRejectedValue(new Error("blob down"));
 
     const response = await initRoute.POST(
       jsonRequest("/api/v1/storage/upload/init", { originalName: "a.pdf", size: 100 }, dualHeaders()),
@@ -199,15 +200,15 @@ describe("POST /api/v1/storage/upload/complete — presigned upload step 3", () 
     getStorageStats.mockResolvedValue(STATS);
     getStorageService.mockReturnValue(storage);
     serializeFile.mockImplementation((file: { id: string; status: string }) => ({ id: file.id, status: file.status }));
-    storage.getSignedUrl.mockResolvedValue("https://r2.example/signed?sig=done");
+    storage.getSignedUrl.mockResolvedValue("https://blob.example/signed?sig=done");
     verifyApiCredential.mockResolvedValue("rec-1");
   });
 
   function uploadingFile(overrides: Record<string, unknown> = {}) {
     return {
       id: "upload-1",
-      storageKey: "documents/2026/09/final.pdf",
-      uploadKey: "uploads/2026/09/staging.pdf",
+      storagePath: "pdfs/2026/09/final.pdf",
+      uploadKey: null,
       originalName: "annual-report.pdf",
       title: "Annual Report",
       description: "",
@@ -222,7 +223,7 @@ describe("POST /api/v1/storage/upload/complete — presigned upload step 3", () 
     };
   }
 
-  function validR2() {
+  function validBlob() {
     storage.getMetadata.mockResolvedValue({
       contentLength: PDF_CONTENT.length,
       contentType: "application/pdf",
@@ -285,7 +286,7 @@ describe("POST /api/v1/storage/upload/complete — presigned upload step 3", () 
 
     expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body.data.url).toBe("https://r2.example/signed?sig=done");
+    expect(body.data.url).toBe("https://blob.example/signed?sig=done");
     expect(body.data.filename).toBe("annual-report.pdf");
     expect(storage.copy).not.toHaveBeenCalled();
     expect(recordUploadLog).toHaveBeenCalledWith(expect.objectContaining({ status: "success" }));
@@ -293,7 +294,7 @@ describe("POST /api/v1/storage/upload/complete — presigned upload step 3", () 
 
   it("verifies, publishes, and registers the staged document", async () => {
     requireFileById.mockResolvedValue(uploadingFile());
-    validR2();
+    validBlob();
     activateUpload.mockImplementation(async (id: string) => ({ ...uploadingFile(), id, status: "active", uploadKey: null }));
 
     const response = await completeRoute.POST(
@@ -303,14 +304,13 @@ describe("POST /api/v1/storage/upload/complete — presigned upload step 3", () 
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.success).toBe(true);
-    expect(body.data.url).toBe("https://r2.example/signed?sig=done");
+    expect(body.data.url).toBe("https://blob.example/signed?sig=done");
     expect(body.data.filename).toBe("annual-report.pdf");
     expect(body.data.size).toBe(PDF_CONTENT.length);
     expect(body.data.file).toMatchObject({ id: "upload-1", status: "active" });
 
-    expect(storage.copy).toHaveBeenCalledWith("uploads/2026/09/staging.pdf", "documents/2026/09/final.pdf", '"etag-1"');
+    expect(storage.copy).not.toHaveBeenCalled();
     expect(activateUpload).toHaveBeenCalledWith("upload-1");
-    expect(clearUploadKey).toHaveBeenCalledWith("upload-1");
     expect(writeAuditLogSafely).toHaveBeenCalledWith(expect.objectContaining({ action: "BRIDGE_UPLOAD", fileId: "upload-1" }));
     expect(recordUploadLog).toHaveBeenCalledWith(expect.objectContaining({
       keyId: KEY_ID,
@@ -338,7 +338,7 @@ describe("POST /api/v1/storage/upload/complete — presigned upload step 3", () 
 
     expect(response.status).toBe(400);
     expect((await response.json()).error.code).toBe("INVALID_DOCUMENT");
-    expect(storage.delete).toHaveBeenCalledWith("uploads/2026/09/staging.pdf");
+    expect(storage.delete).toHaveBeenCalledWith("pdfs/2026/09/final.pdf");
     expect(markUploadFailed).toHaveBeenCalledWith("upload-1", "INVALID_DOCUMENT");
     expect(writeAuditLogSafely).toHaveBeenCalledWith(expect.objectContaining({ action: "UPLOAD_FAILED" }));
     expect(recordUploadLog).toHaveBeenCalledWith(expect.objectContaining({ status: "failed", failureCode: "INVALID_DOCUMENT" }));

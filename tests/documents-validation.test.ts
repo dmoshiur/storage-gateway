@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ApiError } from "@/lib/api/errors";
 import {
   assertDocumentMetadata,
-  assertValidatedR2Document,
+  assertValidatedBlobDocument,
   inspectDocumentSignature,
 } from "@/lib/validation/documents";
 import { getDocumentExtension } from "@/lib/validation/documents";
@@ -57,8 +57,8 @@ describe("document validation", () => {
     expect(inspectDocumentSignature("txt", bytes("plain text"), undefined).valid).toBe(true);
   });
 
-  it("verifies a validated R2 document object", () => {
-    expect(() => assertValidatedR2Document({
+  it("verifies a validated Blob document object", () => {
+    expect(() => assertValidatedBlobDocument({
       originalName: "slides.pptx",
       expectedSize: 128,
       actualSize: 128,

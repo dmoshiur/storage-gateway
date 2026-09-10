@@ -1,8 +1,8 @@
 {
-  "name": "ngo-private-pdf-storage-gateway",
+  "name": "ngo-file-cloud",
   "version": "1.0.0",
   "private": true,
-  "description": "AM Storage Company — private PDF Storage Bridge and admin dashboard for gramunnayan.com using Next.js, Firebase, and Cloudflare R2.",
+  "description": "NGO File Cloud — private PDF storage and document management platform: Next.js, Firebase Auth/Firestore, and Vercel Private Blob.",
   "engines": {
     "node": ">=20.9.0"
   },
@@ -17,8 +17,7 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.901.0",
-    "@aws-sdk/s3-request-presigner": "^3.901.0",
+    "@vercel/blob": "^2.8.0",
     "firebase": "^12.4.0",
     "firebase-admin": "13.0.0",
     "lucide-react": "^0.544.0",
@@ -40,10 +39,6 @@
     "tailwindcss": "^3.4.17",
     "typescript": "^5.9.2",
     "vitest": "^5.0.0"
-  },
-  "overrides": {
-    "uuid": "^11.1.1",
-    "jwks-rsa": "^3.1.0"
   },
   "type": "module"
 }

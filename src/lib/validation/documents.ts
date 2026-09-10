@@ -106,7 +106,7 @@ export function assertDocumentMetadata(
   return { extension, mimeType: documentMimeTypeFor(extension, suppliedMimeType) };
 }
 
-export function assertValidatedR2Document(input: {
+export function assertValidatedBlobDocument(input: {
   originalName: string;
   expectedSize: number;
   actualSize?: number;
@@ -114,7 +114,7 @@ export function assertValidatedR2Document(input: {
   firstBytes: Uint8Array;
   lastBytes: Uint8Array;
   objectFileId?: string;
-  expectedFileId: string;
+  expectedFileId?: string;
 }): void {
   const metadata = assertDocumentMetadata(input.originalName, input.expectedSize, input.expectedSize, input.contentType);
   if (input.actualSize !== input.expectedSize) {
@@ -124,7 +124,7 @@ export function assertValidatedR2Document(input: {
   if (normalizedContentType && normalizedContentType !== metadata.mimeType && normalizedContentType !== "application/octet-stream") {
     throw new ApiError(400, "INVALID_FILE_TYPE", "The uploaded object content type does not match the document type.");
   }
-  if (input.objectFileId !== input.expectedFileId) {
+  if (input.expectedFileId && input.objectFileId && input.objectFileId !== input.expectedFileId) {
     throw new ApiError(400, "UPLOAD_OWNERSHIP_MISMATCH", "The upload authorization could not be verified.");
   }
   const result = inspectDocumentSignature(metadata.extension, input.firstBytes, input.lastBytes);
