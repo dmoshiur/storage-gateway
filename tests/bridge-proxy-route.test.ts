@@ -63,6 +63,17 @@ describe("POST /api/v1/storage/upload gateway proxy", () => {
     );
   });
 
+  it("does not proxy to itself when BRIDGE_URL points at the gateway host", async () => {
+    process.env.NEXT_PUBLIC_BRIDGE_URL = "https://gateway.example";
+
+    const response = await route.POST(new Request("https://gateway.example/api/v1/storage/upload", { method: "POST" }));
+
+    expect(response.status).toBe(404);
+    const body = await response.json();
+    expect(body.error.code).toBe("BRIDGE_ENDPOINT_NOT_AT_GATEWAY");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("returns BRIDGE_UNAVAILABLE when the bridge cannot be reached", async () => {
     process.env.NEXT_PUBLIC_BRIDGE_URL = "https://bridge.example.org";
     fetchMock.mockRejectedValue(new Error("connection refused"));

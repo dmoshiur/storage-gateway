@@ -4,6 +4,33 @@ import { bridgeRouteNotAtGateway } from "@/lib/api/bridge-route-not-at-gateway";
 export const runtime = "nodejs";
 
 /**
+ * True when the configured bridge origin is this same gateway host. That is the
+ * classic misconfiguration (`NEXT_PUBLIC_BRIDGE_URL=https://<gateway-host>`)
+ * that produced the original HTML 404; proxying to ourselves would loop until
+ * the request times out, so we return the JSON diagnostic instead.
+ */
+function bridgePointsAtGateway(request: Request, bridgeUrl: string): boolean {
+  let target: URL;
+  try {
+    target = new URL(bridgeUrl);
+  } catch {
+    return false;
+  }
+  const hostCandidates = [
+    request.headers.get("x-forwarded-host"),
+    request.headers.get("host"),
+  ]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => value.split(",")[0].trim().toLowerCase());
+  try {
+    hostCandidates.push(new URL(request.url).host.toLowerCase());
+  } catch {
+    // request.url is always absolute in Next.js; ignore unexpected shapes.
+  }
+  return hostCandidates.some((host) => host === target.host.toLowerCase());
+}
+
+/**
  * Optional compatibility proxy: forwards the public bridge upload contract
  * (`POST /api/v1/storage/upload`) to the configured FastAPI bridge origin.
  *
@@ -16,6 +43,7 @@ export const runtime = "nodejs";
 async function proxyUpload(request: Request): Promise<Response> {
   const bridgeUrl = getBridgeUrl();
   if (!bridgeUrl) return bridgeRouteNotAtGateway(request);
+  if (bridgePointsAtGateway(request, bridgeUrl)) return bridgeRouteNotAtGateway(request);
 
   const url = `${bridgeUrl}/api/v1/storage/upload`;
   const headers = new Headers(request.headers);
