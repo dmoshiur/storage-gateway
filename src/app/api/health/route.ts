@@ -4,7 +4,6 @@ import { requireAdminRequest } from "@/lib/security/request-auth";
 import { getBridgeUrl } from "@/lib/env";
 import { bridgeUrlPointsAtRequest } from "@/lib/bridge/config";
 import { version as appVersion } from "../../../../package.json";
-import { getStorageService } from "@/lib/storage";
 
 export const runtime = "nodejs";
 
@@ -18,13 +17,13 @@ export interface BridgeProbe {
   mode: "embedded" | "external";
 }
 
-/** 
- * Probes bridge connectivity for the dashboard's "System Status" signal. 
- * 
- * The bridge is embedded in this same deployment, so the probe is local unless 
- * an operator explicitly configured a *different* external bridge origin 
- * (legacy standalone FastAPI host). Any failure (DNS, timeout, HTTP error, 
- * malformed body) degrades to `reachable: false` — never a 500. 
+/**
+ * Probes bridge connectivity for the dashboard's "System Status" signal.
+ *
+ * The bridge is embedded in this same deployment, so the probe is local unless
+ * an operator explicitly configured a *different* external bridge origin
+ * (legacy standalone FastAPI host). Any failure (DNS, timeout, HTTP error,
+ * malformed body) degrades to `reachable: false` — never a 500.
  */
 async function probeBridge(request: Request): Promise<BridgeProbe> {
   const checkedAt = new Date().toISOString();
@@ -56,27 +55,23 @@ async function probeBridge(request: Request): Promise<BridgeProbe> {
   }
 }
 
-/** 
- * Dashboard system health: gateway runtime status plus Storage Bridge 
- * connectivity plus R2 storage health. `systemStatus` is "operational" only when 
- * the bridge and R2 are reachable; the embedded bridge always is. 
+/**
+ * Dashboard system health: gateway runtime status plus Storage Bridge
+ * connectivity. `systemStatus` is "operational" only when the bridge is
+ * reachable; the embedded bridge always is.
  */
 export async function GET(request: Request) {
   return apiRoute(request, async (requestId) => {
     await requireAdminRequest(request, "read_files");
     const bridge = await probeBridge(request);
-    const storage = getStorageService();
-    const r2 = await storage.healthCheck();
     return success({
-      systemStatus:
-        bridge.reachable && r2.reachable ? "operational" : "degraded",
+      systemStatus: bridge.reachable ? "operational" : "degraded",
       gateway: {
         runtime: "nodejs",
         uptimeSeconds: Math.round(process.uptime()),
         checkedAt: new Date().toISOString(),
       },
       bridge,
-      r2,
     }, requestId);
   }, { route: "health" });
 }
