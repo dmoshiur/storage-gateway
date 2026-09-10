@@ -35,6 +35,15 @@ import type {
  * Authentication (handled automatically by the SDK, in priority order):
  *  1. `BLOB_READ_WRITE_TOKEN` (Vercel Blob integration / dashboard token)
  *  2. Vercel OIDC (`VERCEL_OIDC_TOKEN` + `BLOB_STORE_ID`) on Vercel runtimes
+ *
+ * OIDC FIX:
+ * Previously the upload pipeline used handleUpload which REQUIRES a static
+ * BLOB_READ_WRITE_TOKEN and fails under OIDC-only deployments with
+ * "Failed to retrieve the client token" / "Network error during upload".
+ * Vercel docs state: handleUpload always requires read-write token, use
+ * handleUploadPresigned for OIDC. This adapter now supports BOTH via
+ * issueSignedToken (works with OIDC or token) and presignUrl (HMAC-only).
+ * The new /api/blob/upload route uses handleUploadPresigned + BLOB_WEBHOOK_PUBLIC_KEY.
  */
 
 const PRIVATE_ACCESS = "private" as const;

@@ -58,6 +58,10 @@ export async function POST(request: Request) {
     try {
       const expiresInSeconds = Math.min(20 * 60, Math.max(5 * 60, settings.signedUrlExpirySeconds));
       // Direct browser-to-Blob upload: bytes never transit the Next.js server.
+      // This now uses issueSignedToken + presignUrl which is OIDC-compatible
+      // (storeId + VERCEL_OIDC_TOKEN). For full OIDC client flow, frontend
+      // should use /api/blob/upload via uploadPresigned, but we keep this
+      // URL for backward compat and return pathname for the new flow.
       const uploadUrl = await getStorageService().getSignedUploadUrl(file.storagePath, {
         expiresInSeconds,
         contentType: document.mimeType,
@@ -66,6 +70,8 @@ export async function POST(request: Request) {
       });
       return success({
         file: serializeFile(file),
+        // Expose pathname for OIDC presigned flow (uploadPresigned needs it)
+        pathname: file.storagePath,
         uploadUrl,
         uploadMethod: "PUT",
         uploadHeaders: { "Content-Type": document.mimeType },
