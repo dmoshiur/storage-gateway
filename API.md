@@ -31,20 +31,22 @@ Never construct an admin-only request based on a browser-side `isAdmin` value.
 
 ### NGO website integration API
 
-The NGO main website ([gramunnayan.com](https://gramunnayan.com)) has two
-integration modes:
+The NGO main website ([gramunnayan.com](https://gramunnayan.com)) calls this same
+Vercel deployment. `AM_STORAGE_BRIDGE_URL` on the integration server is this
+app's own URL (for example `https://st.thamjj13.top`) — no separate bridge
+server exists. Two integration modes are available:
 
-1. **Recommended — through the AM Storage Bridge (FastAPI).** The public bridge
+1. **Recommended — through the embedded Storage Bridge.** The public bridge
    endpoint `POST /api/v1/storage/upload` accepts multipart PDF, DOC, DOCX,
    TXT, PPT, and PPTX documents authenticated with a **dual-token credential**
    generated in the dashboard (**Admin → API Management**): a visible
    **API Key ID** (`am_store_live_…`) plus an **API Secret Key**
    (`am_sec_live_…`, displayed exactly once, Cloudflare R2 style). The bridge
-   validates the credential against the registry, streams the document into
-   private R2, registers it, and returns a signed document URL. It also exposes
-   credential-protected `GET /api/files`,
-   `GET /api/files/{id}` and `GET /api/files/{id}/download`. See
-   `fastapi/README.md`.
+   validates the credential against the registry, stores the document in
+   private R2, registers it, and returns a signed document URL. The same
+   credential also authorizes read-only `GET /api/files`,
+   `GET /api/files/{id}` and `GET /api/files/{id}/download`, and
+   `GET /api/v1/health` reports bridge liveness without authentication.
 
    Three credential forms are accepted (in priority order):
 
@@ -56,6 +58,7 @@ integration modes:
    # b) HMAC signed (secret is never sent after setup; replay-protected by
    #    the 5-minute timestamp window). signature = HMAC-SHA256(
    #    keySecret, "<timestamp>:<sha256hex(raw body bytes)>") in lowercase hex.
+   #    The timestamp accepts unix seconds or milliseconds.
    X-AM-Storage-Key-Id: am_store_live_xxxxxx
    X-AM-Storage-Timestamp: 1788888888
    X-AM-Storage-Signature: <64-char hex>
@@ -68,16 +71,13 @@ integration modes:
    (the secret is then stored AES-256-GCM encrypted so HMACs can be verified
    without persisting plaintext). Revocation takes effect on the next request.
 
-   > **`POST /api/v1/storage/upload` is owned by the FastAPI bridge, not by
-   > this Next.js gateway.** The gateway offers an optional compatibility proxy
-   > at `/api/v1/storage/upload` that streams the upload to the configured
-   > `BRIDGE_URL` / `NEXT_PUBLIC_BRIDGE_URL` origin. When no bridge origin is
-   > configured, the gateway returns a JSON 404
-   > (`BRIDGE_ENDPOINT_NOT_AT_GATEWAY`) instead of an HTML page. Point
-   > `AM_STORAGE_BRIDGE_URL` on the integration server at the bridge origin; if
-   > the integration must call the gateway host, set the gateway's
-   > `BRIDGE_URL` / `NEXT_PUBLIC_BRIDGE_URL` to the FastAPI bridge origin so the
-   > proxy can forward the upload.
+   > **Upload size guidance.** Vercel functions reject request payloads above
+   > ~4.5 MB before application code runs. Send documents up to **~4 MB** with
+   > direct multipart `POST /api/v1/storage/upload`; send larger documents (up
+   > to the configured max, default 50 MB) through the presigned
+   > `POST /api/v1/storage/upload/init` → `PUT` bytes straight to R2 →
+   > `POST /api/v1/storage/upload/complete` flow. Ready-made snippets for both
+   > flows are on the dashboard **API Management** page.
 
 2. **Direct read-only gateway access** from the NGO server's own backend with:
 
@@ -507,11 +507,67 @@ export async function getDocumentDownloadUrl(fileId: string) {
 
 If the public website itself serves visitors, add its own authorization rules before it calls the gateway. A gateway integration key grants the NGO website server access to all active metadata, so it must be kept server-side and scoped operationally.
 
+## Storage Bridge endpoints
+
+These public bridge routes run in this same deployment and authenticate with
+the dashboard-managed dual-token / HMAC / legacy credential (see
+[Authentication modes](#authentication-modes)). Every upload attempt — success
+or failure — is logged to the dashboard's API Upload Activity feed. Responses
+carry CORS headers for the configured `CORS_ORIGINS`.
+
+### `GET /api/v1/health` (no authentication)
+
+Liveness probe for the integration server. Returns the unenveloped payload
+`{ "status": "ok", "service": "AM Storage Company", "bridge": "ready", "mode": "embedded", "version": "…", "auth": "dual-token|hmac|legacy", "r2Configured": true }`.
+
+### `POST /api/v1/storage/upload`
+
+Multipart form data with a `file` field (PDF, DOC, DOCX, TXT, PPT, or PPTX; up
+to ~4 MB) and optional `title`, `description`, `category`, `tags`
+(comma-separated or JSON array, max 20 × 32 chars). Success responds `201`:
+
+```json
+{
+  "success": true,
+  "data": {
+    "file": { "id": "…", "originalName": "annual-report.pdf", "status": "active" },
+    "url": "https://…signed document URL…",
+    "expiresAt": "2026-09-09T13:00:00.000Z",
+    "filename": "annual-report.pdf",
+    "size": 432100
+  },
+  "requestId": "…"
+}
+```
+
+The signed `url` (inline disposition, `AM_STORAGE_SIGNED_URL_EXPIRY_SECONDS`
+lifetime) is what the NGO site shows its visitors. Other methods on this path
+return `405 METHOD_NOT_ALLOWED`.
+
+### `POST /api/v1/storage/upload/init`
+
+Step 1 of the presigned flow for larger documents (up to the configured max).
+JSON body: `{ originalName, size, mimeType?, title?, description?, category?, tags? }`.
+Success responds `201` with `{ file, uploadUrl, uploadHeaders, directUploadRecommended, expiresAt }`.
+The integration then `PUT`s the exact bytes to `uploadUrl` with the returned
+`uploadHeaders` (`Content-Type` + `x-amz-meta-file-id`) — bytes stream straight
+to private R2, never through Vercel.
+
+### `POST /api/v1/storage/upload/complete`
+
+Step 3 of the presigned flow. JSON body: `{ fileId }` from the init response.
+The staged object is verified (size, content type, ownership, magic bytes),
+published to its final key, and registered; only the credential that started
+the upload may complete it (`403` otherwise). Success responds `200` with the
+same `{ file, url, expiresAt, filename, size }` shape as a direct upload, and
+repeating the call for an already-active file mints a fresh URL (idempotent).
+
 ## Storage Bridge internal endpoints
 
 These routes are **server-to-server only** and must never be called from a
-browser. They authenticate with the `X-Storage-Gateway-Key` header (the same
-`INTEGRATION_API_KEY` the bridge holds) and back the FastAPI bridge:
+browser. They authenticate with the `X-Storage-Gateway-Key` header (the shared
+`INTEGRATION_API_KEY`) and exist solely for the optional legacy standalone
+FastAPI bridge — the embedded bridge above does not use them:
 
 ### `POST /api/internal/bridge/verify-key`
 
@@ -533,6 +589,7 @@ Dual-token mode performs a constant-time SHA-256 digest comparison. Signature
 mode decrypts the stored secret (AES-256-GCM, requires `AM_STORAGE_MASTER_KEY`),
 recomputes `HMAC-SHA256(secret, "<timestamp>:<bodyHash>")` in constant time,
 and rejects timestamps outside the ±5-minute skew window (replay protection).
+The timestamp accepts unix seconds or milliseconds.
 A successful check refreshes `lastUsedAt` and increments the per-day request
 counter shown on the dashboard. Responds `200` with
 `{ "valid": true, "keyId": "…" }` or `{ "valid": false, "keyId": null }` —

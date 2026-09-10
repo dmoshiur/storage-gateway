@@ -44,7 +44,11 @@ interface StoragePayload {
 interface HealthPayload {
   systemStatus: "operational" | "degraded";
   gateway: { runtime: string; uptimeSeconds: number; checkedAt: string };
-  bridge: { configured: boolean; reachable: boolean; latencyMs: number; version: string | null; checkedAt: string };
+  bridge: { configured: boolean; reachable: boolean; latencyMs: number; version: string | null; checkedAt: string; mode?: "embedded" | "external" };
+}
+
+function bridgeLabel(bridge: HealthPayload["bridge"]): string {
+  return bridge.mode === "external" ? "External storage bridge" : "Storage bridge (embedded)";
 }
 
 interface UploadLog {
@@ -168,8 +172,8 @@ export function DashboardOverview() {
       {health && (
         <p className="text-xs text-slate-400">
           {operational
-            ? `System Status: Operational · FastAPI bridge reachable${health.bridge.version ? ` (v${health.bridge.version})` : ""} in ${health.bridge.latencyMs} ms`
-            : `System Status: Degraded · FastAPI bridge ${health.bridge.configured ? "is not responding" : "is not configured"} · checked ${formatDate(health.bridge.checkedAt, true)}`}
+            ? `System Status: Operational · ${bridgeLabel(health.bridge)} reachable${health.bridge.version ? ` (v${health.bridge.version})` : ""}${health.bridge.mode === "external" ? ` in ${health.bridge.latencyMs} ms` : ""}`
+            : `System Status: Degraded · ${bridgeLabel(health.bridge)} ${health.bridge.configured ? "is not responding" : "is not configured"} · checked ${formatDate(health.bridge.checkedAt, true)}`}
         </p>
       )}
     </div>
@@ -194,10 +198,12 @@ function SystemStatusBadge({ health }: { health: HealthPayload | null }) {
       role="status"
       title={
         operational
-          ? `FastAPI bridge reachable in ${health.bridge.latencyMs} ms${health.bridge.version ? ` · v${health.bridge.version}` : ""}`
+          ? health.bridge.mode === "external"
+            ? `External storage bridge reachable in ${health.bridge.latencyMs} ms${health.bridge.version ? ` · v${health.bridge.version}` : ""}`
+            : "Storage bridge runs embedded in this deployment."
           : health.bridge.configured
-            ? "FastAPI bridge did not answer the health probe."
-            : "No bridge URL configured for the health probe."
+            ? "Storage bridge did not answer the health probe."
+            : "No bridge configured for the health probe."
       }
     >
       <span className="relative flex h-2 w-2" aria-hidden="true">

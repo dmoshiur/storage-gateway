@@ -6,7 +6,7 @@ import { z } from "zod";
  * payloads deliberately stay small and strictly typed.
  */
 
-/** Matches the final object layout produced by the app and the FastAPI bridge. */
+/** Matches the final object layout produced by the app and both bridge flavors. */
 export const bridgeStorageKeySchema = z
   .string()
   .min(1)
@@ -69,6 +69,34 @@ export const bridgeUploadLogSchema = z.object({
   requestId: z.string().trim().min(1).max(96),
   timestamp: z.string().datetime({ offset: true }).or(z.string().datetime()),
 });
+
+/**
+ * Step 1 of the embedded bridge's presigned flow (`POST /api/v1/storage/upload/init`).
+ * The integration declares the document up front and receives a short-lived R2
+ * PUT URL, so bytes for large documents stream straight to R2 instead of
+ * passing through the Vercel function payload.
+ */
+export const bridgeUploadInitSchema = z.object({
+  originalName: safeBridgeText(180),
+  size: z.number().int().positive().max(1024 * 1024 * 1024),
+  // Recorded only for diagnostics; server-side validation never trusts it.
+  mimeType: z.string().trim().max(100).optional().default(""),
+  title: optionalBridgeText(160),
+  description: optionalBridgeText(2000),
+  category: optionalBridgeText(80),
+  tags: z.array(bridgeTag).max(20).optional().default([]),
+});
+
+export type BridgeUploadInitInput = z.infer<typeof bridgeUploadInitSchema>;
+
+/** Step 3 of the presigned flow (`POST /api/v1/storage/upload/complete`). */
+export const bridgeUploadCompleteSchema = z
+  .object({
+    fileId: z.string().regex(/^[A-Za-z0-9_-]{8,200}$/, "The file identifier is invalid."),
+  })
+  .strict();
+
+export type BridgeUploadCompleteInput = z.infer<typeof bridgeUploadCompleteSchema>;
 
 export const bridgeRegisterFileSchema = z.object({
   storageKey: bridgeStorageKeySchema,

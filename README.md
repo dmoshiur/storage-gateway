@@ -2,15 +2,15 @@
 
 The official **AM Storage Company** platform is a private **document Storage
 Bridge** for PDF, DOC, DOCX, TXT, PPT, and PPTX: an administrative control plane
-(Next.js dashboard, Firestore metadata, Cloudflare R2 object storage) plus a
-high-concurrency FastAPI API bridge that the public NGO website
+(Next.js dashboard, Firestore metadata, Cloudflare R2 object storage) with an
+embedded API bridge that the public NGO website
 [gramunnayan.com](https://gramunnayan.com) calls with dashboard-generated Custom
 API Keys. It is a narrow internal infrastructure service — not a public drive,
 file-sharing product, or social app.
 
 - **Application:** Next.js 16 App Router + TypeScript + Tailwind CSS
-- **Public API bridge:** FastAPI (async, high-concurrency document streaming) — see [`fastapi/README.md`](fastapi/README.md)
-- **Hosting:** Vercel (gateway) + your own host for the FastAPI bridge
+- **Public API bridge:** embedded in the same deployment (`/api/v1/*`) — a legacy standalone FastAPI bridge remains available under [`fastapi/`](fastapi/README.md) but is not required
+- **Hosting:** a single Vercel deployment (dashboard + bridge + cron)
 - **Identity:** Firebase Authentication with server-verified session cookies
 - **Metadata/state:** Cloud Firestore
 - **Document bytes:** private Cloudflare R2 bucket, accessed through short-lived S3 presigned URLs
@@ -30,8 +30,8 @@ provider migration.
 - Server-enforced admin RBAC (`admin`, `editor`, `viewer` policy is centralized and extendable)
 - An administrative dashboard branded **AM Storage Company**, with responsive file library, Trash, storage health, audit log, and settings screens
 - An **API Management** screen that generates/revokes dual-token credentials — a visible **API Key ID** (`am_store_live_…`) plus a high-entropy **API Secret Key** (`am_sec_live_…`) shown exactly once, Cloudflare R2 style — with ready-made integration snippets for gramunnayan.com
-- A dashboard with real-time metric cards (documents stored, storage used vs. the R2 limit, total API requests from gramunnayan.com), a live log of the last 5 API uploads with Success/Failed badges, and a "System Status: Operational" indicator that probes the FastAPI bridge
-- A FastAPI **Storage Bridge** that validates the dual-token credential (or an HMAC signature) server-to-server, streams PDF/DOC/DOCX/TXT/PPT/PPTX documents into R2, registers them as managed documents, logs every attempt to the dashboard, and returns signed document URLs
+- A dashboard with real-time metric cards (documents stored, storage used vs. the R2 limit, total API requests from gramunnayan.com), a live log of the last 5 API uploads with Success/Failed badges, and a "System Status: Operational" indicator for the embedded Storage Bridge
+- An embedded **Storage Bridge** (`POST /api/v1/storage/upload`, plus a presigned init → PUT → complete flow for documents over ~4 MB) that validates the dual-token credential (or an HMAC signature), stores PDF/DOC/DOCX/TXT/PPT/PPTX documents in R2, registers them as managed documents, logs every attempt to the dashboard, and returns signed document URLs
 - Direct browser-to-private-R2 signed uploads with progress indicators
 - Server-side finalization checks for extension, claimed/actual size, R2 content type, signed file identifier, and type-specific magic bytes
 - Staging-to-final R2 copy on finalization so an expiring upload URL cannot overwrite an active document
@@ -54,72 +54,80 @@ provider migration.
 
 ## Storage Bridge for gramunnayan.com
 
+The bridge is **embedded in this same Vercel deployment** — there is no
+separate bridge server to host. gramunnayan.com calls this app's own URL:
+
 ```text
 gramunnayan.com (server)
-      │  POST /api/v1/storage/upload  (multipart PDF/DOC/DOCX/TXT/PPT/PPTX)
+      │  POST /api/v1/storage/upload  (multipart PDF/DOC/DOCX/TXT/PPT/PPTX, ≤ ~4 MB)
       │  Headers: X-AM-Storage-Key-Id + X-AM-Storage-Key-Secret
       │           (or HMAC: X-AM-Storage-Signature + X-AM-Storage-Timestamp)
       ▼
-┌────────────────────────  AM Storage Bridge (FastAPI) ────────────────────────┐
-│ validates credential (gateway registry) · document gate · streams to R2 ·   │
+┌──────────────  AM Storage Company — single Vercel deployment ────────────────┐
+│ Embedded bridge: validates credential · document gate · stores in R2 ·      │
 │ registers doc · logs every attempt (success or failure) to the dashboard    │
-└───────┬──────────────────────────────────────────────┬──────────────────────┘
-        │ X-Storage-Gateway-Key (server-to-server)      │ R2 credentials (private)
-        ▼                                               ▼
-  AM Storage gateway (Next.js)                 Cloudflare R2
-  Firestore metadata · audit · retention       private document bytes
+│ Firestore metadata · audit · retention · dashboard · cron                   │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │ R2 credentials (private, server-only)
+                                       ▼
+                               Cloudflare R2
+                               private document bytes
 ```
 
 1. Generate a credential pair in the dashboard under **API Management** (Admin → API Management).
 2. Copy the snippet and set the variables on the gramunnayan.com **server**
    (`AM_STORAGE_BRIDGE_URL`, `AM_STORAGE_KEY_ID`, `AM_STORAGE_KEY_SECRET`) —
-   never in browser code.
-3. The bridge verifies the credential through the gateway registry (revocation
-   is immediate, `lastUsedAt` is tracked, every attempt is logged on the
-   dashboard), validates the document, streams it to R2, registers the document,
+   never in browser code. `AM_STORAGE_BRIDGE_URL` is **this app's own URL**
+   (for example `https://st.thamjj13.top`).
+3. The bridge verifies the credential against the registry (revocation is
+   immediate, `lastUsedAt` is tracked, every attempt is logged on the
+   dashboard), validates the document, stores it in R2, registers the document,
    and returns `{ file, url }` where `url` is a short-lived signed document URL
    for visitors.
+4. Check liveness anytime with `GET <app-url>/api/v1/health` — the response
+   includes `"bridge": "ready"` and `"mode": "embedded"`.
 
-### Troubleshooting — `POST /api/v1/storage/upload` returns HTTP 404 HTML
+### Upload size guidance
 
-If the upload sends `POST https://<gateway-host>/api/v1/storage/upload` and
-receives a **404 with an HTML/`/_next/static/...` body**, the request is
-hitting the **Next.js gateway**, not the **FastAPI bridge**.
+Vercel functions reject request payloads above ~4.5 MB before application code
+runs, so:
 
-- `st.thamjj13.top` resolves to a Vercel deployment (`*.vercel-dns-*.com`),
-  which is the Next.js gateway, not the FastAPI bridge.
-- The gateway does **not** parse document bytes itself. It exposes an optional
-  compatibility proxy at `/api/v1/storage/upload` that streams the request to
-  the configured `BRIDGE_URL` / `NEXT_PUBLIC_BRIDGE_URL` origin. If that origin
-  is not configured, the path returns a JSON
-  `BRIDGE_ENDPOINT_NOT_AT_GATEWAY` diagnostic instead of an HTML 404.
-- Set `AM_STORAGE_BRIDGE_URL` on the gramunnayan.com server (and
-  `NEXT_PUBLIC_BRIDGE_URL` / `BRIDGE_URL` on the gateway) to the deployed
-  **FastAPI** bridge origin — never to the gateway host, which would loop the
-  upload back to the gateway. Verify it with `GET <bridge-origin>/health`; the
-  response includes `"bridge": "ready"`.
-- If the integration calls the gateway origin because it cannot reach the
-  bridge, use the proxy by pointing the gateway's `BRIDGE_URL` at the FastAPI
-  bridge; the proxy preserves the JSON response, status code, and `requestId`.
+- documents up to **~4 MB** use direct multipart `POST /api/v1/storage/upload`;
+- larger documents (up to the configured max, default **50 MB**) use the
+  presigned flow: `POST /api/v1/storage/upload/init` → `PUT` the bytes straight
+  to the returned R2 URL → `POST /api/v1/storage/upload/complete`. The dashboard
+  **API Management** page has a ready-made snippet for both flows.
 
-To host the bridge, use the bundled `fastapi/Dockerfile` or the root
-[`render.yaml`](render.yaml) Blueprint (Docker, `rootDir: fastapi`, `/health`
-probe), then set the resulting origin as `NEXT_PUBLIC_BRIDGE_URL` / `BRIDGE_URL`
-on the gateway and `AM_STORAGE_BRIDGE_URL` on the gramunnayan.com server. See
-[`fastapi/README.md`](fastapi/README.md) for deployment, environment
-variables, and the full endpoint reference. The gateway-internal bridge routes
-(`POST /api/internal/bridge/verify-key`, `POST /api/internal/bridge/files`) are
-server-to-server only and require the `X-Storage-Gateway-Key` header.
+### Troubleshooting
+
+- A **404 with an HTML body** on `/api/v1/*` means the request did not reach a
+  current deployment of this app (stale edge cache, wrong host, or a proxy
+  rewriting the path). Current deployments answer every `/api/v1/*` path with
+  JSON: unknown subpaths return `404 UNKNOWN_BRIDGE_ROUTE` naming the path.
+- `401 INVALID_API_KEY` means the credential headers are missing, revoked, or
+  mistyped. `503 KEY_SERVICE_UNAVAILABLE` means the Firestore registry itself
+  is unreachable — retry shortly.
+- `503 SIGNATURE_VERIFICATION_UNAVAILABLE` on HMAC signed requests means the
+  deployment has no `AM_STORAGE_MASTER_KEY`; either set it or use the dual-token
+  headers.
+
+A legacy standalone FastAPI bridge remains available under [`fastapi/`](fastapi/README.md)
+(optional, self-hosted via the bundled Dockerfile or [`render.yaml`](render.yaml));
+the gateway-internal bridge routes (`POST /api/internal/bridge/verify-key`,
+`POST /api/internal/bridge/files`, `POST /api/internal/bridge/upload-logs`) are
+server-to-server only, require the `X-Storage-Gateway-Key` header, and exist
+solely for that external bridge.
 
 ## Architecture
 
 ```text
 NGO website server                         Admin browser
        │                                         │
-       │ X-Storage-Gateway-Key                    │ Firebase email/password
+       │ X-AM-Storage-Key-Id/Secret              │ Firebase email/password
+       │ (or X-Storage-Gateway-Key reads)        │ (or ADMIN_PASS)
        ▼                                         ▼
 ┌───────────────────────────── Vercel / Next.js ─────────────────────────────┐
-│ API routes · Firebase Admin SDK · RBAC · retention · audit · cron lock     │
+│ Embedded bridge (/api/v1/*) · API routes · RBAC · retention · audit · cron │
 │               │                                      │                     │
 │               ▼                                      ▼                     │
 │      Firebase Auth (session verification)     Firestore metadata/state      │

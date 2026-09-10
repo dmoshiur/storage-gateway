@@ -1,100 +1,74 @@
-import { getBridgeUrl } from "@/lib/env";
-import { bridgeRouteNotAtGateway } from "@/lib/api/bridge-route-not-at-gateway";
+import { NextResponse } from "next/server";
+import { apiRoute } from "@/lib/api/route";
+import { requestIdFrom } from "@/lib/api/response";
+import { handleBridgeDirectUpload } from "@/lib/bridge/handlers";
+import { bridgePreflightResponse, withBridgeCors } from "@/lib/bridge/upload";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+/** Document validation + R2 streaming can take longer than the default budget. */
+export const maxDuration = 60;
 
 /**
- * True when the configured bridge origin is this same gateway host. That is the
- * classic misconfiguration (`NEXT_PUBLIC_BRIDGE_URL=https://<gateway-host>`)
- * that produced the original HTML 404; proxying to ourselves would loop until
- * the request times out, so we return the JSON diagnostic instead.
+ * Embedded Storage Bridge — served by this same Vercel deployment.
+ *
+ * `POST /api/v1/storage/upload` accepts one multipart document (PDF, DOC,
+ * DOCX, TXT, PPT, PPTX) authenticated with the dashboard-managed dual-token
+ * credential (`X-AM-Storage-Key-Id` + `X-AM-Storage-Key-Secret`), an HMAC
+ * signature, or a legacy single key. It validates the credential, checks the
+ * document structure, streams the bytes into private Cloudflare R2, registers
+ * the document, logs the attempt for the dashboard, and returns a signed
+ * document URL.
+ *
+ * Vercel functions reject request payloads above ~4.5 MB before this code
+ * runs; integrations must send larger documents through the presigned
+ * `.../upload/init` → PUT → `.../upload/complete` flow instead.
  */
-function bridgePointsAtGateway(request: Request, bridgeUrl: string): boolean {
-  let target: URL;
-  try {
-    target = new URL(bridgeUrl);
-  } catch {
-    return false;
-  }
-  const hostCandidates = [
-    request.headers.get("x-forwarded-host"),
-    request.headers.get("host"),
-  ]
-    .filter((value): value is string => Boolean(value))
-    .map((value) => value.split(",")[0].trim().toLowerCase());
-  try {
-    hostCandidates.push(new URL(request.url).host.toLowerCase());
-  } catch {
-    // request.url is always absolute in Next.js; ignore unexpected shapes.
-  }
-  return hostCandidates.some((host) => host === target.host.toLowerCase());
+export async function POST(request: Request) {
+  const response = await apiRoute(request, (requestId) => handleBridgeDirectUpload(request, requestId), {
+    route: "v1/storage/upload",
+  });
+  return withBridgeCors(response, request);
 }
 
-/**
- * Optional compatibility proxy: forwards the public bridge upload contract
- * (`POST /api/v1/storage/upload`) to the configured FastAPI bridge origin.
- *
- * The gateway itself does not accept document bytes. This route lets a GUSB
- * integration keep using `AM_STORAGE_BRIDGE_URL=<gateway>` when the operator
- * points the gateway's `BRIDGE_URL` / `NEXT_PUBLIC_BRIDGE_URL` at the deployed
- * FastAPI bridge. For very large documents, call the bridge origin directly or
- * route `/api/v1/*` through a streaming reverse proxy outside Vercel.
- */
-async function proxyUpload(request: Request): Promise<Response> {
-  const bridgeUrl = getBridgeUrl();
-  if (!bridgeUrl) return bridgeRouteNotAtGateway(request);
-  if (bridgePointsAtGateway(request, bridgeUrl)) return bridgeRouteNotAtGateway(request);
-
-  const url = `${bridgeUrl}/api/v1/storage/upload`;
-  const headers = new Headers(request.headers);
-  headers.delete("host");
-  headers.delete("content-length");
-
-  try {
-    const upstream = await fetch(url, {
-      method: request.method,
-      headers,
-      body: request.body,
-      // @ts-expect-error -- Node's fetch requires duplex for streamed bodies.
-      duplex: "half",
-      redirect: "manual",
-      // The bridge handles multipart uploads itself; keep the gateway prompt.
-      cache: "no-store",
-    });
-    const responseHeaders = new Headers(upstream.headers);
-    responseHeaders.delete("content-encoding");
-    responseHeaders.delete("content-length");
-    responseHeaders.delete("transfer-encoding");
-    responseHeaders.delete("connection");
-    responseHeaders.delete("keep-alive");
-    return new Response(upstream.body, {
-      status: upstream.status,
-      headers: responseHeaders,
-    });
-  } catch {
-    const requestId = request.headers.get("x-request-id")?.slice(0, 96) ?? crypto.randomUUID();
-    return Response.json({
-      success: false,
-      error: {
-        code: "BRIDGE_UNAVAILABLE",
-        message: `The AM Storage Bridge could not be reached at ${bridgeUrl}. Check that the FastAPI bridge is running and that BRIDGE_URL / NEXT_PUBLIC_BRIDGE_URL point to it.`,
+function methodNotAllowed(request: Request): Response {
+  const requestId = requestIdFrom(request);
+  return withBridgeCors(
+    NextResponse.json(
+      {
+        success: false,
+        error: {
+          code: "METHOD_NOT_ALLOWED",
+          message: "Use POST with multipart/form-data to upload a document, or GET /api/v1/health to check the bridge.",
+        },
+        requestId,
       },
-      requestId,
-    }, {
-      status: 502,
-      headers: { "X-Request-Id": requestId, "Cache-Control": "no-store", "Content-Type": "application/json" },
-    });
-  }
+      { status: 405, headers: { "X-Request-Id": requestId, "Cache-Control": "no-store", Allow: "POST, OPTIONS" } },
+    ),
+    request,
+  );
 }
 
 export async function GET(request: Request) {
-  return proxyUpload(request);
+  return methodNotAllowed(request);
 }
 
-export async function POST(request: Request) {
-  return proxyUpload(request);
+export async function PUT(request: Request) {
+  return methodNotAllowed(request);
+}
+
+export async function PATCH(request: Request) {
+  return methodNotAllowed(request);
+}
+
+export async function DELETE(request: Request) {
+  return methodNotAllowed(request);
+}
+
+export async function HEAD(request: Request) {
+  return methodNotAllowed(request);
 }
 
 export async function OPTIONS(request: Request) {
-  return proxyUpload(request);
+  return bridgePreflightResponse(request);
 }

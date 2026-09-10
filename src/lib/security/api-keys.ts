@@ -161,6 +161,10 @@ export async function verifyApiCredential(keyId: string, secret: string): Promis
  * with the raw secret; the gateway decrypts the stored secret (master key) and
  * recomputes the HMAC in constant time. Rejects stale timestamps (> 5 minute
  * skew) and replayed requests.
+ *
+ * The timestamp header accepts both unix seconds and unix milliseconds (values
+ * below 10^12 are treated as seconds) so documented snippets and millisecond
+ * senders interoperate.
  */
 export async function verifyApiSignature(input: { keyId: string; timestamp: number; signature: string; bodyHash: string }): Promise<string | null> {
   const trimmedId = input.keyId.trim();
@@ -169,7 +173,8 @@ export async function verifyApiSignature(input: { keyId: string; timestamp: numb
   if (!record.secretEncrypted) {
     throw new ApiError(503, "SIGNATURE_VERIFICATION_UNAVAILABLE", "This API key was created without signature support. Use the dual-token headers instead.");
   }
-  if (!Number.isFinite(input.timestamp) || Math.abs(Date.now() - input.timestamp) > SIGNATURE_MAX_SKEW_MS) return null;
+  const timestampMs = input.timestamp < 1_000_000_000_000 ? input.timestamp * 1000 : input.timestamp;
+  if (!Number.isFinite(input.timestamp) || Math.abs(Date.now() - timestampMs) > SIGNATURE_MAX_SKEW_MS) return null;
   const provided = input.signature.trim().toLowerCase();
   if (!/^[a-f0-9]{64}$/.test(provided) || !/^[a-f0-9]{64}$/.test(input.bodyHash.trim().toLowerCase())) return null;
   const secret = decryptSecret(record.secretEncrypted);

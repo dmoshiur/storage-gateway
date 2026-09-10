@@ -65,9 +65,10 @@ export function getMasterKey(): Buffer | null {
 }
 
 /**
- * Base URL of the FastAPI bridge used by the dashboard's connectivity probe.
- * Falls back to the public NEXT_PUBLIC_BRIDGE_URL value (same origin shown in
- * the integration guide) when no dedicated server-only variable is set.
+ * Base URL of an optional external (legacy FastAPI) bridge, used by the
+ * dashboard's connectivity probe. Falls back to the public
+ * NEXT_PUBLIC_BRIDGE_URL value when no dedicated server-only variable is set.
+ * When unset, the embedded bridge serves all traffic in this deployment.
  */
 export function getBridgeUrl(): string | null {
   const value = (process.env.BRIDGE_URL ?? process.env.NEXT_PUBLIC_BRIDGE_URL ?? "").trim().replace(/\/+$/, "");
