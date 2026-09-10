@@ -1,16 +1,14 @@
 import { NextResponse } from "next/server";
 import { requestIdFrom } from "@/lib/api/response";
 import { bridgePreflightResponse, withBridgeCors } from "@/lib/bridge/upload";
+import { readBlobStoreConfig } from "@/lib/env";
 import { version as appVersion } from "../../../../../package.json";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 function blobConfigured(): boolean {
-  return Boolean(
-    (process.env.BLOB_READ_WRITE_TOKEN ?? "").trim() ||
-      ((process.env.VERCEL_OIDC_TOKEN ?? "").trim() && (process.env.BLOB_STORE_ID ?? "").trim()),
-  );
+  return readBlobStoreConfig().ok;
 }
 
 /**

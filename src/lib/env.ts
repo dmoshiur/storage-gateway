@@ -9,11 +9,6 @@ const firebaseAdminSchema = z.object({
   FIREBASE_PRIVATE_KEY: z.string().min(32),
 });
 
-const blobSchema = z.object({
-  BLOB_READ_WRITE_TOKEN: z.string().min(1).optional(),
-  BLOB_STORE_ID: z.string().min(1).optional(),
-});
-
 function configurationError(area: string, issues: string[], publicMessage?: string): never {
   console.error(JSON.stringify({ level: "error", message: "Missing server configuration", area, issues }));
   throw new ApiError(
@@ -39,10 +34,29 @@ export function getFirebaseAdminEnv() {
  * When the Vercel Blob integration is attached, `BLOB_READ_WRITE_TOKEN` is
  * injected automatically. On Vercel runtimes without an explicit token, the
  * SDK authenticates with OIDC (`VERCEL_OIDC_TOKEN` + `BLOB_STORE_ID`).
+ *
+ * Supports prefixed environment variables generated when connecting a store
+ * with a custom prefix or store name (e.g., `TBLOB_STORE_ID`, `T_BLOB_STORE_ID`,
+ * `T_STORE_ID`, `TBLOB_WEBHOOK_PUBLIC_KEY`, `TBLOB_READ_WRITE_TOKEN`, etc.).
  */
 export type BlobStoreConfig =
-  | { ok: true; token: string | null; storeId: string | null; oidcToken: string | null; authMode: "token" | "oidc" }
-  | { ok: false; token: null; storeId: string | null; oidcToken: string | null; authMode: "none"; error: string };
+  | {
+      ok: true;
+      token: string | null;
+      storeId: string | null;
+      oidcToken: string | null;
+      authMode: "token" | "oidc";
+      webhookPublicKey?: string | null;
+    }
+  | {
+      ok: false;
+      token: null;
+      storeId: string | null;
+      oidcToken: string | null;
+      authMode: "none";
+      error: string;
+      webhookPublicKey?: string | null;
+    };
 
 const BLOB_TOKEN_MISSING =
   "Vercel Blob Private Store is not connected. Attach a Blob store to this Vercel project so BLOB_READ_WRITE_TOKEN is injected, or set BLOB_STORE_ID and enable Vercel OIDC (VERCEL_OIDC_TOKEN). Do not enter a fake storage URL.";
@@ -50,25 +64,143 @@ const BLOB_TOKEN_MISSING =
 const BLOB_STORE_ID_MISSING =
   "Vercel OIDC is present but BLOB_STORE_ID is missing. Set BLOB_STORE_ID to the private Blob store id, or attach the Blob store so BLOB_READ_WRITE_TOKEN is injected.";
 
+/**
+ * Searches environment variables for a key matching exact names or pattern,
+ * with an optional fallback based on value heuristics.
+ */
+function findEnvValue(
+  exactNames: string[],
+  pattern: RegExp,
+  valuePredicate?: (val: string) => boolean,
+): string | null {
+  for (const name of exactNames) {
+    const val = process.env[name];
+    if (typeof val === "string" && val.trim() !== "") {
+      return val.trim();
+    }
+  }
+
+  for (const [key, val] of Object.entries(process.env)) {
+    if (typeof val !== "string" || !val.trim()) continue;
+    if (pattern.test(key)) {
+      return val.trim();
+    }
+  }
+
+  if (valuePredicate) {
+    for (const [, val] of Object.entries(process.env)) {
+      if (typeof val !== "string" || !val.trim()) continue;
+      const trimmed = val.trim();
+      if (valuePredicate(trimmed)) {
+        return trimmed;
+      }
+    }
+  }
+
+  return null;
+}
+
+function findBlobToken(): string | null {
+  return findEnvValue(
+    ["BLOB_READ_WRITE_TOKEN", "BLOB_TOKEN"],
+    /(?:^|_)BLOB_READ_WRITE_TOKEN$|^(?:.*_)?READ_WRITE_TOKEN$|^(?:.*_)?BLOB_TOKEN$/i,
+    (val) => val.startsWith("vercel_blob_rw_"),
+  );
+}
+
+function findBlobStoreId(): string | null {
+  return findEnvValue(
+    ["BLOB_STORE_ID", "BLOB_ID"],
+    /(?:^|_)BLOB_STORE_ID$|^(?:.*_)?STORE_ID$|^(?:.*_)?BLOB_ID$/i,
+    (val) => val.startsWith("store_"),
+  );
+}
+
+function findBlobWebhookPublicKey(): string | null {
+  return findEnvValue(
+    ["BLOB_WEBHOOK_PUBLIC_KEY", "BLOB_WEBHOOK_KEY"],
+    /(?:^|_)BLOB_WEBHOOK_PUBLIC_KEY$|^(?:.*_)?WEBHOOK_PUBLIC_KEY$|^(?:.*_)?BLOB_WEBHOOK_KEY$/i,
+  );
+}
+
+function findOidcToken(): string | null {
+  return findEnvValue(
+    ["VERCEL_OIDC_TOKEN", "OIDC_TOKEN"],
+    /(?:^|_)VERCEL_OIDC_TOKEN$|^(?:.*_)?OIDC_TOKEN$/i,
+  );
+}
+
+function parseStoreIdFromToken(token: string): string | null {
+  const parts = token.split("_");
+  if (parts.length >= 4 && parts[0] === "vercel" && parts[1] === "blob" && parts[2] === "rw") {
+    return parts[3] || null;
+  }
+  return null;
+}
+
 /** Inspect Blob credentials without throwing (used by health probes). */
 export function readBlobStoreConfig(): BlobStoreConfig {
-  const parsed = blobSchema.safeParse({
-    BLOB_READ_WRITE_TOKEN: process.env.BLOB_READ_WRITE_TOKEN || undefined,
-    BLOB_STORE_ID: process.env.BLOB_STORE_ID || undefined,
-  });
-  const storeId = parsed.success ? parsed.data.BLOB_STORE_ID ?? null : null;
-  const explicitToken = parsed.success ? parsed.data.BLOB_READ_WRITE_TOKEN ?? null : null;
-  const oidcToken = process.env.VERCEL_OIDC_TOKEN?.trim() || null;
-  if (explicitToken) {
-    return { ok: true, token: explicitToken, storeId, oidcToken, authMode: "token" };
+  const token = findBlobToken();
+  const rawStoreId = findBlobStoreId();
+  const oidcToken = findOidcToken();
+  const webhookPublicKey = findBlobWebhookPublicKey();
+
+  const storeId = rawStoreId ?? (token ? parseStoreIdFromToken(token) : null);
+
+  // Normalize standard env variables so downstream packages / SDKs find them seamlessly
+  if (token && !process.env.BLOB_READ_WRITE_TOKEN) {
+    process.env.BLOB_READ_WRITE_TOKEN = token;
   }
-  if (oidcToken && storeId) {
-    return { ok: true, token: null, storeId, oidcToken, authMode: "oidc" };
+  if (storeId && !process.env.BLOB_STORE_ID) {
+    process.env.BLOB_STORE_ID = storeId;
   }
+  if (webhookPublicKey && !process.env.BLOB_WEBHOOK_PUBLIC_KEY) {
+    process.env.BLOB_WEBHOOK_PUBLIC_KEY = webhookPublicKey;
+  }
+
+  if (token) {
+    return {
+      ok: true,
+      token,
+      storeId,
+      oidcToken,
+      authMode: "token",
+      webhookPublicKey,
+    };
+  }
+
+  if (storeId) {
+    return {
+      ok: true,
+      token: null,
+      storeId,
+      oidcToken,
+      authMode: "oidc",
+      webhookPublicKey,
+    };
+  }
+
   if (oidcToken && !storeId) {
-    return { ok: false, token: null, storeId: null, oidcToken, authMode: "none", error: BLOB_STORE_ID_MISSING };
+    return {
+      ok: false,
+      token: null,
+      storeId: null,
+      oidcToken,
+      authMode: "none",
+      error: BLOB_STORE_ID_MISSING,
+      webhookPublicKey,
+    };
   }
-  return { ok: false, token: null, storeId, oidcToken: null, authMode: "none", error: BLOB_TOKEN_MISSING };
+
+  return {
+    ok: false,
+    token: null,
+    storeId: null,
+    oidcToken: null,
+    authMode: "none",
+    error: BLOB_TOKEN_MISSING,
+    webhookPublicKey,
+  };
 }
 
 /**
@@ -78,12 +210,22 @@ export function readBlobStoreConfig(): BlobStoreConfig {
  * injected automatically. On Vercel runtimes without an explicit token, the
  * SDK authenticates with OIDC (`VERCEL_OIDC_TOKEN` + `BLOB_STORE_ID`).
  */
-export function getBlobStoreConfig(): { token: string | null; storeId: string | null; oidcToken: string | null } {
+export function getBlobStoreConfig(): {
+  token: string | null;
+  storeId: string | null;
+  oidcToken: string | null;
+  webhookPublicKey?: string | null;
+} {
   const config = readBlobStoreConfig();
   if (!config.ok) {
     return configurationError("blob", [config.error], config.error);
   }
-  return { token: config.token, storeId: config.storeId, oidcToken: config.oidcToken };
+  return {
+    token: config.token,
+    storeId: config.storeId,
+    oidcToken: config.oidcToken,
+    webhookPublicKey: config.webhookPublicKey,
+  };
 }
 
 export function getRequiredSecret(name: "INTEGRATION_API_KEY" | "CRON_SECRET"): string {

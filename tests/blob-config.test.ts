@@ -3,7 +3,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 
 describe("Vercel Blob store configuration", () => {
-  const envKeys = ["BLOB_READ_WRITE_TOKEN", "BLOB_STORE_ID", "VERCEL_OIDC_TOKEN"] as const;
+  const envKeys = [
+    "BLOB_READ_WRITE_TOKEN",
+    "BLOB_STORE_ID",
+    "BLOB_WEBHOOK_PUBLIC_KEY",
+    "VERCEL_OIDC_TOKEN",
+    "TBLOB_STORE_ID",
+    "TBLOB_WEBHOOK_PUBLIC_KEY",
+    "TBLOB_READ_WRITE_TOKEN",
+    "T_BLOB_STORE_ID",
+    "T_BLOB_WEBHOOK_PUBLIC_KEY",
+    "T_BLOB_READ_WRITE_TOKEN",
+    "T_STORE_ID",
+    "T_WEBHOOK_PUBLIC_KEY",
+    "T_READ_WRITE_TOKEN",
+  ] as const;
   const snapshot: Record<string, string | undefined> = {};
 
   beforeEach(() => {
@@ -59,6 +73,71 @@ describe("Vercel Blob store configuration", () => {
     if (!read.ok) throw new Error("expected ok");
     expect(read.authMode).toBe("oidc");
     expect(read.storeId).toBe("store_private_pdfs");
+  });
+
+  it("accepts clean BLOB_STORE_ID and BLOB_WEBHOOK_PUBLIC_KEY without any prefix", async () => {
+    process.env.BLOB_STORE_ID = "store_clean123";
+    process.env.BLOB_WEBHOOK_PUBLIC_KEY = "key_clean456";
+    const { readBlobStoreConfig, getBlobStoreConfig } = await import("@/lib/env");
+    const read = readBlobStoreConfig();
+    expect(read.ok).toBe(true);
+    if (!read.ok) throw new Error("expected ok");
+    expect(read.authMode).toBe("oidc");
+    expect(read.storeId).toBe("store_clean123");
+    expect(read.webhookPublicKey).toBe("key_clean456");
+    expect(getBlobStoreConfig().storeId).toBe("store_clean123");
+    expect(getBlobStoreConfig().webhookPublicKey).toBe("key_clean456");
+  });
+
+  it("accepts BLOB_STORE_ID alone without static VERCEL_OIDC_TOKEN in env", async () => {
+    process.env.BLOB_STORE_ID = "store_private_pdfs";
+    const { readBlobStoreConfig, getBlobStoreConfig } = await import("@/lib/env");
+    const read = readBlobStoreConfig();
+    expect(read.ok).toBe(true);
+    if (!read.ok) throw new Error("expected ok");
+    expect(read.authMode).toBe("oidc");
+    expect(read.storeId).toBe("store_private_pdfs");
+    expect(getBlobStoreConfig().storeId).toBe("store_private_pdfs");
+  });
+
+  it("accepts Vercel automated prefixed TBLOB_STORE_ID and TBLOB_WEBHOOK_PUBLIC_KEY", async () => {
+    process.env.TBLOB_STORE_ID = "store_test123";
+    process.env.TBLOB_WEBHOOK_PUBLIC_KEY = "key_test456";
+    const { readBlobStoreConfig, getBlobStoreConfig } = await import("@/lib/env");
+    const read = readBlobStoreConfig();
+    expect(read.ok).toBe(true);
+    if (!read.ok) throw new Error("expected ok");
+    expect(read.authMode).toBe("oidc");
+    expect(read.storeId).toBe("store_test123");
+    expect(read.webhookPublicKey).toBe("key_test456");
+    expect(getBlobStoreConfig().storeId).toBe("store_test123");
+    expect(process.env.BLOB_STORE_ID).toBe("store_test123");
+    expect(process.env.BLOB_WEBHOOK_PUBLIC_KEY).toBe("key_test456");
+  });
+
+  it("accepts underscore-prefixed T_BLOB_STORE_ID and T_BLOB_WEBHOOK_PUBLIC_KEY", async () => {
+    process.env.T_BLOB_STORE_ID = "store_test789";
+    process.env.T_BLOB_WEBHOOK_PUBLIC_KEY = "key_test789";
+    const { readBlobStoreConfig, getBlobStoreConfig } = await import("@/lib/env");
+    const read = readBlobStoreConfig();
+    expect(read.ok).toBe(true);
+    if (!read.ok) throw new Error("expected ok");
+    expect(read.authMode).toBe("oidc");
+    expect(read.storeId).toBe("store_test789");
+    expect(read.webhookPublicKey).toBe("key_test789");
+    expect(getBlobStoreConfig().storeId).toBe("store_test789");
+  });
+
+  it("accepts prefixed read-write token TBLOB_READ_WRITE_TOKEN", async () => {
+    process.env.TBLOB_READ_WRITE_TOKEN = "vercel_blob_rw_store_abc_secret";
+    const { readBlobStoreConfig, getBlobStoreConfig } = await import("@/lib/env");
+    const read = readBlobStoreConfig();
+    expect(read.ok).toBe(true);
+    if (!read.ok) throw new Error("expected ok");
+    expect(read.authMode).toBe("token");
+    expect(read.token).toBe("vercel_blob_rw_store_abc_secret");
+    expect(getBlobStoreConfig().token).toBe("vercel_blob_rw_store_abc_secret");
+    expect(process.env.BLOB_READ_WRITE_TOKEN).toBe("vercel_blob_rw_store_abc_secret");
   });
 
   it("explains missing BLOB_STORE_ID when only OIDC is present", async () => {
