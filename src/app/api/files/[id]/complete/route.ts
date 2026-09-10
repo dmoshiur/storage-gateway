@@ -6,11 +6,11 @@ import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { activateUpload, clearUploadKey, markUploadFailed, requireFileById, serializeFile } from "@/lib/firestore/files";
 import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
 import { getStorageService } from "@/lib/storage";
-import { assertValidatedR2Pdf } from "@/lib/validation/pdf";
+import { assertValidatedR2Document } from "@/lib/validation/documents";
 
 export const runtime = "nodejs";
 
-const VALIDATION_CODES = new Set(["INVALID_FILE_TYPE", "UPLOAD_SIZE_MISMATCH", "UPLOAD_OWNERSHIP_MISMATCH", "INVALID_PDF"]);
+const VALIDATION_CODES = new Set(["INVALID_FILE_TYPE", "UPLOAD_SIZE_MISMATCH", "UPLOAD_OWNERSHIP_MISMATCH", "INVALID_DOCUMENT"]);
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   return apiRoute(request, async (requestId) => {
@@ -31,7 +31,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         storage.download(stagingKey, "bytes=-2048"),
       ]);
       verifiedEtag = metadata.etag;
-      assertValidatedR2Pdf({
+      assertValidatedR2Document({
         originalName: file.originalName,
         expectedSize: file.size,
         actualSize: metadata.contentLength,
@@ -48,14 +48,14 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         await writeAuditLogSafely({ action: "UPLOAD_FAILED", actor: auditActorFrom(actor), fileId: file.id, fileName: file.originalName, details: { reason: error.code } });
         throw error;
       }
-      throw new ApiError(502, "STORAGE_UNAVAILABLE", "The PDF could not be verified in storage. Please retry shortly.");
+      throw new ApiError(502, "STORAGE_UNAVAILABLE", "The document could not be verified in storage. Please retry shortly.");
     }
 
     try {
       // Publish an immutable final object. The upload URL only authorizes its separate staging key.
       if (stagingKey !== file.storageKey) await storage.copy(stagingKey, file.storageKey, verifiedEtag);
     } catch {
-      throw new ApiError(502, "STORAGE_UNAVAILABLE", "The verified PDF could not be finalized in storage. Please retry shortly.");
+      throw new ApiError(502, "STORAGE_UNAVAILABLE", "The verified document could not be finalized in storage. Please retry shortly.");
     }
     const active = await activateUpload(id);
     // A failed staging deletion is recorded by retaining uploadKey for daily cleanup.

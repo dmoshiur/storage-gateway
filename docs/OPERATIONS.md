@@ -59,5 +59,5 @@ The included in-memory rate limiter intentionally acts per warm Vercel instance 
 
 1. **Suspected credential exposure:** immediately revoke/rotate the R2 API token, Firebase service account key if exposed, integration key, and cron secret. Update Vercel environment variables, redeploy, and review logs/audit events.
 2. **Unexpected automatic deletion:** immediately disable Default automatic deletion / verify Trash safety in Settings. Restore from Trash where possible. Review the relevant `AUTO_DELETE` log and retention metadata.
-3. **Storage nearing critical limit:** remove unneeded recoverable Trash PDFs only after review; avoid changing global limits solely to hide a capacity problem.
+3. **Storage nearing critical limit:** remove unneeded recoverable Trash documents only after review; avoid changing global limits solely to hide a capacity problem.
 4. **Website integration abuse:** rotate `INTEGRATION_API_KEY`, update only the website server, and use Vercel WAF/rate rules. Do not place the replacement key in a frontend build.

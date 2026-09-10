@@ -11,7 +11,7 @@ export interface ObjectMetadata {
 export interface UploadObjectInput {
   key: string;
   body: Uint8Array | ReadableStream | NodeJS.ReadableStream;
-  contentType: "application/pdf";
+  contentType: string;
   contentLength?: number;
   metadata?: Record<string, string>;
 }
@@ -20,10 +20,12 @@ export interface SignedDownloadOptions {
   expiresInSeconds: number;
   disposition: "inline" | "attachment";
   filename: string;
+  contentType?: string;
 }
 
 export interface SignedUploadOptions {
   expiresInSeconds: number;
+  contentType: string;
   contentLength: number;
   metadata: Record<string, string>;
 }

@@ -28,7 +28,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     } catch (error) {
       try { await revertPermanentDeletion(id, "R2_DELETE_FAILED"); } catch { /* pending lifecycle retries safely in cron */ }
       logger.error("Manual permanent delete failed", { fileId: id, error: error instanceof Error ? error.message : "unknown" });
-      throw new ApiError(502, "DELETE_FAILED", "The PDF deletion could not be finalized. Its safe deletion state will be retried; refresh Trash or contact an administrator.");
+      throw new ApiError(502, "DELETE_FAILED", "The document deletion could not be finalized. Its safe deletion state will be retried; refresh Trash or contact an administrator.");
     }
   }, { route: "files/permanent-delete" });
 }

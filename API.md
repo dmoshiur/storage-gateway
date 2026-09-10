@@ -13,7 +13,7 @@ Errors use the same stable envelope and never return internal stack traces:
   "success": false,
   "error": {
     "code": "FILE_NOT_FOUND",
-    "message": "The requested PDF was not found."
+    "message": "The requested document was not found."
   },
   "requestId": "uuid"
 }
@@ -35,13 +35,14 @@ The NGO main website ([gramunnayan.com](https://gramunnayan.com)) has two
 integration modes:
 
 1. **Recommended — through the AM Storage Bridge (FastAPI).** The public bridge
-   endpoint `POST /api/v1/storage/upload` accepts multipart PDFs authenticated
-   with a **dual-token credential** generated in the dashboard (**Admin →
-   API Management**): a visible **API Key ID** (`am_store_live_…`) plus an
-   **API Secret Key** (`am_sec_live_…`, displayed exactly once, Cloudflare R2
-   style). The bridge validates the credential against the registry, streams
-   the PDF into private R2, registers the document, and returns a signed PDF
-   URL. It also exposes credential-protected `GET /api/files`,
+   endpoint `POST /api/v1/storage/upload` accepts multipart PDF, DOC, DOCX,
+   TXT, PPT, and PPTX documents authenticated with a **dual-token credential**
+   generated in the dashboard (**Admin → API Management**): a visible
+   **API Key ID** (`am_store_live_…`) plus an **API Secret Key**
+   (`am_sec_live_…`, displayed exactly once, Cloudflare R2 style). The bridge
+   validates the credential against the registry, streams the document into
+   private R2, registers it, and returns a signed document URL. It also exposes
+   credential-protected `GET /api/files`,
    `GET /api/files/{id}` and `GET /api/files/{id}/download`. See
    `fastapi/README.md`.
 
@@ -68,10 +69,15 @@ integration modes:
    without persisting plaintext). Revocation takes effect on the next request.
 
    > **`POST /api/v1/storage/upload` is owned by the FastAPI bridge, not by
-   > this Next.js gateway.** Calling it on the gateway origin will not upload
-   > anything; the gateway returns a JSON 404
-   > (`BRIDGE_ENDPOINT_NOT_AT_GATEWAY`). Point `AM_STORAGE_BRIDGE_URL`,
-   > `NEXT_PUBLIC_BRIDGE_URL`, and `BRIDGE_URL` at the bridge origin.
+   > this Next.js gateway.** The gateway offers an optional compatibility proxy
+   > at `/api/v1/storage/upload` that streams the upload to the configured
+   > `BRIDGE_URL` / `NEXT_PUBLIC_BRIDGE_URL` origin. When no bridge origin is
+   > configured, the gateway returns a JSON 404
+   > (`BRIDGE_ENDPOINT_NOT_AT_GATEWAY`) instead of an HTML page. Point
+   > `AM_STORAGE_BRIDGE_URL` on the integration server at the bridge origin; if
+   > the integration must call the gateway host, set the gateway's
+   > `BRIDGE_URL` / `NEXT_PUBLIC_BRIDGE_URL` to the FastAPI bridge origin so the
+   > proxy can forward the upload.
 
 2. **Direct read-only gateway access** from the NGO server's own backend with:
 
@@ -141,7 +147,7 @@ Returns the currently verified actor. Requires a valid session.
 
 ### `GET /api/files`
 
-List PDF metadata using cursor pagination.
+List document metadata using cursor pagination.
 
 **Admin session query parameters**
 
@@ -171,6 +177,7 @@ Text search and relative-date filters use a bounded server-side scan (1,000 matc
         "category": "Reports",
         "tags": ["annual", "report"],
         "mimeType": "application/pdf",
+        "extension": "pdf",
         "size": 5242880,
         "createdAt": "2026-09-09T11:30:00.000Z",
         "autoDeleteEnabled": true,
@@ -197,10 +204,9 @@ Return one metadata record. Admin callers can read active or Trash records; inte
 
 ### `POST /api/files/upload/init` (admin only)
 
-`POST /api/files/upload` is a compatibility alias for this upload-authorization step. Both routes return the same direct-to-R2 upload contract; neither accepts raw PDF bytes.
+`POST /api/files/upload` is a compatibility alias for this upload-authorization step. Both routes return the same direct-to-R2 upload contract; neither accepts raw document bytes.
 
-
-Authorize a direct, short-lived staging upload. The PDF payload itself does **not** pass through this API or Vercel.
+Authorize a direct, short-lived staging upload. The document payload itself does **not** pass through this API or Vercel.
 
 **Body**
 
@@ -223,7 +229,7 @@ Authorize a direct, short-lived staging upload. The PDF payload itself does **no
 
 `retention` is optional; when omitted, the server uses current global defaults. `customDeleteAt` is required as `YYYY-MM-DD` only when `retentionType` is `custom_date`.
 
-The server validates `.pdf`, a positive declared byte size, configurable max size, and configured storage capacity before it returns a signed upload URL.
+The server validates a supported `.pdf/.doc/.docx/.txt/.ppt/.pptx` extension, a positive declared byte size, configurable max size, and configured storage capacity before it returns a signed upload URL.
 
 **Success `201`**
 
@@ -250,14 +256,13 @@ Finalize a staging upload after the direct R2 `PUT` returns success. Send `{}` a
 
 The server heads/range-reads the private staging object and checks:
 
-- original extension;
+- supported document extension;
 - exact declared versus actual byte size;
-- `application/pdf` content type;
+- expected content type (`application/pdf`, Word/PowerPoint MIME types, `text/plain`);
 - signed `x-amz-meta-file-id` ownership marker;
-- `%PDF-1.x` magic header;
-- `%%EOF` trailer.
+- type-specific magic bytes: `%PDF-1.x` + `%%EOF` for PDF, OLE2 for DOC/PPT, ZIP for DOCX/PPTX.
 
-A successful object is copied to a random final `pdfs/YYYY/MM/uuid.pdf` key before Firestore becomes `active`. Invalid objects are marked `failed`, audit logged, and deletion is attempted. Retry a transient `STORAGE_UNAVAILABLE` completion; the lifecycle is intentionally idempotent.
+A successful object is copied to a random final `documents/YYYY/MM/uuid.ext` key before Firestore becomes `active`. Invalid objects are marked `failed`, audit logged, and deletion is attempted. Retry a transient `STORAGE_UNAVAILABLE` completion; the lifecycle is intentionally idempotent.
 
 ### `PATCH /api/files/:id` (admin only)
 
@@ -307,7 +312,7 @@ The gateway first moves metadata through `deleting`, then deletes the R2 object,
 
 ### `GET /api/files/:id/download`
 
-Generate a configurable short-lived R2 `GET` URL. Both admin sessions and website integration keys can call this for permitted active PDFs.
+Generate a configurable short-lived R2 `GET` URL. Both admin sessions and website integration keys can call this for permitted active documents.
 
 | Query | Default | Meaning |
 | --- | --- | --- |
@@ -377,7 +382,7 @@ degrades to `bridge.reachable: false`.
 {
   "systemStatus": "operational",
   "gateway": { "runtime": "nodejs", "uptimeSeconds": 3600, "checkedAt": "2026-09-09T11:40:00.000Z" },
-  "bridge": { "configured": true, "reachable": true, "latencyMs": 31, "version": "3.0.0", "checkedAt": "2026-09-09T11:40:00.000Z" }
+  "bridge": { "configured": true, "reachable": true, "latencyMs": 31, "version": "3.1.0", "checkedAt": "2026-09-09T11:40:00.000Z" }
 }
 ```
 
@@ -437,7 +442,7 @@ All fields below are required to avoid accidental partial/implicit changes:
 
 Query: `pageSize` (`1..100`, default `50`) and optional opaque `cursor`.
 
-Returns sorted audit records such as `LOGIN`, `UPLOAD`, `DOWNLOAD`, `UPDATE_METADATA`, `CHANGE_RETENTION`, `MOVE_TO_TRASH`, `RESTORE`, `PERMANENT_DELETE`, `AUTO_DELETE`, `SETTINGS_CHANGE`, and `CLEANUP_FAILURE`. Logs intentionally exclude passwords, tokens, secrets, signed URLs, and PDF contents.
+Returns sorted audit records such as `LOGIN`, `UPLOAD`, `DOWNLOAD`, `UPDATE_METADATA`, `CHANGE_RETENTION`, `MOVE_TO_TRASH`, `RESTORE`, `PERMANENT_DELETE`, `AUTO_DELETE`, `SETTINGS_CHANGE`, and `CLEANUP_FAILURE`. Logs intentionally exclude passwords, tokens, secrets, signed URLs, and document contents.
 
 ### `POST /api/cleanup` (admin only)
 
@@ -476,8 +481,8 @@ This must run on the NGO website’s **server**, for example a Next.js Route Han
 
 ```ts
 // NGO main website server-only module
-const gateway = process.env.PDF_GATEWAY_URL!;
-const key = process.env.PDF_GATEWAY_INTEGRATION_KEY!;
+const gateway = process.env.DOCUMENT_GATEWAY_URL!;
+const key = process.env.DOCUMENT_GATEWAY_INTEGRATION_KEY!;
 
 export async function listNgoReports() {
   const response = await fetch(`${gateway}/api/files?search=report&pageSize=25`, {
@@ -489,7 +494,7 @@ export async function listNgoReports() {
   return payload.data.files;
 }
 
-export async function getPdfDownloadUrl(fileId: string) {
+export async function getDocumentDownloadUrl(fileId: string) {
   const response = await fetch(`${gateway}/api/files/${encodeURIComponent(fileId)}/download?disposition=inline`, {
     headers: { "X-Storage-Gateway-Key": key },
     cache: "no-store",
@@ -543,11 +548,11 @@ best-effort — a failure here never changes the upload outcome.
 
 ### `POST /api/internal/bridge/files`
 
-Body includes the final R2 object key (`pdfs/YYYY/MM/<uuid>.pdf`), validated PDF
-metadata (`originalName`, optional `title`/`description`/`category`/`tags`), and
-`size`. Enforces the configured max PDF size and storage limit, creates an
-`active` document, and writes a `BRIDGE_UPLOAD` audit event. Responds `201` with
-the serialized file record.
+Body includes the final R2 object key (`documents/YYYY/MM/<uuid>.pdf|doc|docx|txt|ppt|pptx`),
+validated document metadata (`originalName`, optional `title`/`description`/`category`/`tags`,
+plus `mimeType`/`extension`), and `size`. Enforces the configured max document size and storage
+limit, creates an `active` document, and writes a `BRIDGE_UPLOAD` audit event. Responds `201`
+with the serialized file record.
 
 ## Common errors
 
@@ -555,7 +560,7 @@ the serialized file record.
 | --- | --- |
 | `400 VALIDATION_ERROR` | Input/query/body did not match schema |
 | `415 UNSUPPORTED_MEDIA_TYPE` | A JSON control-plane endpoint received a non-JSON body |
-| `400 INVALID_FILE_TYPE` / `INVALID_PDF` | File did not pass PDF validation |
+| `400 INVALID_FILE_TYPE` / `INVALID_DOCUMENT` | File did not pass document validation |
 | `401 UNAUTHENTICATED` / `SESSION_EXPIRED` | Login/session missing or invalid |
 | `401 INVALID_INTEGRATION_KEY` | Website key missing/incorrect |
 | `401 INVALID_API_KEY` | Bridge credential missing, revoked, unknown, or signature/timestamp invalid |
@@ -566,7 +571,7 @@ the serialized file record.
 | `404 FILE_NOT_FOUND` | Document does not exist or is intentionally hidden |
 | `409 STORAGE_LIMIT_EXCEEDED` | New upload would exceed configured capacity |
 | `409 FILE_CONTENT_UNAVAILABLE` | Trash object cannot be recovered |
-| `413 FILE_TOO_LARGE` | Exceeds configured PDF size limit |
+| `413 FILE_TOO_LARGE` | Exceeds configured document size limit |
 | `429 RATE_LIMITED` | Slow down and retry later |
 | `502 STORAGE_UNAVAILABLE` / `DELETE_FAILED` | R2 operation needs retry; details are logged server-side |
 | `503 SERVICE_CONFIGURATION_ERROR` | Deployment has missing server configuration |

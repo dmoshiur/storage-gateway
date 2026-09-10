@@ -5,24 +5,32 @@ import { getAdminDb } from "@/lib/firebase/admin";
 import { ApiError } from "@/lib/api/errors";
 import { calculateDeleteAt, type RetentionInput } from "@/lib/retention";
 import type { FileDocument, FileFilter, FileSort, FileStatus, RetentionType, SerializedFile } from "@/types/file";
+import { DOCUMENT_EXTENSION_BY_MIME, getDocumentExtension } from "@/lib/validation/documents";
 import { asDate, toIso } from "@/utils/date";
 
 const FILES = "files";
 const SEARCH_SCAN_LIMIT = 1000;
 
+function extensionFrom(originalName: string, mimeType: string): string {
+  return getDocumentExtension(originalName) ?? DOCUMENT_EXTENSION_BY_MIME[mimeType] ?? "pdf";
+}
+
 function toDocument(snapshot: DocumentSnapshot): FileDocument {
   const data = snapshot.data();
-  if (!data) throw new ApiError(404, "FILE_NOT_FOUND", "The requested PDF was not found.");
+  if (!data) throw new ApiError(404, "FILE_NOT_FOUND", "The requested document was not found.");
+  const originalName = String(data.originalName);
+  const mimeType = String(data.mimeType ?? "application/pdf");
   return {
     id: snapshot.id,
     storageKey: String(data.storageKey),
     uploadKey: typeof data.uploadKey === "string" ? data.uploadKey : null,
-    originalName: String(data.originalName),
+    originalName,
     title: String(data.title ?? ""),
     description: String(data.description ?? ""),
     category: String(data.category ?? ""),
     tags: Array.isArray(data.tags) ? data.tags.map(String) : [],
-    mimeType: "application/pdf",
+    mimeType,
+    extension: String(data.extension ?? extensionFrom(originalName, mimeType)),
     size: Number(data.size),
     createdAt: asDate(data.createdAt) ?? new Date(0),
     updatedAt: asDate(data.updatedAt) ?? new Date(0),
@@ -55,6 +63,7 @@ export function serializeFile(file: FileDocument): SerializedFile {
     category: file.category,
     tags: file.tags,
     mimeType: file.mimeType,
+    extension: file.extension,
     size: file.size,
     createdAt: file.createdAt.toISOString(),
     updatedAt: file.updatedAt.toISOString(),
@@ -73,7 +82,7 @@ export function serializeFile(file: FileDocument): SerializedFile {
 }
 
 function cleanFilename(name: string): string {
-  return name.replace(/[\\/\0\r\n]/g, "_").trim().slice(0, 180) || "document.pdf";
+  return name.replace(/[\\/\0\r\n]/g, "_").trim().slice(0, 180) || "document";
 }
 
 export async function createUploadingFile(input: {
@@ -84,6 +93,8 @@ export async function createUploadingFile(input: {
   description: string;
   category: string;
   tags: string[];
+  mimeType: string;
+  extension: string;
   size: number;
   uploadedBy: string;
   retention: RetentionInput;
@@ -106,7 +117,8 @@ export async function createUploadingFile(input: {
     description: input.description,
     category: input.category,
     tags: [...new Set(input.tags.map((tag) => tag.toLowerCase()))],
-    mimeType: "application/pdf",
+    mimeType: input.mimeType,
+    extension: input.extension,
     size: input.size,
     createdAt: now,
     updatedAt: now,
@@ -134,10 +146,10 @@ export async function getFileById(id: string): Promise<FileDocument | null> {
 }
 
 /**
- * Registers a PDF that the AM Storage bridge already streamed into R2 after its
- * own server-side validation. The record is created directly in the `active`
- * state (validatedAt is set) so bridge uploads appear in the dashboard, Trash,
- * retention, and NGO website listings like any other managed document.
+ * Registers a document that the AM Storage bridge already streamed into R2 after
+ * its own server-side validation. The record is created directly in the
+ * `active` state (validatedAt is set) so bridge uploads appear in the dashboard,
+ * Trash, retention, and NGO website listings like any other managed document.
  */
 export async function createBridgeFile(input: {
   storageKey: string;
@@ -146,6 +158,8 @@ export async function createBridgeFile(input: {
   description: string;
   category: string;
   tags: string[];
+  mimeType: string;
+  extension: string;
   size: number;
   uploadedBy: string;
   retention: RetentionInput;
@@ -162,7 +176,8 @@ export async function createBridgeFile(input: {
     description: input.description,
     category: input.category,
     tags: [...new Set(input.tags.map((tag) => tag.toLowerCase()))],
-    mimeType: "application/pdf",
+    mimeType: input.mimeType,
+    extension: input.extension,
     size: input.size,
     createdAt: now,
     updatedAt: now,
@@ -189,7 +204,7 @@ export async function createBridgeFile(input: {
 
 export async function requireFileById(id: string): Promise<FileDocument> {
   const file = await getFileById(id);
-  if (!file) throw new ApiError(404, "FILE_NOT_FOUND", "The requested PDF was not found.");
+  if (!file) throw new ApiError(404, "FILE_NOT_FOUND", "The requested document was not found.");
   return file;
 }
 
@@ -231,7 +246,7 @@ export async function updateFileDetails(id: string, patch: {
   return db.runTransaction(async (transaction) => {
     const snapshot = await transaction.get(reference);
     const file = toDocument(snapshot);
-    if (file.status !== "active") throw new ApiError(409, "FILE_NOT_ACTIVE", "Only active PDFs can be edited.");
+    if (file.status !== "active") throw new ApiError(409, "FILE_NOT_ACTIVE", "Only active documents can be edited.");
     const now = new Date();
     const changes: Record<string, unknown> = { updatedAt: now, version: file.version + 1 };
     if (patch.title !== undefined) changes.title = patch.title;
@@ -264,7 +279,7 @@ export async function moveFileToTrash(id: string, trashRetentionDays: number, re
     const snapshot = await transaction.get(reference);
     const file = toDocument(snapshot);
     if (file.status === "trash") return file; // idempotent user retry
-    if (file.status !== "active") throw new ApiError(409, "FILE_NOT_ACTIVE", "Only active PDFs can be moved to Trash.");
+    if (file.status !== "active") throw new ApiError(409, "FILE_NOT_ACTIVE", "Only active documents can be moved to Trash.");
     const now = new Date();
     const permanentDeleteAt = new Date(now.getTime() + trashRetentionDays * 24 * 60 * 60 * 1000);
     const updates = { status: "trash" as const, deletedAt: now, permanentDeleteAt, deletionReason: reason, updatedAt: now, version: file.version + 1 };
@@ -280,7 +295,7 @@ export async function restoreFileFromTrash(id: string, options: { nextDeleteAt: 
     const snapshot = await transaction.get(reference);
     const file = toDocument(snapshot);
     if (file.status === "active") return file;
-    if (file.status !== "trash") throw new ApiError(409, "FILE_NOT_IN_TRASH", "Only PDFs in Trash can be restored.");
+    if (file.status !== "trash") throw new ApiError(409, "FILE_NOT_IN_TRASH", "Only documents in Trash can be restored.");
     const now = new Date();
     const updates = {
       status: "active" as const,
@@ -305,7 +320,7 @@ export async function beginPermanentDeletion(id: string): Promise<FileDocument> 
     const file = toDocument(snapshot);
     if (file.status === "deleted") return file;
     if (file.status === "deleting") return file; // a retry may safely continue the R2 delete.
-    if (file.status !== "trash") throw new ApiError(409, "FILE_NOT_IN_TRASH", "Move the PDF to Trash before permanently deleting it.");
+    if (file.status !== "trash") throw new ApiError(409, "FILE_NOT_IN_TRASH", "Move the document to Trash before permanently deleting it.");
     const now = new Date();
     const updates = {
       status: "deleting" as const,
@@ -326,7 +341,7 @@ export async function beginActivePermanentDeletion(id: string): Promise<FileDocu
     const snapshot = await transaction.get(reference);
     const file = toDocument(snapshot);
     if (file.status === "deleted" || file.status === "deleting") return file;
-    if (file.status !== "active") throw new ApiError(409, "FILE_NOT_ACTIVE", "This PDF cannot be permanently deleted in its current state.");
+    if (file.status !== "active") throw new ApiError(409, "FILE_NOT_ACTIVE", "This document cannot be permanently deleted in its current state.");
     const now = new Date();
     const updates = { status: "deleting" as const, deletionStartedAt: now, deletionPreviousStatus: "active" as const, updatedAt: now, version: file.version + 1 };
     transaction.update(reference, updates);
@@ -341,7 +356,7 @@ export async function completePermanentDeletion(id: string): Promise<FileDocumen
     const snapshot = await transaction.get(reference);
     const file = toDocument(snapshot);
     if (file.status === "deleted") return file;
-    if (file.status !== "deleting") throw new ApiError(409, "DELETE_NOT_PENDING", "This PDF is not awaiting permanent deletion.");
+    if (file.status !== "deleting") throw new ApiError(409, "DELETE_NOT_PENDING", "This document is not awaiting permanent deletion.");
     const now = new Date();
     const updates = {
       status: "deleted" as const,
@@ -384,7 +399,7 @@ export async function markActivePermanentlyDeleted(id: string): Promise<FileDocu
     const snapshot = await transaction.get(reference);
     const file = toDocument(snapshot);
     if (file.status === "deleted") return file;
-    if (file.status !== "active" && file.status !== "deleting") throw new ApiError(409, "FILE_NOT_ACTIVE", "This PDF cannot be permanently deleted in its current state.");
+    if (file.status !== "active" && file.status !== "deleting") throw new ApiError(409, "FILE_NOT_ACTIVE", "This document cannot be permanently deleted in its current state.");
     const now = new Date();
     const updates = { status: "deleted" as const, permanentlyDeletedAt: now, permanentDeleteAt: null, deletionStartedAt: null, deletionPreviousStatus: null, updatedAt: now, version: file.version + 1 };
     transaction.update(reference, updates);

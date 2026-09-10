@@ -17,7 +17,7 @@ function safeFilename(filename: string): string {
   return filename
     .replace(/[\r\n"\\]/g, "_")
     .replace(/[^\x20-\x7E]/g, "_")
-    .slice(0, 140) || "document.pdf";
+    .slice(0, 140) || "document";
 }
 
 export class R2StorageService implements StorageService {
@@ -103,7 +103,7 @@ export class R2StorageService implements StorageService {
     return getSignedUrl(this.getClient(), new GetObjectCommand({
       Bucket: this.bucket(),
       Key: key,
-      ResponseContentType: "application/pdf",
+      ResponseContentType: options.contentType ?? "application/octet-stream",
       ResponseContentDisposition: `${options.disposition}; filename="${filename}"`,
     }), { expiresIn: options.expiresInSeconds });
   }
@@ -112,7 +112,7 @@ export class R2StorageService implements StorageService {
     return getSignedUrl(this.getClient(), new PutObjectCommand({
       Bucket: this.bucket(),
       Key: key,
-      ContentType: "application/pdf",
+      ContentType: options.contentType,
       ContentLength: options.contentLength,
       Metadata: options.metadata,
     }), { expiresIn: options.expiresInSeconds });

@@ -5,10 +5,11 @@ gramunnayan.com talks only to this public API. The bridge:
 1. validates the dashboard-managed dual-token API credential
    (X-AM-Storage-Key-Id + X-AM-Storage-Key-Secret, or an HMAC signature,
    or a legacy X-AM-Storage-Key),
-2. streams multipart PDF uploads into private Cloudflare R2,
+2. streams multipart PDF, DOC, DOCX, TXT, PPT, and PPTX uploads into private
+   Cloudflare R2,
 3. registers the verified document with the AM Storage gateway (metadata,
    retention, audit), and
-4. returns a signed, expiring PDF URL — the only R2 artifact the client sees.
+4. returns a signed, expiring document URL — the only R2 artifact the client sees.
 
 Every upload attempt (success or failure) is logged to the gateway so the
 dashboard's "API Upload Activity" widget stays live. R2 and gateway secrets
@@ -31,22 +32,22 @@ from starlette.datastructures import UploadFile
 
 from .config import get_settings
 from .gateway import GatewayRejected, GatewayUnavailable, gateway_get, log_upload_with_gateway, register_file_with_gateway
+from .documents import get_extension, validate_and_sniff_document
 from .multipart import parse_multipart_form
-from .pdf import assert_pdf_metadata, validate_and_sniff_pdf
 from .responses import fail, ok
-from .r2 import build_object_key, delete_object, presigned_get_url, upload_pdf_object
+from .r2 import build_object_key, delete_object, presigned_get_url, upload_document_object
 from .security import ApiCredential, client_ip, request_id_from, require_api_credential
 
 logger = logging.getLogger("am-storage-bridge")
 
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 SERVICE = "AM Storage Company"
 BRIDGE = "AM Storage Bridge"
 UPLOAD_PATH = "/api/v1/storage/upload"
 
 app = FastAPI(
     title=f"{BRIDGE} API",
-    description="Public PDF Storage Bridge for gramunnayan.com. Authenticate with the "
+    description="Public document Storage Bridge for gramunnayan.com (PDF, DOC, DOCX, TXT, PPT, PPTX). Authenticate with the "
     "dual-token pair generated in the AM Storage Company dashboard — "
     "X-AM-Storage-Key-Id + X-AM-Storage-Key-Secret, or the HMAC signed mode "
     "(X-AM-Storage-Signature + X-AM-Storage-Timestamp). R2 credentials are never "
@@ -181,11 +182,13 @@ async def health() -> dict[str, Any]:
 
 
 def _clean_original_name(filename: str) -> str:
-    """Keeps multipart filenames inside the gateway's 180-character bound while preserving .pdf."""
+    """Keeps multipart filenames inside the gateway's 180-character bound while preserving a supported extension."""
     name = (filename or "").replace("\x00", "").strip()
     if len(name) <= 180:
         return name
-    return (name[:176] + ".pdf") if name.lower().endswith(".pdf") else name[:180]
+    extension = get_extension(name)
+    suffix = f".{extension}" if extension else ""
+    return name[: max(0, 180 - len(suffix))] + suffix
 
 
 def _parse_tags(raw: str | None) -> list[str]:
@@ -208,14 +211,15 @@ def _parse_tags(raw: str | None) -> list[str]:
     UPLOAD_PATH,
     tags=["bridge"],
     description=(
-        "Store a PDF. Multipart form data with a `file` field (PDF only) and "
-        "optional fields `title`, `description`, `category`, `tags` "
-        "(comma-separated or JSON array). Authenticate with the dual-token "
-        "credential (X-AM-Storage-Key-Id + X-AM-Storage-Key-Secret) or the "
-        "HMAC signed headers (X-AM-Storage-Signature + X-AM-Storage-Timestamp)."
+        "Store a document. Multipart form data with a `file` field for PDF, "
+        "DOC, DOCX, TXT, PPT, or PPTX and optional fields `title`, "
+        "`description`, `category`, `tags` (comma-separated or JSON array). "
+        "Authenticate with the dual-token credential "
+        "(X-AM-Storage-Key-Id + X-AM-Storage-Key-Secret) or the HMAC signed "
+        "headers (X-AM-Storage-Signature + X-AM-Storage-Timestamp)."
     ),
 )
-async def upload_pdf(
+async def upload_document(
     request: Request,
     credential: ApiCredential = Depends(require_api_credential),
 ) -> JSONResponse:
@@ -243,13 +247,16 @@ async def upload_pdf(
 
     filename = _clean_original_name(file.filename or "")
     request.state.upload_filename = filename
-    assert_pdf_metadata(filename, file.content_type, len(await request.body()), cfg.max_pdf_bytes)
+    size, extension, mime_type = validate_and_sniff_document(
+        filename,
+        file.content_type,
+        file.file,
+        cfg.max_pdf_bytes,
+    )
 
-    size = validate_and_sniff_pdf(filename, file.content_type, file.file, cfg.max_pdf_bytes)
-
-    object_key = build_object_key()
+    object_key = build_object_key(extension)
     try:
-        await upload_pdf_object(object_key, file.file, size)
+        await upload_document_object(object_key, file.file, size, mime_type)
     except HTTPException:
         await delete_object(object_key)
         raise
@@ -258,7 +265,7 @@ async def upload_pdf(
 
     # Sign the URL first so a registration failure can clean up the object.
     try:
-        url = await presigned_get_url(object_key, filename, cfg.signed_url_expiry_seconds)
+        url = await presigned_get_url(object_key, filename, cfg.signed_url_expiry_seconds, mime_type)
     except HTTPException:
         await delete_object(object_key)
         raise
@@ -271,6 +278,8 @@ async def upload_pdf(
                 "description": (description or "").strip()[:2000],
                 "category": (category or "").strip()[:80],
                 "tags": _parse_tags(tags),
+                "mimeType": mime_type,
+                "extension": extension,
                 "size": size,
             },
             request_id,

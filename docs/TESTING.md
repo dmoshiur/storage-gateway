@@ -14,7 +14,7 @@ npm run build
 Included Vitest coverage exercises:
 
 - mocked session-route creation, unauthorized login rejection, and logout cookie clearing, plus admin role resolution;
-- PDF extension/signature/EOF, R2 size/ownership checks, and oversize rejection;
+- document extension/signature/EOF checks for PDF, DOC/DOCX, TXT, PPT/PPTX, R2 size/ownership checks, and oversize rejection;
 - 30-day, 3-month, 6-month, 1-year, custom-date, and Never retention handling;
 - active → Trash → restore and transient permanent-deletion lifecycle rules;
 - expired/non-expired cleanup eligibility and stale upload selection.
@@ -34,18 +34,19 @@ The storage abstraction in `src/lib/storage/storage-service.ts` is designed expr
 
 ## Non-production R2 smoke test
 
-Before production, use a dedicated test bucket and a harmless valid PDF:
+Before production, use a dedicated test bucket and harmless test documents (PDF, DOCX, TXT, PPTX):
 
 1. Sign in as an authorized admin.
-2. Upload a valid PDF below the configured limit; verify progress, `UPLOAD` audit event, and active file listing.
-3. Attempt a `.txt` file renamed `.pdf`, invalid header, missing EOF marker, and an oversize PDF. Confirm no active record is created.
-4. View and download an active PDF. Confirm the returned R2 URL expires and the bucket is not anonymously browseable/public.
+2. Upload a valid PDF, a DOCX, and a TXT below the configured limit; verify progress, `UPLOAD` audit event, and active file listing (including `mimeType`/`extension`).
+3. Attempt a `.exe` file, a text file renamed `.pdf`, an invalid PDF header, a missing EOF marker, and an oversize document. Confirm no active record is created.
+4. View and download an active document (inline/attachment). Confirm the returned R2 URL expires and the bucket is not anonymously browseable/public.
 5. Update title/category/tags and each retention option. Confirm `deleteAt` is set by the server and `CHANGE_RETENTION` is logged.
-6. Move a PDF to Trash. Confirm an omitted/wrong `MOVE_TO_TRASH` confirmation is rejected, the R2 object remains, Restore works, and the original object need not be re-uploaded.
+6. Move a document to Trash. Confirm an omitted/wrong `MOVE_TO_TRASH` confirmation is rejected, the R2 object remains, Restore works, and the original object need not be re-uploaded.
 7. Move it back to Trash and enter an incorrect permanent-delete confirmation. Confirm it is rejected. Enter `DELETE`; confirm R2 object is gone and metadata is `deleted`.
 8. Create an expired active test record only through a controlled test helper, then invoke cron dry-run and real cleanup. Confirm safety mode moves it to Trash and a failure on one stubbed object does not stop other records.
 9. Repeat with `trashEnabled: false` only in test, then restore the safe default afterward.
 10. Use the NGO website server (not browser) with `X-Storage-Gateway-Key`; verify read/download work, while Trash/settings/upload endpoints reject it.
+11. Bridge routing smoke test: start the FastAPI bridge, set the gateway's `NEXT_PUBLIC_BRIDGE_URL`/`BRIDGE_URL` to it, then `POST <gateway>/api/v1/storage/upload` and confirm the JSON response (for example `503 STORAGE_UNAVAILABLE` for the expected not-configured R2 state, never HTML 404). Also confirm `GET <gateway>/api/v1/storage/upload` returns the JSON `BRIDGE_ENDPOINT_NOT_AT_GATEWAY` diagnostic when `BRIDGE_URL` is unset.
 
 ## Accessibility and mobile verification
 

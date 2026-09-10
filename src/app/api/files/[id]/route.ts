@@ -16,10 +16,10 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     enforceRateLimit(`files:get:${actor.type}:${actor.uid}`, actor.type === "integration" ? 240 : 480);
     const file = await getFileById(requireRouteId((await context.params).id));
     if (!file || file.status === "deleted" || file.status === "failed" || file.status === "uploading" || file.status === "deleting") {
-      throw new ApiError(404, "FILE_NOT_FOUND", "The requested PDF was not found.");
+      throw new ApiError(404, "FILE_NOT_FOUND", "The requested document was not found.");
     }
     if (actor.type === "integration" && (file.status !== "active" || (file.autoDeleteEnabled && file.deleteAt && file.deleteAt <= new Date()))) {
-      throw new ApiError(404, "FILE_NOT_FOUND", "The requested PDF was not found.");
+      throw new ApiError(404, "FILE_NOT_FOUND", "The requested document was not found.");
     }
     return success({ file: serializeFile(file) }, requestId);
   }, { route: "files/get" });

@@ -11,7 +11,10 @@ export const bridgeStorageKeySchema = z
   .string()
   .min(1)
   .max(300)
-  .regex(/^pdfs\/\d{4}\/\d{2}\/[A-Za-z0-9_-]{8,200}\.pdf$/, "The storage key is invalid.");
+  .regex(
+    /^(?:documents|pdfs)\/\d{4}\/\d{2}\/[A-Za-z0-9_-]{8,200}\.(?:pdf|doc|docx|txt|ppt|pptx)$/,
+    "The storage key is invalid.",
+  );
 
 const safeBridgeText = (max: number) => z.string().trim().max(max).transform((value) => value.replace(/\s+/g, " "));
 const optionalBridgeText = (max: number) => safeBridgeText(max).optional().default("");
@@ -74,5 +77,7 @@ export const bridgeRegisterFileSchema = z.object({
   description: optionalBridgeText(2000),
   category: optionalBridgeText(80),
   tags: z.array(bridgeTag).max(20).optional().default([]),
+  mimeType: z.string().trim().max(100).optional().default("application/pdf"),
+  extension: z.string().trim().regex(/^[A-Za-z0-9]{1,8}$/).optional().default("pdf"),
   size: z.number().int().positive().max(1024 * 1024 * 1024),
 });
