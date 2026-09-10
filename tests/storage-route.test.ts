@@ -76,10 +76,10 @@ describe("GET /api/storage — dashboard initialization never 500s", () => {
     expect(body.data.blob.reachable).toBe(false);
   });
 
-  it("swallows R2 health-check throws so the dashboard still renders", async () => {
+  it("swallows Blob health-check throws so the dashboard still renders", async () => {
     getStorageStatsSafe.mockResolvedValue({ stats: LIVE_STATS, source: "live" });
     getApiRequestTotals.mockRejectedValue(new Error("Firestore unavailable"));
-    getStorageService.mockReturnValue({ healthCheck: vi.fn(async () => { throw new Error("R2 timeout"); }) });
+    getStorageService.mockReturnValue({ healthCheck: vi.fn(async () => { throw new Error("Blob timeout"); }) });
 
     const response = await storageRoute.GET(adminRequest());
     expect(response.status).toBe(200);

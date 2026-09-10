@@ -14,7 +14,7 @@ import {
   put as blobPut,
 } from "@vercel/blob";
 import { ApiError } from "@/lib/api/errors";
-import { getBlobStoreConfig } from "@/lib/env";
+import { getBlobStoreConfig, readBlobStoreConfig } from "@/lib/env";
 import type {
   ObjectMetadata,
   SignedDownloadOptions,
@@ -59,10 +59,15 @@ function isAccessError(error: unknown): boolean {
 function toApiError(error: unknown, fallback: string): ApiError {
   if (error instanceof ApiError) return error;
   if (isNotFound(error)) return new ApiError(404, "BLOB_NOT_FOUND", "The stored object no longer exists.");
+  const detail = error instanceof Error && error.message ? ` ${error.message}` : "";
   if (isAccessError(error)) {
-    return new ApiError(503, "BLOB_ACCESS_ERROR", "Blob storage rejected the request. Check the store configuration.");
+    return new ApiError(
+      503,
+      "BLOB_ACCESS_ERROR",
+      `Vercel Blob rejected the request.${detail} Attach a private Blob store to this Vercel project (BLOB_READ_WRITE_TOKEN or OIDC + BLOB_STORE_ID).`,
+    );
   }
-  return new ApiError(502, "BLOB_REQUEST_FAILED", fallback);
+  return new ApiError(502, "BLOB_REQUEST_FAILED", `${fallback}${detail}`);
 }
 
 /** Resolve the canonical Blob URL for a pathname (exact match only). */
@@ -251,11 +256,34 @@ export class VercelBlobStorageService implements StorageService {
   async healthCheck(): Promise<StorageHealth> {
     const startedAt = Date.now();
     const checkedAt = new Date().toISOString();
+    const config = readBlobStoreConfig();
+    if (!config.ok) {
+      return {
+        reachable: false,
+        latencyMs: Date.now() - startedAt,
+        checkedAt,
+        error: config.error,
+        authMode: "none",
+      };
+    }
     try {
       await blobList({ ...blobOptions(), limit: 1 });
-      return { reachable: true, latencyMs: Date.now() - startedAt, checkedAt };
-    } catch {
-      return { reachable: false, latencyMs: Date.now() - startedAt, checkedAt };
+      return {
+        reachable: true,
+        latencyMs: Date.now() - startedAt,
+        checkedAt,
+        error: null,
+        authMode: config.authMode,
+      };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Blob list probe failed.";
+      return {
+        reachable: false,
+        latencyMs: Date.now() - startedAt,
+        checkedAt,
+        error: `Vercel Blob store probe failed: ${detail}`,
+        authMode: config.authMode,
+      };
     }
   }
 

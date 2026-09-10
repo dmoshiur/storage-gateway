@@ -14,10 +14,13 @@ const blobSchema = z.object({
   BLOB_STORE_ID: z.string().min(1).optional(),
 });
 
-function configurationError(area: string, issues: string[]): never {
-  // Details are intentionally logged server-side but not sent to callers.
+function configurationError(area: string, issues: string[], publicMessage?: string): never {
   console.error(JSON.stringify({ level: "error", message: "Missing server configuration", area, issues }));
-  throw new ApiError(503, "SERVICE_CONFIGURATION_ERROR", "This service is not configured yet. Contact an administrator.");
+  throw new ApiError(
+    503,
+    "SERVICE_CONFIGURATION_ERROR",
+    publicMessage ?? `Missing server configuration for ${area}: ${issues.join(", ")}.`,
+  );
 }
 
 export function getFirebaseAdminEnv() {
@@ -37,21 +40,50 @@ export function getFirebaseAdminEnv() {
  * injected automatically. On Vercel runtimes without an explicit token, the
  * SDK authenticates with OIDC (`VERCEL_OIDC_TOKEN` + `BLOB_STORE_ID`).
  */
-export function getBlobStoreConfig(): { token: string | null; storeId: string | null; oidcToken: string | null } {
+export type BlobStoreConfig =
+  | { ok: true; token: string | null; storeId: string | null; oidcToken: string | null; authMode: "token" | "oidc" }
+  | { ok: false; token: null; storeId: string | null; oidcToken: string | null; authMode: "none"; error: string };
+
+const BLOB_TOKEN_MISSING =
+  "Vercel Blob Private Store is not connected. Attach a Blob store to this Vercel project so BLOB_READ_WRITE_TOKEN is injected, or set BLOB_STORE_ID and enable Vercel OIDC (VERCEL_OIDC_TOKEN). Do not enter a fake storage URL.";
+
+const BLOB_STORE_ID_MISSING =
+  "Vercel OIDC is present but BLOB_STORE_ID is missing. Set BLOB_STORE_ID to the private Blob store id, or attach the Blob store so BLOB_READ_WRITE_TOKEN is injected.";
+
+/** Inspect Blob credentials without throwing (used by health probes). */
+export function readBlobStoreConfig(): BlobStoreConfig {
   const parsed = blobSchema.safeParse({
     BLOB_READ_WRITE_TOKEN: process.env.BLOB_READ_WRITE_TOKEN || undefined,
     BLOB_STORE_ID: process.env.BLOB_STORE_ID || undefined,
   });
-  if (!parsed.success) return configurationError("blob", parsed.error.issues.map((issue) => issue.path.join(".")));
-  const explicitToken = parsed.data.BLOB_READ_WRITE_TOKEN ?? null;
+  const storeId = parsed.success ? parsed.data.BLOB_STORE_ID ?? null : null;
+  const explicitToken = parsed.success ? parsed.data.BLOB_READ_WRITE_TOKEN ?? null : null;
   const oidcToken = process.env.VERCEL_OIDC_TOKEN?.trim() || null;
-  if (!explicitToken && !oidcToken) {
-    return configurationError("blob", ["BLOB_READ_WRITE_TOKEN or VERCEL_OIDC_TOKEN"]);
+  if (explicitToken) {
+    return { ok: true, token: explicitToken, storeId, oidcToken, authMode: "token" };
   }
-  if (!explicitToken && oidcToken && !parsed.data.BLOB_STORE_ID) {
-    return configurationError("blob", ["BLOB_STORE_ID"]);
+  if (oidcToken && storeId) {
+    return { ok: true, token: null, storeId, oidcToken, authMode: "oidc" };
   }
-  return { token: explicitToken, storeId: parsed.data.BLOB_STORE_ID ?? null, oidcToken };
+  if (oidcToken && !storeId) {
+    return { ok: false, token: null, storeId: null, oidcToken, authMode: "none", error: BLOB_STORE_ID_MISSING };
+  }
+  return { ok: false, token: null, storeId, oidcToken: null, authMode: "none", error: BLOB_TOKEN_MISSING };
+}
+
+/**
+ * Vercel Private Blob store configuration (server only).
+ *
+ * When the Vercel Blob integration is attached, `BLOB_READ_WRITE_TOKEN` is
+ * injected automatically. On Vercel runtimes without an explicit token, the
+ * SDK authenticates with OIDC (`VERCEL_OIDC_TOKEN` + `BLOB_STORE_ID`).
+ */
+export function getBlobStoreConfig(): { token: string | null; storeId: string | null; oidcToken: string | null } {
+  const config = readBlobStoreConfig();
+  if (!config.ok) {
+    return configurationError("blob", [config.error], config.error);
+  }
+  return { token: config.token, storeId: config.storeId, oidcToken: config.oidcToken };
 }
 
 export function getRequiredSecret(name: "INTEGRATION_API_KEY" | "CRON_SECRET"): string {

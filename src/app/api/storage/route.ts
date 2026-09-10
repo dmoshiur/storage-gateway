@@ -17,8 +17,14 @@ export const runtime = "nodejs";
 async function checkBlobConnectivity(): Promise<StorageHealth> {
   try {
     return await getStorageService().healthCheck();
-  } catch {
-    return { reachable: false, latencyMs: 0, checkedAt: new Date().toISOString() };
+  } catch (error) {
+    return {
+      reachable: false,
+      latencyMs: 0,
+      checkedAt: new Date().toISOString(),
+      error: error instanceof Error ? error.message : "Vercel Blob health check failed.",
+      authMode: "none",
+    };
   }
 }
 

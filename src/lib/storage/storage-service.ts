@@ -42,6 +42,9 @@ export interface StorageHealth {
   reachable: boolean;
   latencyMs: number;
   checkedAt: string;
+  /** Present when the store is not connected or the probe failed. */
+  error?: string | null;
+  authMode?: "token" | "oidc" | "none";
 }
 
 /**
