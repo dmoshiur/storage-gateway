@@ -102,7 +102,11 @@ hitting the **Next.js gateway**, not the **FastAPI bridge**.
   bridge, use the proxy by pointing the gateway's `BRIDGE_URL` at the FastAPI
   bridge; the proxy preserves the JSON response, status code, and `requestId`.
 
-See [`fastapi/README.md`](fastapi/README.md) for deployment, environment
+To host the bridge, use the bundled `fastapi/Dockerfile` or the root
+[`render.yaml`](render.yaml) Blueprint (Docker, `rootDir: fastapi`, `/health`
+probe), then set the resulting origin as `NEXT_PUBLIC_BRIDGE_URL` / `BRIDGE_URL`
+on the gateway and `AM_STORAGE_BRIDGE_URL` on the gramunnayan.com server. See
+[`fastapi/README.md`](fastapi/README.md) for deployment, environment
 variables, and the full endpoint reference. The gateway-internal bridge routes
 (`POST /api/internal/bridge/verify-key`, `POST /api/internal/bridge/files`) are
 server-to-server only and require the `X-Storage-Gateway-Key` header.

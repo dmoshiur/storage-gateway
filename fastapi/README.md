@@ -76,10 +76,25 @@ docker build -t am-storage-bridge .
 docker run -p 8000:8000 --env-file .env am-storage-bridge
 ```
 
-For Render, set the service's **Root Directory** to `fastapi` and its Docker
-runtime command to the image above. For Railway or a VPS, publish port `8000`,
-map a public TLS origin (e.g. `https://bridge.gusb.example.org`), and wire that
-origin into `AM_STORAGE_BRIDGE_URL` / `NEXT_PUBLIC_BRIDGE_URL` / `BRIDGE_URL`.
+For Railway or a VPS, publish port `8000`, map a public TLS origin
+(e.g. `https://bridge.gusb.example.org`), and wire that origin into
+`AM_STORAGE_BRIDGE_URL` / `NEXT_PUBLIC_BRIDGE_URL` / `BRIDGE_URL`.
+
+For Render, the repository root contains a [`render.yaml`](../render.yaml)
+Blueprint that builds this Dockerfile with `rootDir: fastapi`, a `/health`
+health check, and every secret prompted at deploy time. Point Render at the
+repository, apply the Blueprint, then set the resulting service URL as the
+bridge origin on the gateway and on gramunnayan.com.
+
+Whichever host you choose, complete the routing step before go-live:
+
+1. `GET https://<bridge-origin>/health` returns `{"status":"ok","bridge":"ready",...}`.
+2. The gateway has `NEXT_PUBLIC_BRIDGE_URL` and `BRIDGE_URL` set to
+   `https://<bridge-origin>` (must **not** be the gateway host).
+3. gramunnayan.com's server has `AM_STORAGE_BRIDGE_URL=https://<bridge-origin>`.
+4. `POST https://<bridge-origin>/api/v1/storage/upload` with a real PDF/PPTX
+   returns JSON (`201` when R2 is configured, or a structured JSON error) —
+   never an HTML 404.
 
 ## Environment variables
 
