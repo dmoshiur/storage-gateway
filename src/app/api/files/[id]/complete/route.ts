@@ -55,7 +55,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         await writeAuditLogSafely({ action: "UPLOAD_FAILED", actor: auditActorFrom(actor), fileId: file.id, fileName: file.originalName, details: { reason: error.code } });
         throw error;
       }
-      throw new ApiError(502, "STORAGE_UNAVAILABLE", "The document could not be verified in storage. Please retry shortly.");
+      if (isApiError(error)) throw error;
+      throw new ApiError(502, "STORAGE_UNAVAILABLE", "The document could not be verified in Vercel Blob. Please retry shortly.");
     }
 
     // Remove any legacy staging object, then activate. Direct-to-final Blob

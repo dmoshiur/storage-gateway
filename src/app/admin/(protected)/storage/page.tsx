@@ -22,7 +22,7 @@ interface StoragePayload {
     warningLevel: "normal" | "warning" | "critical";
     expiringSoonCount: number;
   };
-  blob: { reachable: boolean; latencyMs: number };
+  blob: { reachable: boolean; latencyMs: number; error?: string | null };
 }
 
 export default function StoragePage() {
@@ -75,6 +75,11 @@ export default function StoragePage() {
         </p>
         <div className="mt-3"><UsageBar percent={stats.usagePercent} tone={stats.warningLevel === "normal" ? "default" : stats.warningLevel} /></div>
         <p className="tnum mt-2 text-[13px] text-ink-muted">{stats.usagePercent}% used · {formatBytes(stats.availableBytes)} available</p>
+        {!storage.data.blob.reachable && storage.data.blob.error && (
+          <p className="mt-3 rounded-md border border-red-500/25 bg-red-500/10 px-3 py-2 text-sm text-red-800 dark:text-red-200" role="alert">
+            {storage.data.blob.error}
+          </p>
+        )}
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">

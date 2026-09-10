@@ -37,7 +37,12 @@ export async function GET(request: Request) {
       services: {
         application: { status: "healthy" },
         database: { status: database.connected ? "healthy" : "degraded", latencyMs: database.latencyMs },
-        blobStorage: { status: blob.reachable ? "healthy" : "degraded", latencyMs: blob.latencyMs, checkedAt: blob.checkedAt },
+        blobStorage: {
+          status: blob.reachable ? "healthy" : "degraded",
+          latencyMs: blob.latencyMs,
+          checkedAt: blob.checkedAt,
+          ...(blob.error ? { error: blob.error } : {}),
+        },
         authentication: { status: "healthy", provider: "firebase-auth" },
         scheduledCleanup: {
           status: cleanup?.lastError ? "degraded" : "healthy",
