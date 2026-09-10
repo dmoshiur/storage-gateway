@@ -9,7 +9,7 @@ import { useQuery } from "@/hooks/use-query";
 import { SearchInput } from "@/components/ui/data";
 import { Dropdown } from "@/components/ui/overlays";
 import { TableSkeleton, ErrorState } from "@/components/ui/feedback";
-import { apiFetch, ClientApiError } from "@/lib/client/api";
+import { apiErrorOptions, apiFetch } from "@/lib/client/api";
 import type { SerializedFile } from "@/types/file";
 import { openUploadModal } from "@/components/shell/admin-shell";
 import { ColumnToggle, FILE_COLUMNS, FileTable, type FileSortKey } from "@/components/files/file-table";
@@ -152,7 +152,8 @@ export function FilesView({
       setSelected(new Set());
       refresh();
     } catch (bulkError) {
-      toast(bulkError instanceof ClientApiError ? bulkError.message : "Bulk action failed.", "error");
+      const opts = apiErrorOptions(bulkError, "Bulk action failed.");
+      toast(opts.message, "error", { requestId: opts.requestId, retry: () => void bulk(action, extra) });
     } finally {
       setBulkBusy(false);
     }
@@ -175,7 +176,8 @@ export function FilesView({
       toast(`Trash emptied. ${result.deleted} file(s) permanently deleted.`);
       refresh();
     } catch (emptyError) {
-      toast(emptyError instanceof ClientApiError ? emptyError.message : "Empty Trash failed.", "error");
+      const opts = apiErrorOptions(emptyError, "Empty Trash failed.");
+      toast(opts.message, "error", { requestId: opts.requestId, retry: () => void emptyTrash() });
     }
   };
 

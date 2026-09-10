@@ -6,18 +6,25 @@ import { success } from "@/lib/api/response";
 import { parseQuery } from "@/lib/api/body";
 import { getClientIp } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
-import { requireBridgeCredential } from "@/lib/bridge/auth";
+import { hasBridgeCredentialHeaders, requireBridgeCredential, type BridgeCredential } from "@/lib/bridge/auth";
 import { getApiKeyScopesByKeyId, requireScope, type ApiScope } from "@/lib/security/api-keys";
+import {
+  bearerTokenFrom,
+  requireBearerScope,
+  verifyBearerKeySafely,
+} from "@/lib/security/bearer-keys";
 import { withBridgeCors } from "@/lib/bridge/upload";
 import {
   getFileById,
   listFiles,
   moveFileToTrash,
+  restoreFileFromTrash,
   serializeFile,
   updateFileDetails,
 } from "@/lib/firestore/files";
 import { getSettings } from "@/lib/firestore/settings";
 import { getStorageService } from "@/lib/storage";
+import { calculateDeleteAt } from "@/lib/retention";
 import { auditActorFrom, writeAuditLogSafely } from "@/lib/firestore/audit";
 import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
 import { fileUpdateSchema } from "@/lib/validation/schemas";
@@ -32,12 +39,31 @@ const listQuerySchema = z.object({
   category: z.string().trim().max(80).optional().default(""),
 });
 
-async function authorize(request: Request, scope: ApiScope, rateKey: string, limit: number) {
+function invalidApiKey(): ApiError {
+  return new ApiError(401, "INVALID_API_KEY", "Missing or invalid API key. Send Authorization: Bearer ng_live_….");
+}
+
+async function authorize(request: Request, scope: ApiScope, rateKey: string, limit: number): Promise<{
+  mode: "bearer" | "bridge";
+  keyId: string | null;
+  recordId: string | null;
+  credential: BridgeCredential | null;
+}> {
   enforceRateLimit(`${rateKey}:${getClientIp(request)}`, limit);
+
+  const bearer = bearerTokenFrom(request);
+  if (bearer) {
+    const verified = await verifyBearerKeySafely(bearer);
+    if (!verified) throw invalidApiKey();
+    requireBearerScope(verified.scopes, scope);
+    return { mode: "bearer", keyId: verified.keyId, recordId: verified.recordId, credential: null };
+  }
+
+  if (!hasBridgeCredentialHeaders(request)) throw invalidApiKey();
   const credential = await requireBridgeCredential(request);
   const scopes = await getApiKeyScopesByKeyId(credential.keyId);
   requireScope(scopes, scope);
-  return credential;
+  return { mode: "bridge", keyId: credential.keyId, recordId: null, credential };
 }
 
 function cors(response: Response, request: Request): Response {
@@ -70,7 +96,7 @@ export async function handleV1GetFile(request: Request, requestId: string, id: s
 }
 
 export async function handleV1UpdateFile(request: Request, requestId: string, id: string): Promise<Response> {
-  await authorize(request, "metadata:write", "v1:files:update", 120);
+  const auth = await authorize(request, "metadata:write", "v1:files:update", 120);
   let body: unknown;
   try {
     body = await request.json();
@@ -89,14 +115,14 @@ export async function handleV1UpdateFile(request: Request, requestId: string, id
     actor: auditActorFrom(INTEGRATION_AUDIT_ACTOR),
     fileId: result.file.id,
     fileName: result.file.originalName,
-    details: { via: "api-v1" },
+    details: { via: "api-v1", auth: auth.mode, ...(auth.keyId ? { keyId: auth.keyId } : {}) },
   });
   emitWebhookEvent("file.updated", { fileId: result.file.id, fileName: result.file.originalName, via: "api" });
   return cors(success({ file: serializeFile(result.file) }, requestId), request);
 }
 
 export async function handleV1DeleteFile(request: Request, requestId: string, id: string): Promise<Response> {
-  await authorize(request, "files:delete", "v1:files:delete", 60);
+  const auth = await authorize(request, "files:delete", "v1:files:delete", 60);
   const settings = await getSettings();
   const file = await moveFileToTrash(id, settings.trashRetentionDays, "manual");
   await writeAuditLogSafely({
@@ -104,14 +130,40 @@ export async function handleV1DeleteFile(request: Request, requestId: string, id
     actor: auditActorFrom(INTEGRATION_AUDIT_ACTOR),
     fileId: file.id,
     fileName: file.originalName,
-    details: { via: "api-v1" },
+    details: { via: "api-v1", auth: auth.mode, ...(auth.keyId ? { keyId: auth.keyId } : {}) },
   });
   emitWebhookEvent("file.trashed", { fileId: file.id, fileName: file.originalName, via: "api" });
   return cors(success({ file: serializeFile(file) }, requestId), request);
 }
 
+export async function handleV1RestoreFile(request: Request, requestId: string, id: string): Promise<Response> {
+  const auth = await authorize(request, "files:update", "v1:files:restore", 60);
+  const file = await getFileById(id);
+  if (!file || file.status !== "trash") {
+    throw new ApiError(404, "FILE_NOT_FOUND", "The requested file was not found or is not in Trash.");
+  }
+  if (!(await getStorageService().exists(file.storagePath))) {
+    throw new ApiError(409, "FILE_CONTENT_UNAVAILABLE", "This document can no longer be restored because its private object is unavailable.");
+  }
+  let nextDeleteAt = file.deleteAt;
+  const resetElapsedCustomRetention = Boolean(file.autoDeleteEnabled && file.deleteAt && file.deleteAt <= new Date() && file.retentionType === "custom_date");
+  if (file.autoDeleteEnabled && file.deleteAt && file.deleteAt <= new Date() && !resetElapsedCustomRetention) {
+    nextDeleteAt = calculateDeleteAt({ autoDeleteEnabled: true, retentionType: file.retentionType, customDeleteAt: null });
+  }
+  const restored = await restoreFileFromTrash(file.id, { nextDeleteAt, resetElapsedCustomRetention });
+  await writeAuditLogSafely({
+    action: "RESTORE",
+    actor: auditActorFrom(INTEGRATION_AUDIT_ACTOR),
+    fileId: restored.id,
+    fileName: restored.originalName,
+    details: { via: "api-v1", auth: auth.mode, ...(auth.keyId ? { keyId: auth.keyId } : {}) },
+  });
+  emitWebhookEvent("file.restored", { fileId: restored.id, fileName: restored.originalName, via: "api" });
+  return cors(success({ file: serializeFile(restored) }, requestId), request);
+}
+
 export async function handleV1DownloadFile(request: Request, requestId: string, id: string): Promise<Response> {
-  await authorize(request, "files:download", "v1:files:download", 120);
+  const auth = await authorize(request, "files:download", "v1:files:download", 120);
   const file = await getFileById(id);
   const now = new Date();
   if (!file || file.status !== "active" || (file.autoDeleteEnabled && file.deleteAt && file.deleteAt <= now)) {
@@ -129,7 +181,7 @@ export async function handleV1DownloadFile(request: Request, requestId: string, 
     actor: auditActorFrom(INTEGRATION_AUDIT_ACTOR),
     fileId: file.id,
     fileName: file.originalName,
-    details: { via: "api-v1" },
+    details: { via: "api-v1", auth: auth.mode, ...(auth.keyId ? { keyId: auth.keyId } : {}) },
   });
   emitWebhookEvent("file.downloaded", { fileId: file.id, fileName: file.originalName, via: "api" });
   return cors(success({

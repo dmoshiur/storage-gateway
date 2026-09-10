@@ -17,7 +17,12 @@ export function failure(error: unknown, requestId: string, context?: Record<stri
   if (isApiError(error)) {
     return NextResponse.json({
       success: false,
-      error: { code: error.code, message: error.message, ...(error.fields ? { fields: error.fields } : {}) },
+      error: {
+        code: error.code,
+        message: error.message,
+        requestId,
+        ...(error.fields ? { fields: error.fields } : {}),
+      },
       requestId,
     }, {
       status: error.status,
@@ -25,12 +30,14 @@ export function failure(error: unknown, requestId: string, context?: Record<stri
     });
   }
 
+  // Technical details are logged server-side; callers only ever see a generic message.
   logger.error("Unhandled API error", { requestId, ...context, error: error instanceof Error ? error.message : "unknown" });
   return NextResponse.json({
     success: false,
     error: {
       code: "INTERNAL_ERROR",
       message: "The request could not be completed. Please try again or contact an administrator.",
+      requestId,
     },
     requestId,
   }, {

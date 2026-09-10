@@ -37,8 +37,14 @@ import { defaultRetention } from "@/lib/retention";
 import { createHash } from "node:crypto";
 import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
 import { getApiKeyScopesByKeyId, requireScope, type ApiScope } from "@/lib/security/api-keys";
+import { bearerTokenFrom, requireBearerScope, verifyBearerKeySafely } from "@/lib/security/bearer-keys";
 import { getStorageService } from "@/lib/storage";
 import type { FileDocument } from "@/types/file";
+
+/** Credential shapes accepted by the direct upload handler. */
+type UploadCredential =
+  | BridgeCredential
+  | { mode: "bearer"; keyId: string; logKey: string };
 
 const VALIDATION_CODES = new Set(["INVALID_FILE_TYPE", "UPLOAD_SIZE_MISMATCH", "UPLOAD_OWNERSHIP_MISMATCH", "INVALID_DOCUMENT"]);
 const SNIFF_WINDOW_BYTES = 2048;
@@ -106,17 +112,34 @@ async function signBridgeDocumentUrl(file: Pick<FileDocument, "storagePath" | "o
  * code runs, so the 413 guidance below only triggers for the configured
  * document cap.
  */
-export async function handleBridgeDirectUpload(request: Request, requestId: string, requiredScope?: ApiScope): Promise<Response> {
+export async function handleBridgeDirectUpload(
+  request: Request,
+  requestId: string,
+  options: { requiredScope?: ApiScope; allowBearer?: boolean } = {},
+): Promise<Response> {
   // Rate limiting runs before authentication so unauthenticated floods cannot
   // bypass the per-instance budget by omitting credentials.
   enforceRateLimit(`bridge:upload:${getClientIp(request)}`, 240);
 
-  let credential: BridgeCredential | null = null;
+  let credential: UploadCredential | null = null;
+  let uploaderLabel = "unknown";
   let filename = "unknown";
   try {
     const rawBody = isSignedRequest(request) ? new Uint8Array(await request.arrayBuffer()) : undefined;
-    credential = await requireBridgeCredential(request, rawBody);
-    if (requiredScope) requireScope(await getApiKeyScopesByKeyId(credential.keyId), requiredScope);
+    const bearer = options.allowBearer ? bearerTokenFrom(request) : null;
+    if (bearer) {
+      const verified = await verifyBearerKeySafely(bearer);
+      if (!verified) {
+        throw new ApiError(401, "INVALID_API_KEY", "Missing or invalid API key. Send Authorization: Bearer ng_live_….");
+      }
+      if (options.requiredScope) requireBearerScope(verified.scopes, options.requiredScope);
+      credential = { mode: "bearer", keyId: verified.keyId, logKey: verified.keyId };
+      uploaderLabel = `api:${verified.keyId}`;
+    } else {
+      credential = await requireBridgeCredential(request, rawBody);
+      if (options.requiredScope) requireScope(await getApiKeyScopesByKeyId(credential.keyId), options.requiredScope);
+      uploaderLabel = bridgeUploader(credential);
+    }
 
     const contentType = request.headers.get("content-type") ?? "";
     if (!contentType.toLowerCase().includes("multipart/form-data")) {
@@ -214,7 +237,7 @@ export async function handleBridgeDirectUpload(request: Request, requestId: stri
         mimeType: document.mimeType,
         extension: document.extension,
         size,
-        uploadedBy: bridgeUploader(credential),
+        uploadedBy: uploaderLabel,
         contentHash: createHash("sha256").update(bytes).digest("hex"),
         retention: defaultRetention(settings),
       });

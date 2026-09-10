@@ -25,10 +25,11 @@ export function bridgeRouteNotAtGateway(request: Request): NextResponse {
       error: {
         code: "UNKNOWN_BRIDGE_ROUTE",
         message:
-          `No bridge route matches '${path || request.url}'. ` +
-          "The Storage Bridge runs in this same deployment: POST /api/v1/storage/upload for multipart uploads " +
-          "(up to ~4 MB), POST /api/v1/storage/upload/init then PUT then POST /api/v1/storage/upload/complete for " +
-          "larger documents, GET /api/files and GET /api/files/{id}/download for reads, and GET /api/v1/health for liveness.",
+          `No /api/v1 route matches '${path || request.url}'. ` +
+          "The Storage Bridge runs in this same deployment. Available routes: GET /api/v1/files, POST /api/v1/files, " +
+          "GET/PATCH/DELETE /api/v1/files/{id}, GET /api/v1/files/{id}/download, POST /api/v1/files/{id}/restore, " +
+          "POST /api/v1/storage/upload (and its init/complete steps), and GET /api/v1/health for liveness.",
+        requestId,
       },
       requestId,
     },
