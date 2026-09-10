@@ -84,6 +84,12 @@ export async function POST(request: Request) {
             break;
           }
           case "delete": {
+            // The Files page allows an administrator to permanently delete a
+            // mixed selection of active and trashed files. Preserve the same
+            // safety transition as the single-file action for active records.
+            if (file.status === "active") {
+              await moveFileToTrash(id, settings.trashRetentionDays, "manual", actor.uid);
+            }
             const pending = await beginPermanentDeletion(id);
             if (pending.status !== "deleted") {
               try {

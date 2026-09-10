@@ -1,31 +1,41 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
-import { Check, ChevronLeft, ChevronRight, Copy, Search, X } from "lucide-react";
+import { useRef, useState, type ReactNode } from "react";
+import { Check, ChevronLeft, ChevronRight, Copy, LoaderCircle, Search, X } from "lucide-react";
 import { useToast } from "@/components/providers";
 import { formatRelative } from "@/utils/format";
 
 export function CopyButton({ value, label = "Copy", className = "" }: { value: string; label?: string; className?: string }) {
   const { toast } = useToast();
   const [copied, setCopied] = useState(false);
+  const [copying, setCopying] = useState(false);
+  const copyingRef = useRef(false);
+  const copy = async () => {
+    if (copyingRef.current) return;
+    copyingRef.current = true;
+    setCopying(true);
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toast("Copy failed. Select the text manually.", "error");
+    } finally {
+      copyingRef.current = false;
+      setCopying(false);
+    }
+  };
   return (
     <button
       type="button"
       aria-label={label}
       title={label}
-      onClick={(event) => {
-        event.stopPropagation();
-        navigator.clipboard.writeText(value).then(
-          () => {
-            setCopied(true);
-            window.setTimeout(() => setCopied(false), 1500);
-          },
-          () => toast("Copy failed. Select the text manually.", "error"),
-        );
-      }}
+      disabled={copying}
+      aria-busy={copying}
+      onClick={(event) => { event.stopPropagation(); void copy(); }}
       className={`btn-icon h-7 w-7 ${className}`}
     >
-      {copied ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+      {copying ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : copied ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
     </button>
   );
 }
@@ -74,21 +84,23 @@ export function Pagination({
   onPrev,
   onNext,
   label,
+  busy = false,
 }: {
   hasPrev: boolean;
   hasNext: boolean;
   onPrev: () => void;
   onNext: () => void;
   label?: string;
+  busy?: boolean;
 }) {
   return (
     <div className="flex items-center justify-between gap-3 border-t border-line bg-surface-raised px-3 py-2.5">
       <p className="text-xs text-ink-faint">{label ?? ""}</p>
       <div className="flex items-center gap-1.5">
-        <button type="button" className="btn-secondary btn-sm" disabled={!hasPrev} onClick={onPrev}>
+        <button type="button" className="btn-secondary btn-sm" disabled={!hasPrev || busy} aria-busy={busy} onClick={onPrev}>
           <ChevronLeft className="h-3.5 w-3.5" /> Previous
         </button>
-        <button type="button" className="btn-secondary btn-sm" disabled={!hasNext} onClick={onNext}>
+        <button type="button" className="btn-secondary btn-sm" disabled={!hasNext || busy} aria-busy={busy} onClick={onNext}>
           Next <ChevronRight className="h-3.5 w-3.5" />
         </button>
       </div>

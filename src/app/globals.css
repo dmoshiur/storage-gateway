@@ -101,10 +101,10 @@ button:not(:disabled), [role="button"]:not([aria-disabled="true"]) { cursor: poi
   .nav-section { @apply px-2.5 pb-1 pt-4 text-[11px] font-semibold uppercase tracking-wider text-ink-faint first:pt-1; }
 
   /* ---------- overlays ---------- */
-  /* Subtle dim, no blur: the app behind a dialog stays visually understandable. */
-  .overlay { @apply fixed inset-0 z-50 animate-fade-in; background: rgba(2, 6, 23, 0.4); }
-  .dark .overlay { background: rgba(0, 0, 0, 0.5); }
-  .dialog-panel { @apply card w-full max-w-lg p-6 shadow-pop animate-slide-up dark:shadow-popdark; }
+  /* A light, opaque dim only. Never blur or disable the dashboard globally. */
+  .overlay { @apply fixed inset-0 z-0 animate-fade-in; background: rgba(2, 6, 23, 0.22); }
+  .dark .overlay { background: rgba(0, 0, 0, 0.32); }
+  .dialog-panel { @apply card relative z-10 w-full max-w-lg p-6 shadow-pop animate-slide-up dark:shadow-popdark; }
   .drawer-panel { @apply fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col border-l border-line bg-surface-raised shadow-pop animate-slide-in-right dark:shadow-popdark; }
 
   /* ---------- menus ---------- */

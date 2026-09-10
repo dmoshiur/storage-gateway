@@ -242,14 +242,28 @@ export function Dropdown({
 
   return (
     <div ref={ref} className="relative inline-block">
-      <div aria-haspopup="menu" aria-expanded={open} aria-label={label} onClick={() => setOpen((value) => !value)}>
+      <div
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={label}
+        onClick={() => setOpen((value) => !value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setOpen((value) => !value);
+          }
+        }}
+      >
         {trigger}
       </div>
       {open && (
         <div
           role="menu"
           aria-label={label}
-          onClick={() => setOpen(false)}
+          onClick={(event) => {
+            const target = event.target as HTMLElement;
+            if (!target.closest("[data-keep-menu]")) setOpen(false);
+          }}
           className={`menu absolute top-[calc(100%+6px)] z-[60] ${align === "right" ? "right-0" : "left-0"}`}
         >
           {children}

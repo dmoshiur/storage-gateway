@@ -117,7 +117,7 @@ export function CommandPalette({ open, onClose, onUpload }: { open: boolean; onC
   return (
     <div className="fixed inset-0 z-[85] px-4 pt-[12vh]" role="dialog" aria-modal="true" aria-label="Command palette">
       <div className="overlay" onClick={onClose} />
-      <div ref={panelRef} tabIndex={-1} className="card relative mx-auto w-full max-w-xl overflow-hidden shadow-pop animate-slide-up dark:shadow-popdark">
+      <div ref={panelRef} tabIndex={-1} className="card relative z-10 mx-auto w-full max-w-xl overflow-hidden shadow-pop animate-slide-up dark:shadow-popdark">
         <div className="flex items-center gap-2.5 border-b border-line px-4">
           <Search className="h-4 w-4 shrink-0 text-ink-faint" />
           <input

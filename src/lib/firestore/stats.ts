@@ -3,6 +3,7 @@ import "server-only";
 import { getUploadingFilesForReservation, listFilesForStats } from "@/lib/firestore/files";
 import { getSettings } from "@/lib/firestore/settings";
 import { DEFAULT_SETTINGS } from "@/types/settings";
+import { logger } from "@/lib/logging/logger";
 
 export interface StorageStats {
   totalPdfCount: number;
@@ -49,11 +50,11 @@ export async function getStorageStats(): Promise<StorageStats> {
 
 export interface StorageStatsResult {
   stats: StorageStats;
-  /** "live" = computed from Firestore metadata; "fallback" = documented mock metrics. */
+  /** "live" = computed from Firestore metadata; "fallback" = degraded, non-authoritative metrics. */
   source: "live" | "fallback";
 }
 
-/** Zeroed mock metrics used when Firestore (or its auth path) is unreachable. */
+/** Explicitly marked degraded metrics used when the metadata service is unreachable. */
 export function fallbackStorageStats(): StorageStats {
   return {
     totalPdfCount: 0,
@@ -73,20 +74,18 @@ export function fallbackStorageStats(): StorageStats {
 
 /**
  * Dashboard-safe wrapper: any Firestore/Firebase failure (expired admin
- * token, network loss, missing configuration) degrades to the fallback
- * summary metrics (0 files, 0 B used) instead of throwing an unhandled
- * exception that would 500 the dashboard.
+ * token, network loss, missing configuration) returns explicitly marked
+ * degraded summary metrics instead of throwing an unhandled exception that
+ * would 500 the dashboard.
  */
 export async function getStorageStatsSafe(): Promise<StorageStatsResult> {
   try {
     return { stats: await getStorageStats(), source: "live" };
   } catch (error) {
-    console.error(JSON.stringify({
-      level: "warn",
-      message: "Storage statistics unavailable — serving fallback metrics",
+    logger.warn("Storage statistics unavailable — serving degraded metrics", {
       area: "stats",
       reason: error instanceof Error ? error.message : "unknown",
-    }));
+    });
     return { stats: fallbackStorageStats(), source: "fallback" };
   }
 }

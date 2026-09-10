@@ -1,12 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArchiveRestore, Download, Eye, Heart, Link2, Pencil, Trash2 } from "lucide-react";
 import { useConfirm, useSession, useToast } from "@/components/providers";
 import { apiErrorOptions, apiFetch } from "@/lib/client/api";
 import type { SerializedFile } from "@/types/file";
 import { formatRetention } from "@/utils/format";
+
+export type FileAction = "download" | "copyLink" | "favorite" | "trash" | "restore" | "destroy";
 
 export function StatusBadge({ file }: { file: SerializedFile }) {
   const [now] = useState(() => Date.now());
@@ -35,6 +37,12 @@ export function displayName(file: SerializedFile): string {
   return file.title || file.originalName;
 }
 
+/**
+ * File actions deliberately own their busy state. A download or metadata
+ * mutation must not replace the table, lock the page, or disable a different
+ * row. The ref is the synchronous double-submit guard; the Set in state is
+ * only the visual projection of that guard.
+ */
 export function useFileActions(refresh: () => void) {
   const { toast } = useToast();
   const confirm = useConfirm();
@@ -42,12 +50,42 @@ export function useFileActions(refresh: () => void) {
   const router = useRouter();
   const canManage = session?.role === "admin" || session?.role === "editor";
   const canDestroy = session?.role === "admin";
+  const busyRef = useRef<Set<string>>(new Set());
+  const retryHandlersRef = useRef<Partial<Record<FileAction, (file: SerializedFile) => void>>>({});
+  const [busyKeys, setBusyKeys] = useState<Set<string>>(() => new Set());
 
-  const preview = (file: SerializedFile) => {
+  const actionKey = useCallback((file: SerializedFile, action: FileAction) => `${file.id}:${action}`, []);
+
+  const begin = useCallback((file: SerializedFile, action: FileAction): boolean => {
+    const key = actionKey(file, action);
+    if (busyRef.current.has(key)) return false;
+    busyRef.current.add(key);
+    setBusyKeys((current) => new Set(current).add(key));
+    return true;
+  }, [actionKey]);
+
+  const finish = useCallback((file: SerializedFile, action: FileAction) => {
+    const key = actionKey(file, action);
+    busyRef.current.delete(key);
+    setBusyKeys((current) => {
+      if (!current.has(key)) return current;
+      const next = new Set(current);
+      next.delete(key);
+      return next;
+    });
+  }, [actionKey]);
+
+  const isBusy = useCallback((file: SerializedFile, action: FileAction) => busyKeys.has(actionKey(file, action)), [actionKey, busyKeys]);
+  const invokeRetry = useCallback((action: FileAction, file: SerializedFile) => {
+    retryHandlersRef.current[action]?.(file);
+  }, []);
+
+  const preview = useCallback((file: SerializedFile) => {
     router.push(`/admin/files?preview=${file.id}`);
-  };
+  }, [router]);
 
-  const download = async (file: SerializedFile) => {
+  const download = useCallback(async (file: SerializedFile): Promise<boolean> => {
+    if (!begin(file, "download")) return false;
     try {
       const data = await apiFetch<{ url: string }>(`/api/files/${file.id}/download`);
       const link = document.createElement("a");
@@ -58,24 +96,34 @@ export function useFileActions(refresh: () => void) {
       link.click();
       link.remove();
       toast("Download started.");
+      return true;
     } catch (error) {
-      const opts = apiErrorOptions(error, "Download failed.");
-      toast(opts.message, "error", { requestId: opts.requestId, retry: () => void download(file) });
+      const opts = apiErrorOptions(error, "Download failed. Try again.");
+      toast(opts.message, "error", { requestId: opts.requestId, retry: () => invokeRetry("download", file) });
+      return false;
+    } finally {
+      finish(file, "download");
     }
-  };
+  }, [begin, finish, invokeRetry, toast]);
 
-  const copyLink = async (file: SerializedFile) => {
+  const copyLink = useCallback(async (file: SerializedFile): Promise<boolean> => {
+    if (!begin(file, "copyLink")) return false;
     try {
       const data = await apiFetch<{ url: string; expiresAt: string }>(`/api/files/${file.id}/download?disposition=inline`);
       await navigator.clipboard.writeText(data.url);
       toast("Temporary link copied. It expires soon.");
+      return true;
     } catch (error) {
-      const opts = apiErrorOptions(error, "Could not create a temporary link.");
-      toast(opts.message, "error", { requestId: opts.requestId, retry: () => void copyLink(file) });
+      const opts = apiErrorOptions(error, "Could not create a temporary link. Try again.");
+      toast(opts.message, "error", { requestId: opts.requestId, retry: () => invokeRetry("copyLink", file) });
+      return false;
+    } finally {
+      finish(file, "copyLink");
     }
-  };
+  }, [begin, finish, invokeRetry, toast]);
 
-  const toggleFavorite = async (file: SerializedFile) => {
+  const toggleFavorite = useCallback(async (file: SerializedFile): Promise<boolean> => {
+    if (!begin(file, "favorite")) return false;
     try {
       await apiFetch(`/api/files/${file.id}/favorite`, {
         method: "POST",
@@ -83,63 +131,105 @@ export function useFileActions(refresh: () => void) {
       });
       toast(file.isFavorite ? "Removed from favorites." : "Added to favorites.");
       refresh();
+      return true;
     } catch (error) {
-      const opts = apiErrorOptions(error, "Update failed.");
-      toast(opts.message, "error", { requestId: opts.requestId, retry: () => void toggleFavorite(file) });
+      const opts = apiErrorOptions(error, "Favorite status could not be updated. Try again.");
+      toast(opts.message, "error", { requestId: opts.requestId, retry: () => invokeRetry("favorite", file) });
+      return false;
+    } finally {
+      finish(file, "favorite");
     }
-  };
+  }, [begin, finish, invokeRetry, refresh, toast]);
 
-  const trash = async (file: SerializedFile) => {
-    const ok = await confirm({
-      title: "Move to Trash",
-      description: `“${displayName(file)}” will be moved to Trash. It stays recoverable until its Trash retention expires.`,
-      confirmLabel: "Move to Trash",
-    });
-    if (!ok) return;
+  const trash = useCallback(async (file: SerializedFile): Promise<boolean> => {
+    if (!begin(file, "trash")) return false;
     try {
+      const ok = await confirm({
+        title: "Move to Trash",
+        description: `“${displayName(file)}” will be moved to Trash. It stays recoverable until its Trash retention expires.`,
+        confirmLabel: "Move to Trash",
+      });
+      if (!ok) return false;
       await apiFetch(`/api/files/${file.id}`, { method: "DELETE", body: JSON.stringify({ confirmation: "MOVE_TO_TRASH" }) });
       toast("File moved to Trash.");
       refresh();
+      return true;
     } catch (error) {
-      const opts = apiErrorOptions(error, "Move to Trash failed.");
-      toast(opts.message, "error", { requestId: opts.requestId, retry: () => void trash(file) });
+      const opts = apiErrorOptions(error, "Move to Trash failed. Try again.");
+      toast(opts.message, "error", { requestId: opts.requestId, retry: () => invokeRetry("trash", file) });
+      return false;
+    } finally {
+      finish(file, "trash");
     }
-  };
+  }, [begin, confirm, finish, invokeRetry, refresh, toast]);
 
-  const restore = async (file: SerializedFile) => {
+  const restore = useCallback(async (file: SerializedFile): Promise<boolean> => {
+    if (!begin(file, "restore")) return false;
     try {
       await apiFetch(`/api/files/${file.id}/restore`, { method: "POST" });
       toast("File restored.");
       refresh();
+      return true;
     } catch (error) {
-      const opts = apiErrorOptions(error, "Restore failed.");
-      toast(opts.message, "error", { requestId: opts.requestId, retry: () => void restore(file) });
+      const opts = apiErrorOptions(error, "Restore failed. Try again.");
+      toast(opts.message, "error", { requestId: opts.requestId, retry: () => invokeRetry("restore", file) });
+      return false;
+    } finally {
+      finish(file, "restore");
     }
-  };
+  }, [begin, finish, invokeRetry, refresh, toast]);
 
-  const destroy = async (file: SerializedFile) => {
-    const ok = await confirm({
-      title: "Delete permanently?",
-      description: `“${displayName(file)}” and its private stored bytes will be permanently deleted. This action cannot be undone.`,
-      confirmLabel: "Delete permanently",
-      tone: "danger",
-      requireText: "DELETE",
-    });
-    if (!ok) return;
+  const destroy = useCallback(async (file: SerializedFile): Promise<boolean> => {
+    if (!begin(file, "destroy")) return false;
     try {
+      const ok = await confirm({
+        title: "Delete permanently?",
+        description: `“${displayName(file)}” and its private stored bytes will be permanently deleted. This action cannot be undone.`,
+        confirmLabel: "Delete permanently",
+        tone: "danger",
+        requireText: "DELETE",
+      });
+      if (!ok) return false;
       if (file.status === "active") {
         await apiFetch(`/api/files/${file.id}`, { method: "DELETE", body: JSON.stringify({ confirmation: "MOVE_TO_TRASH" }) });
       }
       await apiFetch(`/api/files/${file.id}/permanent-delete`, { method: "POST", body: JSON.stringify({ confirmation: "DELETE" }) });
       toast("File permanently deleted.");
       refresh();
+      return true;
     } catch (error) {
-      const opts = apiErrorOptions(error, "Permanent deletion failed.");
-      toast(opts.message, "error", { requestId: opts.requestId, retry: () => void destroy(file) });
+      const opts = apiErrorOptions(error, "Permanent deletion failed. Try again.");
+      toast(opts.message, "error", { requestId: opts.requestId, retry: () => invokeRetry("destroy", file) });
+      return false;
+    } finally {
+      finish(file, "destroy");
     }
-  };
+  }, [begin, confirm, finish, invokeRetry, refresh, toast]);
 
-  return { preview, download, copyLink, toggleFavorite, trash, restore, destroy, canManage, canDestroy };
+  useEffect(() => {
+    retryHandlersRef.current = {
+      download: (file) => { void download(file); },
+      copyLink: (file) => { void copyLink(file); },
+      favorite: (file) => { void toggleFavorite(file); },
+      trash: (file) => { void trash(file); },
+      restore: (file) => { void restore(file); },
+      destroy: (file) => { void destroy(file); },
+    };
+    return () => { retryHandlersRef.current = {}; };
+  }, [copyLink, download, destroy, restore, toggleFavorite, trash]);
+
+  return {
+    preview,
+    download,
+    copyLink,
+    toggleFavorite,
+    trash,
+    restore,
+    destroy,
+    isBusy,
+    canManage,
+    canDestroy,
+  };
 }
 
 export const FILE_ACTION_ICONS = {

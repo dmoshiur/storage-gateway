@@ -79,7 +79,8 @@ export async function handleV1ListFiles(request: Request, requestId: string): Pr
     status: "active",
     filter: "active",
     sort: query.sort,
-    search: query.category ? `${query.search} ${query.category}`.trim() : query.search,
+    search: query.search,
+    category: query.category,
     onlyAccessible: true,
   });
   return cors(success(result, requestId), request);

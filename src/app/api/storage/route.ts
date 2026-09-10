@@ -26,8 +26,9 @@ export async function GET(request: Request) {
   return apiRoute(request, async (requestId) => {
     const actor = await requireAdminRequest(request, "read_files");
     enforceRateLimit(`storage:${actor.uid}`, 120);
-    // Each external dependency is isolated: Firestore degrades to fallback
-    // metrics, Blob degrades to "unreachable", and metrics degrade to zero.
+    // Each external dependency is isolated: Firestore returns explicitly
+    // degraded metrics, Blob reports "unreachable", and request totals degrade
+    // to zero without blocking the dashboard.
     const [statsResult, blob, apiRequests] = await Promise.all([
       getStorageStatsSafe(),
       checkBlobConnectivity(),

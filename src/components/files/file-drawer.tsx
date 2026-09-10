@@ -1,7 +1,8 @@
 "use client";
 
-import { Download, Eye, Heart, Link2, Pencil } from "lucide-react";
+import { ArchiveRestore, Download, Eye, Heart, Link2, Pencil, Trash2 } from "lucide-react";
 import { Drawer } from "@/components/ui/overlays";
+import { Spinner } from "@/components/ui/feedback";
 import { CopyButton } from "@/components/ui/data";
 import type { SerializedFile } from "@/types/file";
 import { formatBytes, formatDateTime, formatRetention } from "@/utils/format";
@@ -30,6 +31,16 @@ export function FileDrawer({
   refresh: () => void;
 }) {
   const actions = useFileActions(refresh);
+  const closeAfterSuccess = (action: () => Promise<boolean>) => {
+    void action()
+      .then((changed) => {
+        if (changed) onClose();
+      })
+      .catch(() => {
+        // Action hooks normalize expected failures into a toast; keep the
+        // drawer callback rejection-safe if an unexpected UI error occurs.
+      });
+  };
 
   return (
     <Drawer title="File Details" onClose={onClose}>
@@ -45,20 +56,90 @@ export function FileDrawer({
         </div>
       </div>
 
-      <div className="mt-4 grid grid-cols-2 gap-2">
-        <button type="button" className="btn-primary btn-sm" onClick={onPreview}><Eye className="h-3.5 w-3.5" /> Preview</button>
-        <button type="button" className="btn-secondary btn-sm" onClick={() => actions.download(file)}><Download className="h-3.5 w-3.5" /> Download</button>
-        {actions.canManage && (
-          <>
-            <button type="button" className="btn-secondary btn-sm" onClick={() => actions.toggleFavorite(file)}>
-              <Heart className={`h-3.5 w-3.5 ${file.isFavorite ? "fill-amber-400 text-amber-400" : ""}`} />
-              {file.isFavorite ? "Unfavorite" : "Favorite"}
+      {file.status === "active" && (
+        <div className="mt-4 grid grid-cols-2 gap-2">
+          <button type="button" className="btn-primary btn-sm" onClick={onPreview}><Eye className="h-3.5 w-3.5" /> Preview</button>
+          <button
+            type="button"
+            className="btn-secondary btn-sm"
+            disabled={actions.isBusy(file, "download")}
+            aria-busy={actions.isBusy(file, "download")}
+            onClick={() => void actions.download(file)}
+          >
+            {actions.isBusy(file, "download") ? <Spinner className="h-3.5 w-3.5" /> : <Download className="h-3.5 w-3.5" />} Download
+          </button>
+          {actions.canManage && (
+            <>
+              <button
+                type="button"
+                className="btn-secondary btn-sm"
+                disabled={actions.isBusy(file, "favorite")}
+                aria-busy={actions.isBusy(file, "favorite")}
+                onClick={() => void actions.toggleFavorite(file)}
+              >
+                {actions.isBusy(file, "favorite") ? <Spinner className="h-3.5 w-3.5" /> : <Heart className={`h-3.5 w-3.5 ${file.isFavorite ? "fill-amber-400 text-amber-400" : ""}`} />}
+                {file.isFavorite ? "Unfavorite" : "Favorite"}
+              </button>
+              <button
+                type="button"
+                className="btn-secondary btn-sm"
+                disabled={actions.isBusy(file, "copyLink")}
+                aria-busy={actions.isBusy(file, "copyLink")}
+                onClick={() => void actions.copyLink(file)}
+              >
+                {actions.isBusy(file, "copyLink") ? <Spinner className="h-3.5 w-3.5" /> : <Link2 className="h-3.5 w-3.5" />} Temp link
+              </button>
+              <button type="button" className="btn-secondary btn-sm col-span-2" onClick={onEdit}><Pencil className="h-3.5 w-3.5" /> Edit metadata & retention</button>
+              <button
+                type="button"
+                className="btn-secondary btn-sm col-span-2"
+                disabled={actions.isBusy(file, "trash")}
+                aria-busy={actions.isBusy(file, "trash")}
+                onClick={() => closeAfterSuccess(() => actions.trash(file))}
+              >
+                {actions.isBusy(file, "trash") ? <Spinner className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />} Move to Trash
+              </button>
+              {actions.canDestroy && (
+                <button
+                  type="button"
+                  className="btn-danger-soft btn-sm col-span-2"
+                  disabled={actions.isBusy(file, "destroy")}
+                  aria-busy={actions.isBusy(file, "destroy")}
+                  onClick={() => closeAfterSuccess(() => actions.destroy(file))}
+                >
+                  {actions.isBusy(file, "destroy") ? <Spinner className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />} Delete permanently
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      )}
+      {file.status === "trash" && (
+        <div className="mt-4 grid grid-cols-2 gap-2">
+          {actions.canManage && (
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              disabled={actions.isBusy(file, "restore")}
+              aria-busy={actions.isBusy(file, "restore")}
+              onClick={() => closeAfterSuccess(() => actions.restore(file))}
+            >
+              {actions.isBusy(file, "restore") ? <Spinner className="h-3.5 w-3.5" /> : <ArchiveRestore className="h-3.5 w-3.5" />} Restore
             </button>
-            <button type="button" className="btn-secondary btn-sm" onClick={() => actions.copyLink(file)}><Link2 className="h-3.5 w-3.5" /> Temp link</button>
-            <button type="button" className="btn-secondary btn-sm col-span-2" onClick={onEdit}><Pencil className="h-3.5 w-3.5" /> Edit metadata & retention</button>
-          </>
-        )}
-      </div>
+          )}
+          {actions.canDestroy && (
+            <button
+              type="button"
+              className="btn-danger-soft btn-sm"
+              disabled={actions.isBusy(file, "destroy")}
+              aria-busy={actions.isBusy(file, "destroy")}
+              onClick={() => closeAfterSuccess(() => actions.destroy(file))}
+            >
+              {actions.isBusy(file, "destroy") ? <Spinner className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />} Delete permanently
+            </button>
+          )}
+        </div>
+      )}
 
       {file.description && (
         <div className="mt-5">
