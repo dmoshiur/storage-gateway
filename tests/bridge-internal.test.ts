@@ -137,12 +137,30 @@ describe("internal bridge file registration", () => {
     expect(writeAuditLogSafely).toHaveBeenCalledWith(expect.objectContaining({ action: "BRIDGE_UPLOAD" }));
   });
 
-  it("rejects non-PDF names and oversized files before any write", async () => {
+  it("registers non-PDF office and text documents through the same bridge", async () => {
+    const response = await registerRoute.POST(internalRequest("https://gateway.test/api/internal/bridge/files", {
+      method: "POST",
+      body: JSON.stringify({
+        storageKey: "documents/2026/09/6fd9b9a4-07bd-4d2b-b0b9-6f0a0f0f0f0f.txt",
+        originalName: "meeting-notes.txt",
+        title: "Meeting notes",
+        size: 64,
+        extension: "txt",
+        mimeType: "text/plain",
+      }),
+    }));
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body.data.file).toMatchObject({ originalName: "meeting-notes.txt", status: "active" });
+    expect(createBridgeFile).toHaveBeenCalledWith(expect.objectContaining({ mimeType: "text/plain", extension: "txt" }));
+  });
+
+  it("rejects unsupported names and oversized files before any write", async () => {
     const badName = await registerRoute.POST(internalRequest("https://gateway.test/api/internal/bridge/files", {
       method: "POST",
       body: JSON.stringify({
         storageKey: "pdfs/2026/09/6fd9b9a4-07bd-4d2b-b0b9-6f0a0f0f0f0f.pdf",
-        originalName: "notes.txt",
+        originalName: "notes.exe",
         size: 100,
       }),
     }));

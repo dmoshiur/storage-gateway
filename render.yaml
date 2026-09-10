@@ -1,0 +1,40 @@
+# Render Blueprint for the AM Storage Bridge (FastAPI).
+#
+# This deploys ONLY the bridge. The Next.js gateway keeps running on Vercel.
+# After the first deploy, copy the service's public URL (for example
+# https://am-storage-bridge.onrender.com, or your custom bridge domain) into:
+#   - the gateway:   NEXT_PUBLIC_BRIDGE_URL and BRIDGE_URL
+#   - gramunnayan.com server: AM_STORAGE_BRIDGE_URL
+#
+# Secrets are prompted during Blueprint creation (sync: false) and are never
+# stored in this repository.
+services:
+  - type: web
+    name: am-storage-bridge
+    runtime: docker
+    rootDir: fastapi
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: STORAGE_GATEWAY_URL
+        sync: false
+      - key: INTEGRATION_API_KEY
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
+      - key: R2_ENDPOINT
+        sync: false
+      - key: CORS_ORIGINS
+        value: https://gramunnayan.com,https://www.gramunnayan.com
+      - key: AM_STORAGE_MAX_DOCUMENT_BYTES
+        value: "52428800"
+      - key: AM_STORAGE_SIGNED_URL_EXPIRY_SECONDS
+        value: "3600"

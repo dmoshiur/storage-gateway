@@ -10,7 +10,7 @@ export const runtime = "nodejs";
 /**
  * Internal, server-to-server upload attempt log from the AM Storage bridge.
  *
- * Every bridge upload attempt — successful or rejected (bad key, invalid PDF,
+ * Every bridge upload attempt — successful or rejected (bad key, invalid document,
  * R2 failure, registration failure) — is recorded here so the dashboard shows
  * a live "API Upload Activity" log with Success/Failed badges. The bridge
  * treats this endpoint as best-effort: a failure to log never affects the

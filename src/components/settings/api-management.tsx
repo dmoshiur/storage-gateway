@@ -22,8 +22,9 @@ interface NewCredential {
   keySecret: string;
 }
 
-/** Public bridge origin shown in the copyable snippets. Set NEXT_PUBLIC_BRIDGE_URL to the deployed bridge origin. */
-const bridgeUrl = (process.env.NEXT_PUBLIC_BRIDGE_URL ?? "https://bridge.your-domain.example").replace(/\/+$/, "");
+/** Public bridge origin shown in the copyable snippets. Set NEXT_PUBLIC_BRIDGE_URL to the deployed FastAPI bridge origin. */
+const DEFAULT_BRIDGE_URL = "https://bridge.your-domain.example";
+const bridgeUrl = (process.env.NEXT_PUBLIC_BRIDGE_URL ?? DEFAULT_BRIDGE_URL).replace(/\/+$/, "");
 
 function apiError(caught: unknown, fallback: string): string {
   return caught instanceof ClientApiError ? caught.message : fallback;
@@ -121,7 +122,7 @@ export function ApiManagement() {
     "});",
     "const result = await response.json();",
     "// result.data.file → permanent metadata record (id, title, size, retention, status)",
-    "// result.data.url  → temporary signed PDF URL returned to your visitors",
+    "// result.data.url  → temporary signed document URL returned to your visitors",
     "",
     "// ── 2) HMAC signed mode (secret is never sent after setup) ───────────",
     "// Build the multipart body yourself (e.g. the `form-data` package) so the",
@@ -158,6 +159,19 @@ export function ApiManagement() {
       </header>
 
       {error && <Notice type="error">{error}</Notice>}
+
+      {bridgeUrl !== DEFAULT_BRIDGE_URL ? (
+        <Notice type="info">
+          Integration endpoint: <code className="font-mono text-xs">POST {bridgeUrl}/api/v1/storage/upload</code>.{" "}
+          <strong>This must be the FastAPI bridge origin, not the Next.js gateway origin.</strong> If it points to the
+          gateway, integrations receive a 404 HTML page.
+        </Notice>
+      ) : (
+        <Notice type="warning">
+          <strong>NEXT_PUBLIC_BRIDGE_URL is not set in this build.</strong> The snippets below use the placeholder{" "}
+          {bridgeUrl}. Set it to the deployed FastAPI bridge origin before sharing credentials with gramunnayan.com.
+        </Notice>
+      )}
 
       {newCredential && (
         <Notice type="warning">
@@ -236,13 +250,13 @@ export function ApiManagement() {
       <section className="panel p-5 sm:p-6">
         <h2 className="flex items-center gap-2 font-bold text-ink-900"><Sparkles className="h-5 w-5 text-ngo-600" />gramunnayan.com integration guide</h2>
         <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-600">
-          The NGO website sends multipart form data with one PDF per request to the unified public gateway endpoint. Pass{" "}
+          The NGO website sends multipart form data with one document per request to the unified public gateway endpoint. Pass{" "}
           <strong>both identifiers</strong> —{" "}
           <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs">X-AM-Storage-Key-Id</code> and{" "}
           <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs">X-AM-Storage-Key-Secret</code> — or use{" "}
           <strong>HMAC signed mode</strong> (<code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs">X-AM-Storage-Signature</code> +{" "}
           <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs">X-AM-Storage-Timestamp</code>) so the raw secret is
-          never sent after initial setup. The bridge validates the credential, streams the PDF to private Cloudflare R2, registers
+          never sent after initial setup. The bridge validates the credential, streams the document to private Cloudflare R2, registers
           the document, and returns a signed URL.
         </p>
 
@@ -273,7 +287,7 @@ export function ApiManagement() {
           <code className="rounded bg-blue-100 px-1.5 py-0.5 font-mono text-xs">AM_STORAGE_KEY_ID</code> and{" "}
           <code className="rounded bg-blue-100 px-1.5 py-0.5 font-mono text-xs">AM_STORAGE_KEY_SECRET</code> (and the Cloudflare R2
           credentials) out of browser JavaScript. Signed requests expire after a 5-minute clock-skew window, which blocks replay of
-          captured requests. Visitors should only ever receive the signed PDF URL the bridge returns.
+          captured requests. Visitors should only ever receive the signed document URL the bridge returns.
         </Notice>
       </section>
     </div>

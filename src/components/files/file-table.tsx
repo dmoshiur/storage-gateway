@@ -29,7 +29,7 @@ export function FileTable({ files, trash = false, canManage = true, loading, onE
     const target = window.open("", "_blank");
     if (target) {
       target.opener = null;
-      target.document.title = "Preparing private PDF…";
+      target.document.title = "Preparing private document…";
     }
     setOpeningId(file.id);
     setDownloadError(null);
@@ -39,19 +39,19 @@ export function FileTable({ files, trash = false, canManage = true, loading, onE
       else window.open(`/api/files/${file.id}/download?disposition=${disposition}&redirect=true`, "_blank", "noopener");
     } catch (caught) {
       target?.close();
-      setDownloadError(caught instanceof ClientApiError ? caught.message : "A temporary PDF link could not be generated. Please try again.");
+      setDownloadError(caught instanceof ClientApiError ? caught.message : "A temporary document link could not be generated. Please try again.");
     } finally {
       setOpeningId(null);
     }
   }
 
-  if (!loading && files.length === 0) return <EmptyState icon={trash ? Trash2 : FileText} title={trash ? "Trash is empty" : "No matching PDFs"} detail={trash ? "Files moved to Trash can be restored here until their scheduled permanent deletion." : "Try changing the filters or upload a new PDF."} />;
+  if (!loading && files.length === 0) return <EmptyState icon={trash ? Trash2 : FileText} title={trash ? "Trash is empty" : "No matching documents"} detail={trash ? "Files moved to Trash can be restored here until their scheduled permanent deletion." : "Try changing the filters or upload a new document."} />;
 
   return <>
     {downloadError && <div className="mb-4"><Notice type="error">{downloadError}</Notice></div>}
     <div className="hidden overflow-x-auto rounded-xl border border-slate-200 md:block">
       <table className="min-w-full divide-y divide-slate-200">
-        <thead className="bg-slate-50"><tr><th className="table-heading px-4 py-3">PDF</th><th className="table-heading px-4 py-3">Category</th><th className="table-heading px-4 py-3">Size</th><th className="table-heading px-4 py-3">{trash ? "Deleted" : "Uploaded"}</th>{trash && <th className="table-heading px-4 py-3">Reason</th>}<th className="table-heading px-4 py-3">{trash ? "Permanent deletion" : "Delete date"}</th><th className="table-heading px-4 py-3">Status</th><th className="table-heading px-4 py-3"><span className="sr-only">Actions</span></th></tr></thead>
+        <thead className="bg-slate-50"><tr><th className="table-heading px-4 py-3">Document</th><th className="table-heading px-4 py-3">Category</th><th className="table-heading px-4 py-3">Size</th><th className="table-heading px-4 py-3">{trash ? "Deleted" : "Uploaded"}</th>{trash && <th className="table-heading px-4 py-3">Reason</th>}<th className="table-heading px-4 py-3">{trash ? "Permanent deletion" : "Delete date"}</th><th className="table-heading px-4 py-3">Status</th><th className="table-heading px-4 py-3"><span className="sr-only">Actions</span></th></tr></thead>
         <tbody className="divide-y divide-slate-100 bg-white">{files.map((file) => <tr key={file.id} className="align-top hover:bg-slate-50"><td className="max-w-xs px-4 py-4"><FileIdentity file={file} /></td><td className="px-4 py-4 text-sm text-slate-600">{file.category || "—"}</td><td className="whitespace-nowrap px-4 py-4 text-sm text-slate-600">{formatBytes(file.size)}</td><td className="whitespace-nowrap px-4 py-4 text-sm text-slate-600">{formatDate(trash ? file.deletedAt : file.createdAt)}</td>{trash && <td className="px-4 py-4 text-sm text-slate-600">{deletionReasonLabel(file.deletionReason)}</td>}<td className="whitespace-nowrap px-4 py-4 text-sm text-slate-600">{trash ? formatDate(file.permanentDeleteAt) : file.autoDeleteEnabled ? formatDate(file.deleteAt) : "Never"}</td><td className="px-4 py-4"><Badge status={file.status}>{file.status === "active" ? (file.autoDeleteEnabled ? `Active · ${retentionLabel(file.retentionType)}` : "Active") : file.status}</Badge></td><td className="px-4 py-3"><DesktopActions file={file} trash={trash} canManage={canManage} opening={openingId === file.id} onOpen={open} onEdit={onEdit} onTrash={onTrash} onRestore={onRestore} onPermanentDelete={onPermanentDelete} /></td></tr>)}</tbody>
       </table>
     </div>

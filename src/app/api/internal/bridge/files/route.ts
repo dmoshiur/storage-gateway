@@ -3,7 +3,7 @@ import { success } from "@/lib/api/response";
 import { parseJson } from "@/lib/api/body";
 import { requireIntegrationKey } from "@/lib/security/request-auth";
 import { bridgeRegisterFileSchema } from "@/lib/validation/bridge";
-import { assertUploadMetadata } from "@/lib/validation/pdf";
+import { assertDocumentMetadata, stripDocumentExtension } from "@/lib/validation/documents";
 import { createBridgeFile, serializeFile } from "@/lib/firestore/files";
 import { getSettings } from "@/lib/firestore/settings";
 import { getStorageStats } from "@/lib/firestore/stats";
@@ -16,7 +16,7 @@ export const runtime = "nodejs";
 /**
  * Internal, server-to-server metadata registration for bridge uploads.
  *
- * The FastAPI bridge validates the PDF structure itself (header, EOF marker,
+ * The FastAPI bridge validates the document structure itself (header, EOF marker,
  * declared size) and streams the bytes straight into R2 with its own private
  * R2 credentials. Only after the object exists and passes a HEAD verification
  * does the bridge call this endpoint so the document becomes visible to the
@@ -28,18 +28,20 @@ export async function POST(request: Request) {
     const actor = await requireIntegrationKey(request);
     const input = await parseJson(request, bridgeRegisterFileSchema, 32 * 1024);
     const [settings, stats] = await Promise.all([getSettings(), getStorageStats()]);
-    assertUploadMetadata(input.originalName, input.size, settings.maxPdfSizeBytes);
+    const document = assertDocumentMetadata(input.originalName, input.size, settings.maxPdfSizeBytes, input.mimeType);
     if (stats.totalStorageBytes + input.size > settings.storageLimitBytes) {
-      throw new ApiError(409, "STORAGE_LIMIT_EXCEEDED", "Uploading this PDF would exceed the configured storage limit.");
+      throw new ApiError(409, "STORAGE_LIMIT_EXCEEDED", "Uploading this document would exceed the configured storage limit.");
     }
 
     const file = await createBridgeFile({
       storageKey: input.storageKey,
       originalName: input.originalName,
-      title: input.title || input.originalName.replace(/\.pdf$/i, ""),
+      title: input.title || stripDocumentExtension(input.originalName),
       description: input.description,
       category: input.category,
       tags: input.tags,
+      mimeType: document.mimeType,
+      extension: document.extension,
       size: input.size,
       uploadedBy: actor.uid,
       retention: defaultRetention(settings),

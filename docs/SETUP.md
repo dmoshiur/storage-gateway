@@ -43,7 +43,7 @@ The gateway recognizes `admin`, `editor`, and `viewer`. Any user created in Fire
 ```text
 users/{uid}              last successful login and last known role only
 auditLogs/{auto-id}      activity log
-files/{auto-id}          PDF metadata and lifecycle; never PDF bytes
+files/{auto-id}          document metadata and lifecycle; never document bytes
 settings/app             singleton configuration
 system/cleanupLock       scheduler lock / previous summary
 ```
@@ -52,7 +52,7 @@ The `files` document carries a private random final `storageKey` and temporary `
 
 ## 3. Cloudflare R2
 
-1. In the Cloudflare dashboard, create a distinct bucket per environment, e.g. `ngo-pdfs-dev`, `ngo-pdfs-preview`, `ngo-pdfs-production`.
+1. In the Cloudflare dashboard, create a distinct bucket per environment, e.g. `ngo-documents-dev`, `ngo-documents-preview`, `ngo-documents-production`.
 2. **Do not enable public bucket access or attach a public custom domain.** The gateway uses R2’s S3 API endpoint only.
 3. Create an R2 API token scoped as narrowly as possible to the one bucket: object read/write/delete/list as required by this gateway. Do not use a broad account API token when a bucket-limited token is available.
 4. Set:
@@ -77,7 +77,7 @@ The `files` document carries a private random final `storageKey` and temporary `
    }
    ```
 
-   The direct browser `PUT` uses only a short-lived presigned staging URL. The final key is produced server-side by an R2 copy operation after PDF verification.
+   The direct browser `PUT` uses only a short-lived presigned staging URL. The final key is produced server-side by an R2 copy operation after document verification.
 
 6. Test `HEAD`, range `GET`, `PUT`, `CopyObject`, and `DeleteObject` permissions against the **non-production** bucket before deploying. This gateway needs range reads to validate the header/trailer and `CopyObject` to publish staging bytes safely.
 

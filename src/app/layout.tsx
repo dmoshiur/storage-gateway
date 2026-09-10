@@ -3,7 +3,7 @@ import "@/app/globals.css";
 
 export const metadata: Metadata = {
   title: { default: "AM Storage Company", template: "%s | AM Storage Company" },
-  description: "Private administrative PDF storage gateway.",
+  description: "Private administrative document storage gateway.",
   robots: { index: false, follow: false },
 };
 

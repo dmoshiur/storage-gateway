@@ -1,6 +1,9 @@
 export const FILE_STATUSES = ["uploading", "active", "trash", "deleting", "deleted", "failed"] as const;
 export type FileStatus = (typeof FILE_STATUSES)[number];
 
+export const DOCUMENT_EXTENSIONS = ["pdf", "doc", "docx", "txt", "ppt", "pptx"] as const;
+export type DocumentExtension = (typeof DOCUMENT_EXTENSIONS)[number];
+
 export const RETENTION_TYPES = [
   "never",
   "30_days",
@@ -24,7 +27,8 @@ export interface FileDocument {
   description: string;
   category: string;
   tags: string[];
-  mimeType: "application/pdf";
+  mimeType: string;
+  extension: string;
   size: number;
   createdAt: Date;
   updatedAt: Date;
@@ -53,7 +57,8 @@ export interface SerializedFile {
   description: string;
   category: string;
   tags: string[];
-  mimeType: "application/pdf";
+  mimeType: string;
+  extension: string;
   size: number;
   createdAt: string;
   updatedAt: string;

@@ -106,11 +106,11 @@ export function DashboardOverview() {
         <div>
           <p className="text-sm font-semibold uppercase tracking-wider text-ngo-600">Overview</p>
           <h1 className="mt-1 text-2xl font-bold tracking-tight text-ink-900 sm:text-3xl">Document storage dashboard</h1>
-          <p className="mt-2 text-sm text-slate-600">Private PDF records, retention, and recovery at a glance.</p>
+          <p className="mt-2 text-sm text-slate-600">Private documents, retention, and recovery at a glance.</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <SystemStatusBadge health={health} />
-          <Link href="/admin/files" className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-ngo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-ngo-700"><Upload className="h-4 w-4" />Upload PDF</Link>
+          <Link href="/admin/files" className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-ngo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-ngo-700"><Upload className="h-4 w-4" />Upload document</Link>
         </div>
       </header>
 
@@ -125,12 +125,12 @@ export function DashboardOverview() {
 
       {(warning || critical) && !fallback && (
         <Notice type={critical ? "error" : "warning"}>
-          <strong>{critical ? "Critical storage warning." : "Storage warning."}</strong> Storage usage is {stats.usagePercent}%. {critical ? "Free space or increase the approved storage limit soon." : "Consider reviewing unnecessary PDFs."}
+          <strong>{critical ? "Critical storage warning." : "Storage warning."}</strong> Storage usage is {stats.usagePercent}%. {critical ? "Free space or increase the approved storage limit soon." : "Consider reviewing unnecessary documents."}
         </Notice>
       )}
 
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5" aria-label="Storage summary">
-        <Metric icon={FileText} label="Total PDFs Stored" value={String(stats.totalPdfCount)} detail={`${stats.activeFileCount} active documents`} />
+        <Metric icon={FileText} label="Total Documents Stored" value={String(stats.totalPdfCount)} detail={`${stats.activeFileCount} active documents`} />
         <Metric icon={HardDrive} label="Storage Space Used" value={`${formatBytes(stats.totalStorageBytes)} / ${formatBytes(stats.storageLimitBytes)}`} detail={r2Down ? "R2 check unavailable" : `${stats.usagePercent}% of R2 limit`} tone={r2Down ? "muted" : undefined} />
         <Metric icon={Activity} label="API Requests" value={payload.apiRequests.totalRequests.toLocaleString("en")} detail={payload.apiRequests.lastRequestDate ? `Last hit ${formatDate(payload.apiRequests.lastRequestDate)}` : "No gramunnayan.com traffic yet"} />
         <Metric icon={CalendarClock} label="Expiring soon" value={String(stats.expiringSoonCount)} detail="Within the next 30 days" />
@@ -160,10 +160,10 @@ export function DashboardOverview() {
 
       <section className="grid gap-6 xl:grid-cols-2">
         <ApiUploadLog logs={logs} />
-        <ActivityList title="Recent uploads" href="/admin/files" files={recent} emptyTitle="No PDFs uploaded yet" emptyDetail="Upload the first private PDF record when you are ready." />
+        <ActivityList title="Recent uploads" href="/admin/files" files={recent} emptyTitle="No documents uploaded yet" emptyDetail="Upload the first private document when you are ready." />
       </section>
 
-      <ActivityList title="Recently moved to Trash" href="/admin/trash" files={trash} trash emptyTitle="Trash is empty" emptyDetail="Deleted PDFs stay recoverable here until their scheduled permanent deletion." />
+      <ActivityList title="Recently moved to Trash" href="/admin/trash" files={trash} trash emptyTitle="Trash is empty" emptyDetail="Deleted documents stay recoverable here until their scheduled permanent deletion." />
 
       {health && (
         <p className="text-xs text-slate-400">

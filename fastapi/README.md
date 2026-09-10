@@ -1,16 +1,16 @@
 # AM Storage Company — Storage Bridge (FastAPI)
 
 The **Storage Bridge** is the public, high-concurrency API boundary that
-gramunnayan.com uses to hand PDFs to **AM Storage Company**. It runs as its own
-async FastAPI service (uvicorn) next to the AM Storage gateway (Next.js
-control plane + Firestore metadata + dashboard), and it is the only component
-that talks directly to the NGO site. Requests are authenticated with the
-dual-token API credential (key ID + secret, or an HMAC signature) issued by the
-dashboard.
+gramunnayan.com uses to hand PDF/DOC/DOCX/TXT/PPT/PPTX documents to
+**AM Storage Company**. It runs as its own async FastAPI service (uvicorn) next
+to the AM Storage gateway (Next.js control plane + Firestore metadata +
+dashboard), and it is the only component that talks directly to the NGO site.
+Requests are authenticated with the dual-token API credential (key ID + secret,
+or an HMAC signature) issued by the dashboard.
 
 ```text
 gramunnayan.com (server)
-      |  POST multipart PDF + dual-token credential
+      |  POST multipart document + dual-token credential
       |    X-AM-Storage-Key-Id + X-AM-Storage-Key-Secret
       |    (or HMAC signed: X-AM-Storage-Signature + X-AM-Storage-Timestamp)
       v
@@ -18,7 +18,7 @@ gramunnayan.com (server)
 |  AM Storage Bridge (FastAPI)                                 |
 | 1. Validates the API credential via the gateway registry     |
 |    (revocation-aware; digest or HMAC)                        |
-| 2. Structural PDF gate: .pdf, application/pdf, %PDF, %%EOF   |
+| 2. Structural document gate: PDF/DOC/DOCX/TXT/PPT/PPTX       |
 | 3. Streams bytes into private Cloudflare R2 (never client)   |
 | 4. HEAD-verifies the object, registers metadata w/ gateway   |
 | 5. Logs the attempt (success OR failure) to the dashboard    |
@@ -66,6 +66,36 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
 
 Interactive OpenAPI docs: <http://localhost:8000/docs>.
 
+### Docker / Render / Railway / VPS
+
+A `fastapi/Dockerfile` is included. Build and run it on the bridge host:
+
+```bash
+cd fastapi
+docker build -t am-storage-bridge .
+docker run -p 8000:8000 --env-file .env am-storage-bridge
+```
+
+For Railway or a VPS, publish port `8000`, map a public TLS origin
+(e.g. `https://bridge.gusb.example.org`), and wire that origin into
+`AM_STORAGE_BRIDGE_URL` / `NEXT_PUBLIC_BRIDGE_URL` / `BRIDGE_URL`.
+
+For Render, the repository root contains a [`render.yaml`](../render.yaml)
+Blueprint that builds this Dockerfile with `rootDir: fastapi`, a `/health`
+health check, and every secret prompted at deploy time. Point Render at the
+repository, apply the Blueprint, then set the resulting service URL as the
+bridge origin on the gateway and on gramunnayan.com.
+
+Whichever host you choose, complete the routing step before go-live:
+
+1. `GET https://<bridge-origin>/health` returns `{"status":"ok","bridge":"ready",...}`.
+2. The gateway has `NEXT_PUBLIC_BRIDGE_URL` and `BRIDGE_URL` set to
+   `https://<bridge-origin>` (must **not** be the gateway host).
+3. gramunnayan.com's server has `AM_STORAGE_BRIDGE_URL=https://<bridge-origin>`.
+4. `POST https://<bridge-origin>/api/v1/storage/upload` with a real PDF/PPTX
+   returns JSON (`201` when R2 is configured, or a structured JSON error) —
+   never an HTML 404.
+
 ## Environment variables
 
 | Variable | Required | Default | Purpose |
@@ -74,8 +104,8 @@ Interactive OpenAPI docs: <http://localhost:8000/docs>.
 | `INTEGRATION_API_KEY` | yes (registry mode) | — | Server-to-server secret, identical to the gateway's `INTEGRATION_API_KEY` |
 | `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET_NAME` / `R2_ENDPOINT` | yes | — | Private Cloudflare R2 credentials used to stream/uploads and sign URLs |
 | `AM_STORAGE_KEYS` | optional | — | Comma-separated static keys accepted locally without a gateway round-trip (self-hosted mode) |
-| `AM_STORAGE_MAX_PDF_BYTES` | optional | `52428800` | Hard per-file cap; should match the gateway setting |
-| `AM_STORAGE_SIGNED_URL_EXPIRY_SECONDS` | optional | `3600` | Lifetime of signed PDF URLs returned to the NGO site |
+| `AM_STORAGE_MAX_DOCUMENT_BYTES` | optional | `52428800` | Hard per-file cap for PDF/DOC/DOCX/TXT/PPT/PPTX; should match the gateway setting (`AM_STORAGE_MAX_PDF_BYTES` remains accepted for existing deployments) |
+| `AM_STORAGE_SIGNED_URL_EXPIRY_SECONDS` | optional | `3600` | Lifetime of signed document URLs returned to the NGO site |
 | `CORS_ORIGINS` | optional | `https://gramunnayan.com,https://www.gramunnayan.com` | Browser origins allowed to call the bridge |
 
 Credentials generated in the dashboard are stored in Firestore as SHA-256
@@ -104,8 +134,9 @@ Self-hosted mode: keys listed in `AM_STORAGE_KEYS` are accepted locally
 
 ### `POST /api/v1/storage/upload` — the unified gateway endpoint
 
-Multipart form data with a `file` field (PDF only). Optional fields: `title`,
-`description`, `category`, `tags` (comma-separated or JSON array).
+Multipart form data with a `file` field for **PDF, DOC, DOCX, TXT, PPT, or
+PPTX**. Optional fields: `title`, `description`, `category`, `tags`
+(comma-separated or JSON array).
 
 ```bash
 curl -X POST https://bridge.your-domain.example/api/v1/storage/upload \
@@ -113,6 +144,13 @@ curl -X POST https://bridge.your-domain.example/api/v1/storage/upload \
   -H 'X-AM-Storage-Key-Secret: am_sec_live_yyyyyy' \
   -F 'file=@annual-report.pdf' \
   -F 'title=Annual Report 2026'
+
+# PPTX example
+curl -X POST https://bridge.your-domain.example/api/v1/storage/upload \
+  -H 'X-AM-Storage-Key-Id: am_store_live_xxxxxx' \
+  -H 'X-AM-Storage-Key-Secret: am_sec_live_yyyyyy' \
+  -F 'file=@governance-slides.pptx' \
+  -F 'title=Governance slides 2026'
 ```
 
 Success `201`:
@@ -123,6 +161,7 @@ Success `201`:
   "data": {
     "file": {
       "id": "f5x…", "originalName": "annual-report.pdf", "title": "Annual Report 2026",
+      "mimeType": "application/pdf", "extension": "pdf",
       "size": 432100, "status": "active", "createdAt": "2026-09-09T12:00:00.000Z",
       "autoDeleteEnabled": false, "retentionType": "6_months"
     },
@@ -139,14 +178,14 @@ The signed `url` is what gramunnayan.com should show its visitors. It expires
 after `AM_STORAGE_SIGNED_URL_EXPIRY_SECONDS`; the canonical file id can be used
 with `GET /api/files/{id}/download` to mint new URLs.
 
-### `GET /api/files` — active PDF metadata (paginated, searchable)
+### `GET /api/files` — active document metadata (paginated, searchable)
 
 Forwards the same query parameters as the gateway API (`pageSize`, `cursor`,
 `search`, `sort`). Only `active` documents are returned.
 
 ### `GET /api/files/{file_id}/download?disposition=inline|attachment&redirect=true`
 
-Relays the gateway download: `302` to a signed PDF URL (`redirect=true`) or JSON
+Relays the gateway download: `302` to a signed document URL (`redirect=true`) or JSON
 with the signed URL.
 
 ### `GET /api/files/{file_id}` — single document metadata
@@ -154,6 +193,34 @@ with the signed URL.
 ### `GET /health` — unauthenticated liveness
 
 ## Behavior notes
+
+### Troubleshooting: Next.js 404 HTML on `POST /api/v1/storage/upload`
+
+A 404 response containing `<!DOCTYPE html>` / `/_next/static/...` means the
+request reached the **Next.js gateway (Vercel)** instead of this **FastAPI
+bridge**.
+
+`POST /api/v1/storage/upload` is a bridge route (defined in `app/main.py` as
+`UPLOAD_PATH`). The gateway does not parse document bytes itself; it exposes an
+optional compatibility proxy at `/api/v1/storage/upload` that streams the
+upload to the configured `BRIDGE_URL` / `NEXT_PUBLIC_BRIDGE_URL` origin. A
+custom domain pointing to Vercel (e.g. `https://st.thamjj13.top`, CNAME to a
+`*.vercel-dns-*.com` host) returns the JSON 404
+(`BRIDGE_ENDPOINT_NOT_AT_GATEWAY`) for `/api/v1/*` when no bridge origin is
+configured, or JSON `502 BRIDGE_UNAVAILABLE` if the configured bridge is down.
+
+To resolve the integration:
+
+1. Deploy/start this FastAPI bridge on its own host (`uvicorn main:app --host
+   0.0.0.0 --port 8000 --workers 4`).
+2. Set `NEXT_PUBLIC_BRIDGE_URL` / `BRIDGE_URL` on the gateway and
+   `AM_STORAGE_BRIDGE_URL` on the NGO website server to that bridge origin (for
+   example `https://bridge.example.org`), not to the gateway host.
+3. Confirm with `GET <bridge-origin>/health` — it must return
+   `{"status":"ok","bridge":"ready",...}`.
+4. Re-run the upload call against `<bridge-origin>/api/v1/storage/upload`. The
+   gateway proxy can also be used as long as `BRIDGE_URL` points here; it
+   preserves the JSON body, status, and `requestId`.
 
 - Errors use the gateway envelope: `{"success": false, "error": {"code", "message"}, "requestId"}`.
 - Every request gets an id (`X-Request-Id`), a structured access log line, and a

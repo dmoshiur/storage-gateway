@@ -1,25 +1,26 @@
 # AM Storage Company — Storage Gateway & Bridge
 
-The official **AM Storage Company** platform is a private, PDF-only **Storage
-Bridge**: an administrative control plane (Next.js dashboard, Firestore metadata,
-Cloudflare R2 object storage) plus a high-concurrency FastAPI API bridge that the
-public NGO website [gramunnayan.com](https://gramunnayan.com) calls with
-dashboard-generated Custom API Keys. It is a narrow internal infrastructure
-service — not a public drive, file-sharing product, or social app.
+The official **AM Storage Company** platform is a private **document Storage
+Bridge** for PDF, DOC, DOCX, TXT, PPT, and PPTX: an administrative control plane
+(Next.js dashboard, Firestore metadata, Cloudflare R2 object storage) plus a
+high-concurrency FastAPI API bridge that the public NGO website
+[gramunnayan.com](https://gramunnayan.com) calls with dashboard-generated Custom
+API Keys. It is a narrow internal infrastructure service — not a public drive,
+file-sharing product, or social app.
 
 - **Application:** Next.js 16 App Router + TypeScript + Tailwind CSS
-- **Public API bridge:** FastAPI (async, high-concurrency PDF streaming) — see [`fastapi/README.md`](fastapi/README.md)
+- **Public API bridge:** FastAPI (async, high-concurrency document streaming) — see [`fastapi/README.md`](fastapi/README.md)
 - **Hosting:** Vercel (gateway) + your own host for the FastAPI bridge
 - **Identity:** Firebase Authentication with server-verified session cookies
 - **Metadata/state:** Cloud Firestore
-- **PDF bytes:** private Cloudflare R2 bucket, accessed through short-lived S3 presigned URLs
+- **Document bytes:** private Cloudflare R2 bucket, accessed through short-lived S3 presigned URLs
 - **Scheduled maintenance:** Vercel Cron + secured Firestore lock
 
-The intended scale is `≤ 10 GB` of PDFs. The design keeps operations simple and
-low-cost while preserving an explicit storage abstraction for a future provider
-migration.
+The intended scale is `≤ 10 GB` of documents. The design keeps operations simple
+and low-cost while preserving an explicit storage abstraction for a future
+provider migration.
 
-> **No PDF binary is ever stored in Firestore or the Vercel filesystem, and
+> **No document binary is ever stored in Firestore or the Vercel filesystem, and
 > Cloudflare R2 credentials are never exposed to gramunnayan.com or its
 > visitors.**
 
@@ -29,11 +30,11 @@ migration.
 - Server-enforced admin RBAC (`admin`, `editor`, `viewer` policy is centralized and extendable)
 - An administrative dashboard branded **AM Storage Company**, with responsive file library, Trash, storage health, audit log, and settings screens
 - An **API Management** screen that generates/revokes dual-token credentials — a visible **API Key ID** (`am_store_live_…`) plus a high-entropy **API Secret Key** (`am_sec_live_…`) shown exactly once, Cloudflare R2 style — with ready-made integration snippets for gramunnayan.com
-- A dashboard with real-time metric cards (PDFs stored, storage used vs. the R2 limit, total API requests from gramunnayan.com), a live log of the last 5 API uploads with Success/Failed badges, and a "System Status: Operational" indicator that probes the FastAPI bridge
-- A FastAPI **Storage Bridge** that validates the dual-token credential (or an HMAC signature) server-to-server, streams multipart PDFs into R2, registers them as managed documents, logs every attempt to the dashboard, and returns signed PDF URLs
+- A dashboard with real-time metric cards (documents stored, storage used vs. the R2 limit, total API requests from gramunnayan.com), a live log of the last 5 API uploads with Success/Failed badges, and a "System Status: Operational" indicator that probes the FastAPI bridge
+- A FastAPI **Storage Bridge** that validates the dual-token credential (or an HMAC signature) server-to-server, streams PDF/DOC/DOCX/TXT/PPT/PPTX documents into R2, registers them as managed documents, logs every attempt to the dashboard, and returns signed document URLs
 - Direct browser-to-private-R2 signed uploads with progress indicators
-- Server-side finalization checks for extension, claimed/actual size, R2 content type, signed file identifier, `%PDF-x.y` header, and `%%EOF` trailer
-- Staging-to-final R2 copy on finalization so an expiring upload URL cannot overwrite an active PDF
+- Server-side finalization checks for extension, claimed/actual size, R2 content type, signed file identifier, and type-specific magic bytes
+- Staging-to-final R2 copy on finalization so an expiring upload URL cannot overwrite an active document
 - Per-file retention: Never, 30 days, 3 months, 6 months, 1 year, custom date
 - Soft deletion / recovery with server-confirmed move-to-Trash and typed `DELETE` confirmation for permanent deletion
 - Daily cleanup with a Firestore lock, per-file failure isolation, retryable `deleting` state, and audit records
@@ -55,18 +56,18 @@ migration.
 
 ```text
 gramunnayan.com (server)
-      │  POST /api/v1/storage/upload  (multipart PDF)
+      │  POST /api/v1/storage/upload  (multipart PDF/DOC/DOCX/TXT/PPT/PPTX)
       │  Headers: X-AM-Storage-Key-Id + X-AM-Storage-Key-Secret
       │           (or HMAC: X-AM-Storage-Signature + X-AM-Storage-Timestamp)
       ▼
 ┌────────────────────────  AM Storage Bridge (FastAPI) ────────────────────────┐
-│ validates credential (gateway registry) · PDF gate · streams to R2 ·        │
+│ validates credential (gateway registry) · document gate · streams to R2 ·   │
 │ registers doc · logs every attempt (success or failure) to the dashboard    │
 └───────┬──────────────────────────────────────────────┬──────────────────────┘
         │ X-Storage-Gateway-Key (server-to-server)      │ R2 credentials (private)
         ▼                                               ▼
   AM Storage gateway (Next.js)                 Cloudflare R2
-  Firestore metadata · audit · retention       private PDF bytes
+  Firestore metadata · audit · retention       private document bytes
 ```
 
 1. Generate a credential pair in the dashboard under **API Management** (Admin → API Management).
@@ -75,11 +76,37 @@ gramunnayan.com (server)
    never in browser code.
 3. The bridge verifies the credential through the gateway registry (revocation
    is immediate, `lastUsedAt` is tracked, every attempt is logged on the
-   dashboard), validates the PDF, streams it to R2, registers the document, and
-   returns `{ file, url }` where `url` is a short-lived signed PDF URL for
-   visitors.
+   dashboard), validates the document, streams it to R2, registers the document,
+   and returns `{ file, url }` where `url` is a short-lived signed document URL
+   for visitors.
 
-See [`fastapi/README.md`](fastapi/README.md) for deployment, environment
+### Troubleshooting — `POST /api/v1/storage/upload` returns HTTP 404 HTML
+
+If the upload sends `POST https://<gateway-host>/api/v1/storage/upload` and
+receives a **404 with an HTML/`/_next/static/...` body**, the request is
+hitting the **Next.js gateway**, not the **FastAPI bridge**.
+
+- `st.thamjj13.top` resolves to a Vercel deployment (`*.vercel-dns-*.com`),
+  which is the Next.js gateway, not the FastAPI bridge.
+- The gateway does **not** parse document bytes itself. It exposes an optional
+  compatibility proxy at `/api/v1/storage/upload` that streams the request to
+  the configured `BRIDGE_URL` / `NEXT_PUBLIC_BRIDGE_URL` origin. If that origin
+  is not configured, the path returns a JSON
+  `BRIDGE_ENDPOINT_NOT_AT_GATEWAY` diagnostic instead of an HTML 404.
+- Set `AM_STORAGE_BRIDGE_URL` on the gramunnayan.com server (and
+  `NEXT_PUBLIC_BRIDGE_URL` / `BRIDGE_URL` on the gateway) to the deployed
+  **FastAPI** bridge origin — never to the gateway host, which would loop the
+  upload back to the gateway. Verify it with `GET <bridge-origin>/health`; the
+  response includes `"bridge": "ready"`.
+- If the integration calls the gateway origin because it cannot reach the
+  bridge, use the proxy by pointing the gateway's `BRIDGE_URL` at the FastAPI
+  bridge; the proxy preserves the JSON response, status code, and `requestId`.
+
+To host the bridge, use the bundled `fastapi/Dockerfile` or the root
+[`render.yaml`](render.yaml) Blueprint (Docker, `rootDir: fastapi`, `/health`
+probe), then set the resulting origin as `NEXT_PUBLIC_BRIDGE_URL` / `BRIDGE_URL`
+on the gateway and `AM_STORAGE_BRIDGE_URL` on the gramunnayan.com server. See
+[`fastapi/README.md`](fastapi/README.md) for deployment, environment
 variables, and the full endpoint reference. The gateway-internal bridge routes
 (`POST /api/internal/bridge/verify-key`, `POST /api/internal/bridge/files`) are
 server-to-server only and require the `X-Storage-Gateway-Key` header.
@@ -99,7 +126,7 @@ NGO website server                         Admin browser
 │                                                       │                     │
 │       signed upload/download URL only                ▼                     │
 │                    └────────────────────► Private Cloudflare R2 ◄─────────┘
-│                                               PDF bytes only
+│                                               document bytes only
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -124,15 +151,15 @@ Every dashboard route verifies the cookie server-side and enforces the actor rol
 
 Use Firebase custom claims for production roles, e.g. `{ role: "admin" }`. `ADMIN_EMAILS` is a convenient bootstrap fallback, not a replacement for controlled role provisioning.
 
-### PDF upload protection
+### Document upload protection
 
 The browser performs early UX checks, but those are not trusted. The server:
 
 1. validates metadata and the configurable maximum byte size before issuing a signed upload URL;
 2. creates an `uploading` Firestore record with a random R2 **staging** key;
 3. finalizes only after it reads R2 metadata and byte ranges itself;
-4. checks `.pdf`, actual size, `application/pdf`, the signed R2 metadata file ID, PDF magic header, and EOF marker;
-5. copies the verified staging object to a random final key such as `pdfs/2026/09/<uuid>.pdf`; and
+4. checks the supported extension, actual size, expected content type, the signed R2 metadata file ID, and type-specific magic bytes (`%PDF-`, OLE2 for DOC/PPT, ZIP for DOCX/PPTX);
+5. copies the verified staging object to a random final key such as `documents/2026/09/<uuid>.pdf`; and
 6. marks the Firestore record `active` only after that copy succeeds.
 
 The original filename is metadata only — never an object key. This structural gate is not antivirus/malware scanning; add a malware scanning service if organizational policy requires it.
@@ -210,7 +237,7 @@ Settings are held in `settings/app`. When absent, safe defaults are used; the fi
 
 | Setting | Default |
 | --- | ---: |
-| Maximum PDF size | 50 MB |
+| Maximum document size | 50 MB |
 | Configured storage limit | 10 GB |
 | Default auto-delete | Off |
 | Default retention | 6 months |
@@ -219,7 +246,7 @@ Settings are held in `settings/app`. When absent, safe defaults are used; the fi
 | Signed download URL lifetime | 10 minutes |
 | Storage warning / critical | 80% / 90% |
 
-Changing a global default affects **new uploads only**. The settings form has an explicit, audited “Apply to existing active PDFs” control; it is unchecked by default.
+Changing a global default affects **new uploads only**. The settings form has an explicit, audited “Apply to existing active documents” control; it is unchecked by default.
 
 ## Data model
 
@@ -228,7 +255,7 @@ Firestore contains metadata only:
 ```text
 users/{uid}           operational profile / last sign-in; no role authority
 auditLogs/{logId}     immutable-style administrative event records
-files/{fileId}        PDF metadata, lifecycle status, retention timestamps
+files/{fileId}         document metadata, lifecycle status, retention timestamps
 settings/app          application settings
 system/cleanupLock    scheduled cleanup lock and last summary
 ```
@@ -258,7 +285,7 @@ Do **not** place `INTEGRATION_API_KEY` in browser JavaScript. The NGO website’
 X-Storage-Gateway-Key: <INTEGRATION_API_KEY>
 ```
 
-Integration callers get only active, non-expired PDF metadata and short-lived download URLs. They cannot upload, modify settings, delete, restore, see Trash, or read audit logs.
+Integration callers get only active, non-expired document metadata and short-lived download URLs. They cannot upload, modify settings, delete, restore, see Trash, or read audit logs.
 
 ## Scheduled cleanup
 
@@ -282,7 +309,7 @@ npm run test:coverage  # optional coverage report
 npm run build
 ```
 
-The included tests cover session creation/unauthorized login/logout cookie behavior (with service mocks), PDF structural validation and oversize rejection, retention durations/custom dates/Never, admin authorization policy, lifecycle transitions, cleanup eligibility, and retry-oriented state selection. See [docs/TESTING.md](docs/TESTING.md) for Firebase Emulator and R2 staging smoke tests required before production rollout.
+The included tests cover session creation/unauthorized login/logout cookie behavior (with service mocks), document structural validation and oversize rejection, retention durations/custom dates/Never, admin authorization policy, lifecycle transitions, cleanup eligibility, and retry-oriented state selection. See [docs/TESTING.md](docs/TESTING.md) for Firebase Emulator and R2 staging smoke tests required before production rollout.
 
 ## Deployment checklist
 
@@ -291,7 +318,7 @@ The included tests cover session creation/unauthorized login/logout cookie behav
 3. Configure R2 CORS to include production and each preview origin that needs direct uploads.
 4. Confirm the R2 bucket has no public access / custom public domain.
 5. Add `CRON_SECRET` in Vercel and confirm the Vercel Cron entry appears after deploy.
-6. Sign in as an admin; upload a known-safe test PDF; verify view/download, move-to-Trash, restore, and permanent deletion in a non-production bucket.
+6. Sign in as an admin; upload a known-safe test document; verify view/download, move-to-Trash, restore, and permanent deletion in a non-production bucket.
 7. Send an integration request only from the NGO website server.
 8. Review Audit Logs and Vercel function logs; never log credentials, ID tokens, or signed URLs.
 
@@ -312,7 +339,7 @@ src/
     firebase/           isolated client/Admin SDK initialization
     firestore/          metadata, settings, audit, stats, and cleanup lock repositories
     storage/            provider-neutral StorageService + R2 implementation
-    validation/         Zod inputs and PDF structural checks
+    validation/         Zod inputs and document structural checks
     retention/          server-side date calculation
     cleanup/            cleanup orchestration and eligibility policy
     security/           API key, cron, origin, and rate-limit checks

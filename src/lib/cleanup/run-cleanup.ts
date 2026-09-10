@@ -167,7 +167,7 @@ export async function runCleanup(options: { dryRun?: boolean } = {}): Promise<Cl
       }
     }
 
-    // Finalized records with a leftover staging key are safe to clean without touching the real PDF.
+    // Finalized records with a leftover staging key are safe to clean without touching the real document.
     for (const file of activeStaging) {
       summary.checked += 1;
       if (options.dryRun) { summary.skipped += 1; continue; }

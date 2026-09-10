@@ -24,13 +24,14 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     const query = parseQuery(Object.fromEntries(new URL(request.url).searchParams.entries()), downloadQuerySchema);
     const file = await requireFileById(requireRouteId((await context.params).id));
     if (file.status !== "active" || (actor.type === "integration" && file.autoDeleteEnabled && file.deleteAt && file.deleteAt <= new Date())) {
-      throw new ApiError(404, "FILE_NOT_FOUND", "The requested PDF was not found.");
+      throw new ApiError(404, "FILE_NOT_FOUND", "The requested document was not found.");
     }
     const settings = await getSettings();
     const url = await getStorageService().getSignedUrl(file.storageKey, {
       expiresInSeconds: settings.signedUrlExpirySeconds,
       disposition: query.disposition,
       filename: file.originalName,
+      contentType: file.mimeType,
     });
     await writeAuditLogSafely({ action: "DOWNLOAD", actor: auditActorFrom(actor), fileId: file.id, fileName: file.originalName, details: { disposition: query.disposition } });
 

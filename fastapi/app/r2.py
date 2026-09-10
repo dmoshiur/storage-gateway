@@ -31,10 +31,13 @@ def _r2_environment() -> dict[str, str]:
     }
 
 
-def build_object_key() -> str:
-    """Random final object key following the gateway's pdfs/YYYY/MM/<uuid>.pdf layout."""
+def build_object_key(extension: str = "pdf") -> str:
+    """Random final object key following the gateway's documents/YYYY/MM/<uuid>.<ext> layout."""
+    safe_extension = (extension or "pdf").lower()
+    if safe_extension not in {"pdf", "doc", "docx", "txt", "ppt", "pptx"}:
+        safe_extension = "pdf"
     now = datetime.now(timezone.utc)
-    return f"pdfs/{now.year}/{now.month:02d}/{uuid.uuid4()}.pdf"
+    return f"documents/{now.year}/{now.month:02d}/{uuid.uuid4()}.{safe_extension}"
 
 
 def _client(environment: dict[str, str], s3_session: Any) -> Any:
@@ -47,8 +50,8 @@ def _client(environment: dict[str, str], s3_session: Any) -> Any:
     )
 
 
-async def upload_pdf_object(key: str, source: BinaryIO, expected_size: int) -> str:
-    """Streams a validated PDF into R2 and verifies the stored object.
+async def upload_document_object(key: str, source: BinaryIO, expected_size: int, content_type: str | None = None) -> str:
+    """Streams a validated document into R2 and verifies the stored object.
 
     Returns the object ETag. Raises 502 HTTP errors with the API envelope shape
     when the upload or the post-upload HEAD verification fails.
@@ -56,6 +59,7 @@ async def upload_pdf_object(key: str, source: BinaryIO, expected_size: int) -> s
     environment = _r2_environment()
     import aioboto3
 
+    content_type = content_type or "application/octet-stream"
     session = aioboto3.Session()
     try:
         async with _client(environment, session) as s3:
@@ -63,13 +67,13 @@ async def upload_pdf_object(key: str, source: BinaryIO, expected_size: int) -> s
                 source,
                 environment["bucket"],
                 key,
-                ExtraArgs={"ContentType": "application/pdf"},
+                ExtraArgs={"ContentType": content_type},
             )
             head = await s3.head_object(Bucket=environment["bucket"], Key=key)
     except Exception as upload_error:
         raise HTTPException(
             status_code=502,
-            detail={"code": "R2_UPLOAD_FAILED", "message": "The PDF could not be stored. Please retry shortly."},
+            detail={"code": "R2_UPLOAD_FAILED", "message": "The document could not be stored. Please retry shortly."},
         ) from upload_error
 
     stored_size = int(head.get("ContentLength", -1))
@@ -77,9 +81,14 @@ async def upload_pdf_object(key: str, source: BinaryIO, expected_size: int) -> s
         await delete_object(key)
         raise HTTPException(
             status_code=502,
-            detail={"code": "R2_UPLOAD_FAILED", "message": "The stored PDF could not be verified."},
+            detail={"code": "R2_UPLOAD_FAILED", "message": "The stored document could not be verified."},
         )
     return str(head.get("ETag", ""))
+
+
+async def upload_pdf_object(key: str, source: BinaryIO, expected_size: int) -> str:
+    """Backward-compatible PDF alias for external callers."""
+    return await upload_document_object(key, source, expected_size, "application/pdf")
 
 
 async def delete_object(key: str) -> None:
@@ -100,7 +109,7 @@ async def delete_object(key: str) -> None:
         pass
 
 
-async def presigned_get_url(key: str, filename: str, expires_in_seconds: int) -> str:
+async def presigned_get_url(key: str, filename: str, expires_in_seconds: int, content_type: str | None = None) -> str:
     environment = _r2_environment()
     import aioboto3
 
@@ -112,7 +121,7 @@ async def presigned_get_url(key: str, filename: str, expires_in_seconds: int) ->
                 Params={
                     "Bucket": environment["bucket"],
                     "Key": key,
-                    "ResponseContentType": "application/pdf",
+                    "ResponseContentType": content_type or "application/pdf",
                     "ResponseContentDisposition": f"inline; filename=\"{filename.replace(chr(34), '').replace(chr(10), '').replace(chr(13), '')}\"",
                 },
                 ExpiresIn=expires_in_seconds,
@@ -120,5 +129,5 @@ async def presigned_get_url(key: str, filename: str, expires_in_seconds: int) ->
     except Exception as signing_error:
         raise HTTPException(
             status_code=502,
-            detail={"code": "STORAGE_UNAVAILABLE", "message": "A signed PDF URL could not be generated. Please retry shortly."},
+            detail={"code": "STORAGE_UNAVAILABLE", "message": "A signed document URL could not be generated. Please retry shortly."},
         ) from signing_error

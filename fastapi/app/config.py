@@ -86,7 +86,12 @@ def get_settings() -> Settings:
         gateway_url=gateway_url,
         integration_key=os.getenv("INTEGRATION_API_KEY", "").strip(),
         static_keys=static_keys,
-        max_pdf_bytes=_env_int("AM_STORAGE_MAX_PDF_BYTES", DEFAULT_MAX_PDF_BYTES),
+        # AM_STORAGE_MAX_DOCUMENT_BYTES is preferred; AM_STORAGE_MAX_PDF_BYTES
+        # remains accepted for existing deployments.
+        max_pdf_bytes=_env_int(
+            "AM_STORAGE_MAX_DOCUMENT_BYTES",
+            _env_int("AM_STORAGE_MAX_PDF_BYTES", DEFAULT_MAX_PDF_BYTES),
+        ),
         signed_url_expiry_seconds=_env_int(
             "AM_STORAGE_SIGNED_URL_EXPIRY_SECONDS", DEFAULT_SIGNED_URL_EXPIRY_SECONDS
         ),
