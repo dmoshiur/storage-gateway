@@ -22,7 +22,8 @@ function toDocument(snapshot: DocumentSnapshot): FileDocument {
   const mimeType = String(data.mimeType ?? "application/pdf");
   return {
     id: snapshot.id,
-    storageKey: String(data.storageKey),
+    storagePath: String(data.storagePath ?? data.storageKey ?? ""),
+    blobUrl: typeof data.blobUrl === "string" ? data.blobUrl : null,
     uploadKey: typeof data.uploadKey === "string" ? data.uploadKey : null,
     originalName,
     title: String(data.title ?? ""),
@@ -32,15 +33,18 @@ function toDocument(snapshot: DocumentSnapshot): FileDocument {
     mimeType,
     extension: String(data.extension ?? extensionFrom(originalName, mimeType)),
     size: Number(data.size),
+    contentHash: typeof data.contentHash === "string" ? data.contentHash : null,
     createdAt: asDate(data.createdAt) ?? new Date(0),
     updatedAt: asDate(data.updatedAt) ?? new Date(0),
     uploadedBy: String(data.uploadedBy),
+    isFavorite: Boolean(data.isFavorite),
     autoDeleteEnabled: Boolean(data.autoDeleteEnabled),
     retentionType: data.retentionType as RetentionType,
     customDeleteAt: asDate(data.customDeleteAt),
     deleteAt: asDate(data.deleteAt),
     status: data.status as FileStatus,
     deletedAt: asDate(data.deletedAt),
+    deletedBy: typeof data.deletedBy === "string" ? data.deletedBy : null,
     permanentDeleteAt: asDate(data.permanentDeleteAt),
     permanentlyDeletedAt: asDate(data.permanentlyDeletedAt),
     deletionStartedAt: asDate(data.deletionStartedAt),
@@ -48,13 +52,15 @@ function toDocument(snapshot: DocumentSnapshot): FileDocument {
     deletionReason: data.deletionReason ?? null,
     uploadExpiresAt: asDate(data.uploadExpiresAt),
     validatedAt: asDate(data.validatedAt),
+    lastAccessedAt: asDate(data.lastAccessedAt),
+    lastDownloadedAt: asDate(data.lastDownloadedAt),
     failureCode: data.failureCode ?? null,
     version: Number(data.version ?? 1),
   };
 }
 
 export function serializeFile(file: FileDocument): SerializedFile {
-  // storageKey and upload lifecycle fields are intentionally never returned to browsers/integrations.
+  // storagePath, blobUrl, and upload lifecycle fields are intentionally never returned to browsers/integrations.
   return {
     id: file.id,
     originalName: file.originalName,
@@ -65,18 +71,24 @@ export function serializeFile(file: FileDocument): SerializedFile {
     mimeType: file.mimeType,
     extension: file.extension,
     size: file.size,
+    contentHash: file.contentHash,
     createdAt: file.createdAt.toISOString(),
     updatedAt: file.updatedAt.toISOString(),
+    uploadedBy: file.uploadedBy,
+    isFavorite: file.isFavorite,
     autoDeleteEnabled: file.autoDeleteEnabled,
     retentionType: file.retentionType,
     customDeleteAt: toIso(file.customDeleteAt),
     deleteAt: toIso(file.deleteAt),
     status: file.status,
     deletedAt: toIso(file.deletedAt),
+    deletedBy: file.deletedBy,
     permanentDeleteAt: toIso(file.permanentDeleteAt),
     permanentlyDeletedAt: toIso(file.permanentlyDeletedAt),
     deletionStartedAt: toIso(file.deletionStartedAt),
     deletionReason: file.deletionReason,
+    lastAccessedAt: toIso(file.lastAccessedAt),
+    lastDownloadedAt: toIso(file.lastDownloadedAt),
     failureCode: file.failureCode,
   };
 }
@@ -86,8 +98,8 @@ function cleanFilename(name: string): string {
 }
 
 export async function createUploadingFile(input: {
-  storageKey: string;
-  uploadKey: string;
+  storagePath: string;
+  uploadKey: string | null;
   originalName: string;
   title: string;
   description: string;
@@ -97,6 +109,7 @@ export async function createUploadingFile(input: {
   extension: string;
   size: number;
   uploadedBy: string;
+  contentHash?: string | null;
   retention: RetentionInput;
 }): Promise<FileDocument> {
   const db = getAdminDb();
@@ -110,7 +123,8 @@ export async function createUploadingFile(input: {
   };
   const document: FileDocument = {
     id: reference.id,
-    storageKey: input.storageKey,
+    storagePath: input.storagePath,
+    blobUrl: null,
     uploadKey: input.uploadKey,
     originalName: cleanFilename(input.originalName),
     title: input.title,
@@ -120,12 +134,15 @@ export async function createUploadingFile(input: {
     mimeType: input.mimeType,
     extension: input.extension,
     size: input.size,
+    contentHash: input.contentHash ?? null,
     createdAt: now,
     updatedAt: now,
     uploadedBy: input.uploadedBy,
+    isFavorite: false,
     ...retention,
     status: "uploading",
     deletedAt: null,
+    deletedBy: null,
     permanentDeleteAt: null,
     permanentlyDeletedAt: null,
     deletionStartedAt: null,
@@ -133,6 +150,8 @@ export async function createUploadingFile(input: {
     deletionReason: null,
     uploadExpiresAt: new Date(now.getTime() + 20 * 60 * 1000),
     validatedAt: null,
+    lastAccessedAt: null,
+    lastDownloadedAt: null,
     failureCode: null,
     version: 1,
   };
@@ -146,13 +165,15 @@ export async function getFileById(id: string): Promise<FileDocument | null> {
 }
 
 /**
- * Registers a document that the AM Storage bridge already streamed into R2 after
- * its own server-side validation. The record is created directly in the
+ * Registers a document that the Storage bridge already streamed into the private
+ * Blob store after its own server-side validation. The record is created directly in the
  * `active` state (validatedAt is set) so bridge uploads appear in the dashboard,
  * Trash, retention, and NGO website listings like any other managed document.
  */
 export async function createBridgeFile(input: {
-  storageKey: string;
+  storagePath: string;
+  blobUrl?: string | null;
+  contentHash?: string | null;
   originalName: string;
   title: string;
   description: string;
@@ -169,7 +190,8 @@ export async function createBridgeFile(input: {
   const now = new Date();
   const document: FileDocument = {
     id: reference.id,
-    storageKey: input.storageKey,
+    storagePath: input.storagePath,
+    blobUrl: input.blobUrl ?? null,
     uploadKey: null,
     originalName: cleanFilename(input.originalName),
     title: input.title,
@@ -179,15 +201,18 @@ export async function createBridgeFile(input: {
     mimeType: input.mimeType,
     extension: input.extension,
     size: input.size,
+    contentHash: input.contentHash ?? null,
     createdAt: now,
     updatedAt: now,
     uploadedBy: input.uploadedBy,
+    isFavorite: false,
     autoDeleteEnabled: input.retention.autoDeleteEnabled,
     retentionType: input.retention.retentionType,
     customDeleteAt: input.retention.customDeleteAt ? new Date(`${input.retention.customDeleteAt}T00:00:00.000Z`) : null,
     deleteAt: calculateDeleteAt(input.retention, now),
     status: "active",
     deletedAt: null,
+    deletedBy: null,
     permanentDeleteAt: null,
     permanentlyDeletedAt: null,
     deletionStartedAt: null,
@@ -195,6 +220,8 @@ export async function createBridgeFile(input: {
     deletionReason: null,
     uploadExpiresAt: null,
     validatedAt: now,
+    lastAccessedAt: null,
+    lastDownloadedAt: null,
     failureCode: null,
     version: 1,
   };
@@ -272,7 +299,12 @@ export async function updateFileDetails(id: string, patch: {
   });
 }
 
-export async function moveFileToTrash(id: string, trashRetentionDays: number, reason: "manual" | "auto_retention"): Promise<FileDocument> {
+export async function moveFileToTrash(
+  id: string,
+  trashRetentionDays: number,
+  reason: "manual" | "auto_retention",
+  deletedBy: string | null = null,
+): Promise<FileDocument> {
   const db = getAdminDb();
   const reference = db.collection(FILES).doc(id);
   return db.runTransaction(async (transaction) => {
@@ -282,7 +314,7 @@ export async function moveFileToTrash(id: string, trashRetentionDays: number, re
     if (file.status !== "active") throw new ApiError(409, "FILE_NOT_ACTIVE", "Only active documents can be moved to Trash.");
     const now = new Date();
     const permanentDeleteAt = new Date(now.getTime() + trashRetentionDays * 24 * 60 * 60 * 1000);
-    const updates = { status: "trash" as const, deletedAt: now, permanentDeleteAt, deletionReason: reason, updatedAt: now, version: file.version + 1 };
+    const updates = { status: "trash" as const, deletedAt: now, deletedBy, permanentDeleteAt, deletionReason: reason, updatedAt: now, version: file.version + 1 };
     transaction.update(reference, updates);
     return { ...file, ...updates };
   });
@@ -300,6 +332,7 @@ export async function restoreFileFromTrash(id: string, options: { nextDeleteAt: 
     const updates = {
       status: "active" as const,
       deletedAt: null,
+      deletedBy: null,
       permanentDeleteAt: null,
       deletionReason: null,
       deleteAt: options.nextDeleteAt,
@@ -319,7 +352,7 @@ export async function beginPermanentDeletion(id: string): Promise<FileDocument> 
     const snapshot = await transaction.get(reference);
     const file = toDocument(snapshot);
     if (file.status === "deleted") return file;
-    if (file.status === "deleting") return file; // a retry may safely continue the R2 delete.
+    if (file.status === "deleting") return file; // a retry may safely continue the Blob delete.
     if (file.status !== "trash") throw new ApiError(409, "FILE_NOT_IN_TRASH", "Move the document to Trash before permanently deleting it.");
     const now = new Date();
     const updates = {
@@ -417,20 +450,21 @@ function sortDefinition(sort: FileSort, status: "all" | FileStatus): { field: st
     case "largest": return { field: "size", direction: "desc" };
     case "smallest": return { field: "size", direction: "asc" };
     case "delete_date": return { field: status === "trash" ? "permanentDeleteAt" : "deleteAt", direction: "asc" };
+    case "name": return { field: "originalName", direction: "asc" };
     default: return { field: "createdAt", direction: "desc" };
   }
 }
 
 function statusFor(input: { status: "all" | FileStatus; filter: FileFilter }): "all" | FileStatus {
   if (input.filter === "trash") return "trash";
-  if (["active", "auto_delete", "never_delete", "expiring_soon", "expired"].includes(input.filter)) return "active";
+  if (["active", "auto_delete", "never_delete", "expiring_soon", "expired", "favorites", "recent"].includes(input.filter)) return "active";
   return input.status;
 }
 
 function matchesText(file: FileDocument, search: string): boolean {
   if (!search) return true;
   const needle = search.toLowerCase();
-  return [file.originalName, file.title, file.description, file.category, ...file.tags]
+  return [file.id, file.originalName, file.title, file.description, file.category, file.uploadedBy, ...file.tags]
     .some((value) => value.toLowerCase().includes(needle));
 }
 
@@ -443,12 +477,19 @@ function matchesDerivedFilter(file: FileDocument, filter: FileFilter, now: Date,
     return Boolean(file.autoDeleteEnabled && file.deleteAt && file.deleteAt > now && file.deleteAt <= thirtyDays);
   }
   if (filter === "expired") return Boolean(file.autoDeleteEnabled && file.deleteAt && file.deleteAt <= now);
+  if (filter === "favorites") return file.isFavorite;
+  if (filter === "recent") return file.createdAt.getTime() >= now.getTime() - 30 * 24 * 60 * 60 * 1000;
   return true;
 }
 
 function compareFiles(left: FileDocument, right: FileDocument, field: string, direction: "asc" | "desc"): number {
   const rawLeft = left[field as keyof FileDocument];
   const rawRight = right[field as keyof FileDocument];
+  if (typeof rawLeft === "string" || typeof rawRight === "string") {
+    const comparison = String(rawLeft ?? "").localeCompare(String(rawRight ?? ""));
+    const tiebroken = comparison === 0 ? left.id.localeCompare(right.id) : comparison;
+    return direction === "asc" ? tiebroken : -tiebroken;
+  }
   const leftValue = rawLeft instanceof Date ? rawLeft.getTime() : typeof rawLeft === "number" ? rawLeft : rawLeft ? new Date(String(rawLeft)).getTime() : Number.POSITIVE_INFINITY;
   const rightValue = rawRight instanceof Date ? rawRight.getTime() : typeof rawRight === "number" ? rawRight : rawRight ? new Date(String(rawRight)).getTime() : Number.POSITIVE_INFINITY;
   const comparison = leftValue === rightValue ? left.id.localeCompare(right.id) : leftValue - rightValue;
@@ -482,7 +523,7 @@ export interface ListFilesInput {
 export async function listFiles(input: ListFilesInput): Promise<{ files: SerializedFile[]; nextCursor: string | null; searchLimited: boolean }> {
   const db = getAdminDb();
   const resolvedStatus = statusFor(input);
-  const needsDerivedScan = input.filter === "expiring_soon" || input.filter === "expired" || input.filter === "auto_delete" || input.filter === "never_delete";
+  const needsDerivedScan = input.filter === "expiring_soon" || input.filter === "expired" || input.filter === "auto_delete" || input.filter === "never_delete" || input.filter === "favorites" || input.filter === "recent";
   const requiresScan = Boolean(input.search) || needsDerivedScan || Boolean(input.onlyAccessible);
   const order = sortDefinition(input.sort, resolvedStatus);
   let query: Query = db.collection(FILES);
@@ -611,4 +652,71 @@ export async function applyDefaultRetentionToActiveFiles(input: {
     await batch.commit();
   }
   return snapshot.size;
+}
+
+/** Attach the canonical private Blob URL + verified size/hash after upload completion. */
+export async function attachBlobIdentity(
+  id: string,
+  identity: { blobUrl?: string; size?: number; contentHash?: string | null },
+): Promise<void> {
+  const patch: Record<string, unknown> = { updatedAt: new Date() };
+  if (identity.blobUrl !== undefined) patch.blobUrl = identity.blobUrl;
+  if (identity.size !== undefined) patch.size = identity.size;
+  if (identity.contentHash !== undefined) patch.contentHash = identity.contentHash;
+  await getAdminDb().collection(FILES).doc(id).set(patch, { merge: true });
+}
+
+export async function setFileFavorite(id: string, isFavorite: boolean): Promise<FileDocument> {
+  const reference = getAdminDb().collection(FILES).doc(id);
+  await reference.set({ isFavorite, updatedAt: new Date() }, { merge: true });
+  const snapshot = await reference.get();
+  return toDocument(snapshot);
+}
+
+/** Best-effort access tracking for preview/download analytics. Never throws. */
+export async function recordFileAccess(id: string, kind: "preview" | "download"): Promise<void> {
+  try {
+    const patch: Record<string, unknown> = { lastAccessedAt: new Date(), updatedAt: new Date() };
+    if (kind === "download") patch.lastDownloadedAt = new Date();
+    await getAdminDb().collection(FILES).doc(id).set(patch, { merge: true });
+  } catch {
+    /* analytics must never break preview/download */
+  }
+}
+
+/** Find an active file with identical content (duplicate detection). */
+export async function findActiveFileByContentHash(contentHash: string): Promise<FileDocument | null> {
+  const snapshot = await getAdminDb()
+    .collection(FILES)
+    .where("status", "==", "active")
+    .where("contentHash", "==", contentHash)
+    .limit(1)
+    .get();
+  const document = snapshot.docs[0];
+  return document ? toDocument(document) : null;
+}
+
+/** Files whose retention expires within the given window (for notifications + retention views). */
+export async function getFilesExpiringBetween(from: Date, to: Date, limit = 200): Promise<FileDocument[]> {
+  const snapshot = await getAdminDb()
+    .collection(FILES)
+    .where("status", "==", "active")
+    .where("autoDeleteEnabled", "==", true)
+    .where("deleteAt", ">=", from)
+    .where("deleteAt", "<=", to)
+    .orderBy("deleteAt", "asc")
+    .limit(limit)
+    .get();
+  return snapshot.docs.map(toDocument);
+}
+
+export async function getFavoriteFiles(limit = 200): Promise<FileDocument[]> {
+  const snapshot = await getAdminDb()
+    .collection(FILES)
+    .where("status", "==", "active")
+    .where("isFavorite", "==", true)
+    .orderBy("updatedAt", "desc")
+    .limit(limit)
+    .get();
+  return snapshot.docs.map(toDocument);
 }

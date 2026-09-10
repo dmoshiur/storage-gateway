@@ -72,8 +72,8 @@ export const bridgeUploadLogSchema = z.object({
 
 /**
  * Step 1 of the embedded bridge's presigned flow (`POST /api/v1/storage/upload/init`).
- * The integration declares the document up front and receives a short-lived R2
- * PUT URL, so bytes for large documents stream straight to R2 instead of
+ * The integration declares the document up front and receives a short-lived Blob
+ * PUT URL, so bytes for large documents stream straight to Blob instead of
  * passing through the Vercel function payload.
  */
 export const bridgeUploadInitSchema = z.object({
@@ -99,7 +99,7 @@ export const bridgeUploadCompleteSchema = z
 export type BridgeUploadCompleteInput = z.infer<typeof bridgeUploadCompleteSchema>;
 
 export const bridgeRegisterFileSchema = z.object({
-  storageKey: bridgeStorageKeySchema,
+  storagePath: bridgeStorageKeySchema,
   originalName: safeBridgeText(180),
   title: optionalBridgeText(160),
   description: optionalBridgeText(2000),

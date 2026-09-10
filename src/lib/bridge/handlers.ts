@@ -10,14 +10,13 @@ import { DIRECT_UPLOAD_GUIDANCE_BYTES, getBridgeMaxDocumentBytes, getBridgeSigne
 import {
   bridgeUploader,
   buildBridgeObjectKey,
-  buildBridgeStagingKey,
   cleanBridgeFilename,
   logBridgeUploadAttempt,
   parseBridgeTags,
 } from "@/lib/bridge/upload";
 import {
   assertDocumentMetadata,
-  assertValidatedR2Document,
+  assertValidatedBlobDocument,
   inspectDocumentSignature,
   stripDocumentExtension,
 } from "@/lib/validation/documents";
@@ -35,6 +34,9 @@ import {
 } from "@/lib/firestore/files";
 import { auditActorFrom, writeAuditLogSafely } from "@/lib/firestore/audit";
 import { defaultRetention } from "@/lib/retention";
+import { createHash } from "node:crypto";
+import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
+import { getApiKeyScopesByKeyId, requireScope, type ApiScope } from "@/lib/security/api-keys";
 import { getStorageService } from "@/lib/storage";
 import type { FileDocument } from "@/types/file";
 
@@ -83,9 +85,9 @@ function isSignedRequest(request: Request): boolean {
   return Boolean(keyId && (request.headers.get("x-am-storage-signature") ?? "").trim() && (request.headers.get("x-am-storage-timestamp") ?? "").trim());
 }
 
-async function signBridgeDocumentUrl(file: Pick<FileDocument, "storageKey" | "originalName" | "mimeType">): Promise<{ url: string; expiresAt: string }> {
+async function signBridgeDocumentUrl(file: Pick<FileDocument, "storagePath" | "originalName" | "mimeType">): Promise<{ url: string; expiresAt: string }> {
   const expiresInSeconds = getBridgeSignedUrlExpirySeconds();
-  const url = await getStorageService().getSignedUrl(file.storageKey, {
+  const url = await getStorageService().getSignedUrl(file.storagePath, {
     expiresInSeconds,
     disposition: "inline",
     filename: file.originalName,
@@ -104,7 +106,7 @@ async function signBridgeDocumentUrl(file: Pick<FileDocument, "storageKey" | "or
  * code runs, so the 413 guidance below only triggers for the configured
  * document cap.
  */
-export async function handleBridgeDirectUpload(request: Request, requestId: string): Promise<Response> {
+export async function handleBridgeDirectUpload(request: Request, requestId: string, requiredScope?: ApiScope): Promise<Response> {
   // Rate limiting runs before authentication so unauthenticated floods cannot
   // bypass the per-instance budget by omitting credentials.
   enforceRateLimit(`bridge:upload:${getClientIp(request)}`, 240);
@@ -114,6 +116,7 @@ export async function handleBridgeDirectUpload(request: Request, requestId: stri
   try {
     const rawBody = isSignedRequest(request) ? new Uint8Array(await request.arrayBuffer()) : undefined;
     credential = await requireBridgeCredential(request, rawBody);
+    if (requiredScope) requireScope(await getApiKeyScopesByKeyId(credential.keyId), requiredScope);
 
     const contentType = request.headers.get("content-type") ?? "";
     if (!contentType.toLowerCase().includes("multipart/form-data")) {
@@ -165,31 +168,33 @@ export async function handleBridgeDirectUpload(request: Request, requestId: stri
 
     const storage = getStorageService();
     const objectKey = buildBridgeObjectKey(document.extension);
+    let blobUrl: string | null = null;
     try {
-      await storage.upload({ key: objectKey, body: bytes, contentType: document.mimeType, contentLength: size });
+      const uploaded = await storage.upload({ pathname: objectKey, body: bytes, contentType: document.mimeType, contentLength: size });
+      blobUrl = uploaded.url;
     } catch (error) {
       try { await storage.delete(objectKey); } catch { /* compensation cleanup is best-effort */ }
       if (isApiError(error)) throw error;
-      throw new ApiError(502, "R2_UPLOAD_FAILED", "The document could not be stored. Please retry shortly.");
+      throw new ApiError(502, "BLOB_UPLOAD_FAILED", "The document could not be stored. Please retry shortly.");
     }
 
     try {
       const metadata = await storage.getMetadata(objectKey);
       if (metadata.contentLength !== size) {
-        throw new ApiError(502, "R2_UPLOAD_FAILED", "The stored document could not be verified.");
+        throw new ApiError(502, "BLOB_UPLOAD_FAILED", "The stored document could not be verified.");
       }
     } catch (error) {
       try { await storage.delete(objectKey); } catch { /* compensation cleanup is best-effort */ }
-      if (isApiError(error) && error.code === "R2_UPLOAD_FAILED") throw error;
+      if (isApiError(error) && error.code === "BLOB_UPLOAD_FAILED") throw error;
       if (isApiError(error)) throw error;
-      throw new ApiError(502, "R2_UPLOAD_FAILED", "The stored document could not be verified.");
+      throw new ApiError(502, "BLOB_UPLOAD_FAILED", "The stored document could not be verified.");
     }
 
     // Sign the URL before registration so a registration failure can still
     // remove the orphaned object without leaving a signed URL dangling.
     let signed: { url: string; expiresAt: string };
     try {
-      signed = await signBridgeDocumentUrl({ ...({} as FileDocument), storageKey: objectKey, originalName: filename, mimeType: document.mimeType });
+      signed = await signBridgeDocumentUrl({ ...({} as FileDocument), storagePath: objectKey, originalName: filename, mimeType: document.mimeType });
     } catch (error) {
       try { await storage.delete(objectKey); } catch { /* compensation cleanup is best-effort */ }
       if (isApiError(error)) throw error;
@@ -199,7 +204,8 @@ export async function handleBridgeDirectUpload(request: Request, requestId: stri
     let file: FileDocument;
     try {
       file = await createBridgeFile({
-        storageKey: objectKey,
+        storagePath: objectKey,
+        blobUrl,
         originalName: filename,
         title: textField("title").trim().replace(/\s+/g, " ").slice(0, 160) || stripDocumentExtension(filename),
         description: textField("description").trim().replace(/\s+/g, " ").slice(0, 2000),
@@ -209,6 +215,7 @@ export async function handleBridgeDirectUpload(request: Request, requestId: stri
         extension: document.extension,
         size,
         uploadedBy: bridgeUploader(credential),
+        contentHash: createHash("sha256").update(bytes).digest("hex"),
         retention: defaultRetention(settings),
       });
     } catch (error) {
@@ -225,6 +232,7 @@ export async function handleBridgeDirectUpload(request: Request, requestId: stri
       details: { size: file.size },
     });
     await logBridgeUploadAttempt({ keyId: credential.logKey, filename, sizeBytes: size, status: "success", failureCode: null, requestId });
+    emitWebhookEvent("file.uploaded", { fileId: file.id, fileName: file.originalName, size: file.size, via: "api" });
 
     return success({ file: serializeFile(file), url: signed.url, expiresAt: signed.expiresAt, filename, size }, requestId, 201);
   } catch (error) {
@@ -242,8 +250,8 @@ export async function handleBridgeDirectUpload(request: Request, requestId: stri
 
 /**
  * POST /api/v1/storage/upload/init — step 1 of the presigned flow for larger
- * documents. Mints a short-lived R2 PUT URL; the integration uploads bytes
- * directly to R2 (bypassing Vercel's function payload limit entirely), then
+ * documents. Mints a short-lived Blob PUT URL; the integration uploads bytes
+ * directly to the private Blob store (bypassing Vercel's function payload limit entirely), then
  * calls .../complete.
  */
 export async function handleBridgeUploadInit(request: Request, requestId: string): Promise<Response> {
@@ -260,8 +268,8 @@ export async function handleBridgeUploadInit(request: Request, requestId: string
   }
 
   const file = await createUploadingFile({
-    storageKey: buildBridgeObjectKey(document.extension),
-    uploadKey: buildBridgeStagingKey(document.extension),
+    storagePath: buildBridgeObjectKey(document.extension),
+    uploadKey: null,
     originalName: input.originalName,
     title: input.title || stripDocumentExtension(input.originalName),
     description: input.description,
@@ -280,14 +288,14 @@ export async function handleBridgeUploadInit(request: Request, requestId: string
       expiresInSeconds,
       contentType: document.mimeType,
       contentLength: file.size,
-      metadata: { "file-id": file.id },
+      metadata: {},
     });
     return success({
       file: serializeFile(file),
       uploadUrl,
+      uploadMethod: "PUT",
       uploadHeaders: {
         "Content-Type": document.mimeType,
-        "x-amz-meta-file-id": file.id,
       },
       directUploadRecommended: input.size <= DIRECT_UPLOAD_GUIDANCE_BYTES,
       expiresAt: new Date(Date.now() + expiresInSeconds * 1000).toISOString(),
@@ -301,7 +309,7 @@ export async function handleBridgeUploadInit(request: Request, requestId: string
 
 /**
  * POST /api/v1/storage/upload/complete — step 3 of the presigned flow.
- * Verifies the staged R2 object (size, content type, ownership, magic bytes),
+ * Verifies the staged Blob object (size, content type, ownership, magic bytes),
  * publishes it to its final key, and returns the signed document URL. Only the
  * credential that started the upload may complete it.
  */
@@ -330,16 +338,14 @@ export async function handleBridgeUploadComplete(request: Request, requestId: st
     }
 
     const storage = getStorageService();
-    const stagingKey = file.uploadKey ?? file.storageKey;
-    let verifiedEtag: string | undefined;
+    const objectPath = file.uploadKey ?? file.storagePath;
     try {
       const [metadata, firstBytes, lastBytes] = await Promise.all([
-        storage.getMetadata(stagingKey),
-        storage.download(stagingKey, `bytes=0-${SNIFF_WINDOW_BYTES - 1}`),
-        storage.download(stagingKey, `bytes=-${SNIFF_WINDOW_BYTES}`),
+        storage.getMetadata(objectPath),
+        storage.download(objectPath, `bytes=0-${SNIFF_WINDOW_BYTES - 1}`),
+        storage.download(objectPath, `bytes=-${SNIFF_WINDOW_BYTES}`),
       ]);
-      verifiedEtag = metadata.etag;
-      assertValidatedR2Document({
+      assertValidatedBlobDocument({
         originalName: file.originalName,
         expectedSize: file.size,
         actualSize: metadata.contentLength,
@@ -347,11 +353,10 @@ export async function handleBridgeUploadComplete(request: Request, requestId: st
         firstBytes,
         lastBytes,
         objectFileId: metadata.metadata?.["file-id"],
-        expectedFileId: file.id,
       });
     } catch (error) {
       if (isApiError(error) && VALIDATION_CODES.has(error.code)) {
-        try { await storage.delete(stagingKey); } catch { /* stale upload cleanup will retry if needed */ }
+        try { await storage.delete(objectPath); } catch { /* stale upload cleanup will retry if needed */ }
         await markUploadFailed(file.id, error.code);
         await writeAuditLogSafely({ action: "UPLOAD_FAILED", actor: auditActorFrom(INTEGRATION_AUDIT_ACTOR), fileId: file.id, fileName: file.originalName, details: { reason: error.code } });
         throw error;
@@ -360,18 +365,17 @@ export async function handleBridgeUploadComplete(request: Request, requestId: st
       throw new ApiError(502, "STORAGE_UNAVAILABLE", "The document could not be verified in storage. Please retry shortly.");
     }
 
-    try {
-      // Publish an immutable final object. The upload URL only authorizes its separate staging key.
-      if (stagingKey !== file.storageKey) await storage.copy(stagingKey, file.storageKey, verifiedEtag);
-    } catch {
-      throw new ApiError(502, "STORAGE_UNAVAILABLE", "The verified document could not be finalized in storage. Please retry shortly.");
+    // Direct-to-final Blob uploads need no copy step: activation is a pure metadata transition.
+    if (file.uploadKey) {
+      try { await storage.delete(file.uploadKey); } catch { /* safe, retryable staging cleanup */ }
+      try { await clearUploadKey(file.id); } catch { /* cleanup retries via cron */ }
     }
     const active = await activateUpload(file.id);
-    try { await storage.delete(stagingKey); await clearUploadKey(file.id); } catch { /* safe, retryable staging cleanup */ }
     await writeAuditLogSafely({ action: "BRIDGE_UPLOAD", actor: auditActorFrom(INTEGRATION_AUDIT_ACTOR), fileId: active.id, fileName: active.originalName, details: { size: active.size } });
 
     const signed = await signBridgeDocumentUrl(active);
     await logBridgeUploadAttempt({ keyId: credential.logKey, filename, sizeBytes: active.size, status: "success", failureCode: null, requestId });
+    emitWebhookEvent("file.uploaded", { fileId: active.id, fileName: active.originalName, size: active.size, via: "api" });
     return success({ file: serializeFile(active), url: signed.url, expiresAt: signed.expiresAt, filename, size: active.size }, requestId);
   } catch (error) {
     await logBridgeUploadAttempt({

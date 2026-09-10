@@ -1,11 +1,48 @@
 import type { Role } from "@/types/auth";
 
-export type Capability = "read_files" | "manage_files" | "manage_settings" | "view_audit" | "run_cleanup";
+export type Capability =
+  | "read_files"
+  | "manage_files"
+  | "permanent_delete"
+  | "manage_settings"
+  | "manage_users"
+  | "manage_api"
+  | "manage_webhooks"
+  | "view_audit"
+  | "view_security"
+  | "run_cleanup";
 
-/** Central policy point; roles can expand without changing every route. */
+/**
+ * Central policy point; roles can expand without changing every route.
+ *
+ * | Feature          | Admin | Editor | Viewer |
+ * |------------------|-------|--------|--------|
+ * | View/preview     | ✓     | ✓      | ✓      |
+ * | Download         | ✓     | ✓      | ✓      |
+ * | Upload           | ✓     | ✓      | ✗      |
+ * | Edit metadata    | ✓     | ✓      | ✗      |
+ * | Retention        | ✓     | ✓      | ✗      |
+ * | Trash / restore  | ✓     | ✓      | ✗      |
+ * | Permanent delete | ✓     | ✗      | ✗      |
+ * | Users            | ✓     | ✗      | ✗      |
+ * | API keys         | ✓     | ✗      | ✗      |
+ * | Settings         | ✓     | ✗      | ✗      |
+ * | Audit logs       | ✓     | ✗      | ✗      |
+ */
 const permissions: Record<Role, ReadonlySet<Capability>> = {
-  admin: new Set(["read_files", "manage_files", "manage_settings", "view_audit", "run_cleanup"]),
-  editor: new Set(["read_files"]),
+  admin: new Set([
+    "read_files",
+    "manage_files",
+    "permanent_delete",
+    "manage_settings",
+    "manage_users",
+    "manage_api",
+    "manage_webhooks",
+    "view_audit",
+    "view_security",
+    "run_cleanup",
+  ]),
+  editor: new Set(["read_files", "manage_files"]),
   viewer: new Set(["read_files"]),
 };
 

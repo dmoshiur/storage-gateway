@@ -3,12 +3,13 @@ import { apiRoute, requireRouteId } from "@/lib/api/route";
 import { success } from "@/lib/api/response";
 import { parseQuery } from "@/lib/api/body";
 import { ApiError } from "@/lib/api/errors";
-import { requireFileById } from "@/lib/firestore/files";
+import { recordFileAccess, requireFileById } from "@/lib/firestore/files";
 import { getSettings } from "@/lib/firestore/settings";
 import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
 import { getStorageService } from "@/lib/storage";
 import { requireReadActor } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
+import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
 
 export const runtime = "nodejs";
 
@@ -27,13 +28,15 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
       throw new ApiError(404, "FILE_NOT_FOUND", "The requested document was not found.");
     }
     const settings = await getSettings();
-    const url = await getStorageService().getSignedUrl(file.storageKey, {
+    const url = await getStorageService().getSignedUrl(file.storagePath, {
       expiresInSeconds: settings.signedUrlExpirySeconds,
       disposition: query.disposition,
       filename: file.originalName,
       contentType: file.mimeType,
     });
+    await recordFileAccess(file.id, "download");
     await writeAuditLogSafely({ action: "DOWNLOAD", actor: auditActorFrom(actor), fileId: file.id, fileName: file.originalName, details: { disposition: query.disposition } });
+    emitWebhookEvent("file.downloaded", { fileId: file.id, fileName: file.originalName });
 
     if (query.redirect === "true") {
       const response = Response.redirect(url, 302);

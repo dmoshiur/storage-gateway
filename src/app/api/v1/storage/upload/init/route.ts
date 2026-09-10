@@ -9,9 +9,9 @@ export const maxDuration = 60;
 /**
  * Step 1 of the presigned bridge upload flow for larger documents.
  *
- * The integration declares the document as JSON and receives a short-lived R2
+ * The integration declares the document as JSON and receives a short-lived Blob
  * PUT URL plus the exact headers the PUT must carry. Bytes stream directly to
- * R2, bypassing Vercel's function payload limit entirely, and
+ * the private Blob store, bypassing Vercel's function payload limit entirely, and
  * `POST /api/v1/storage/upload/complete` finalizes the document afterwards.
  */
 export async function POST(request: Request) {

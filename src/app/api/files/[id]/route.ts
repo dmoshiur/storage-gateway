@@ -7,6 +7,7 @@ import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
 import { requireAdminRequest, requireReadActor } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { fileUpdateSchema, moveToTrashSchema } from "@/lib/validation/schemas";
+import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
 
 export const runtime = "nodejs";
 
@@ -42,11 +43,12 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     if (result.changedRetention) {
       await writeAuditLogSafely({ action: "CHANGE_RETENTION", actor: auditActorFrom(actor), fileId: result.file.id, fileName: result.file.originalName, details: { retentionType: result.file.retentionType, autoDeleteEnabled: result.file.autoDeleteEnabled } });
     }
+    emitWebhookEvent("file.updated", { fileId: result.file.id, fileName: result.file.originalName });
     return success({ file: serializeFile(result.file) }, requestId);
   }, { route: "files/update" });
 }
 
-/** Soft delete only. Physical R2 bytes remain private until Trash expiry, so restore is lossless. */
+/** Soft delete only. Physical Blob bytes remain private until Trash expiry, so restore is lossless. */
 export async function DELETE(request: Request, context: { params: Promise<{ id: string }> }) {
   return apiRoute(request, async (requestId) => {
     const actor = await requireAdminRequest(request, "manage_files", true);
@@ -56,8 +58,9 @@ export async function DELETE(request: Request, context: { params: Promise<{ id: 
     const { getSettings } = await import("@/lib/firestore/settings");
     const { moveFileToTrash } = await import("@/lib/firestore/files");
     const settings = await getSettings();
-    const file = await moveFileToTrash(id, settings.trashRetentionDays, "manual");
+    const file = await moveFileToTrash(id, settings.trashRetentionDays, "manual", actor.uid);
     await writeAuditLogSafely({ action: "MOVE_TO_TRASH", actor: auditActorFrom(actor), fileId: file.id, fileName: file.originalName, details: { permanentDeleteAt: file.permanentDeleteAt?.toISOString() ?? null } });
+    emitWebhookEvent("file.trashed", { fileId: file.id, fileName: file.originalName });
     return success({ file: serializeFile(file) }, requestId);
   }, { route: "files/trash" });
 }

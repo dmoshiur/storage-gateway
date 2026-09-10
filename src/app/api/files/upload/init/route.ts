@@ -6,7 +6,7 @@ import { parseJson } from "@/lib/api/body";
 import { uploadInitSchema } from "@/lib/validation/schemas";
 import { assertDocumentMetadata, stripDocumentExtension } from "@/lib/validation/documents";
 import { getSettings } from "@/lib/firestore/settings";
-import { createUploadingFile, markUploadFailed, serializeFile } from "@/lib/firestore/files";
+import { createUploadingFile, findActiveFileByContentHash, markUploadFailed, serializeFile } from "@/lib/firestore/files";
 import { getStorageStats } from "@/lib/firestore/stats";
 import { defaultRetention } from "@/lib/retention";
 import { getStorageService } from "@/lib/storage";
@@ -14,9 +14,9 @@ import { ApiError } from "@/lib/api/errors";
 
 export const runtime = "nodejs";
 
-function storageKey(prefix: "documents" | "uploads", extension: string): string {
+function storagePath(extension: string): string {
   const now = new Date();
-  return `${prefix}/${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, "0")}/${crypto.randomUUID()}.${extension}`;
+  return `pdfs/${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, "0")}/${crypto.randomUUID()}.${extension}`;
 }
 
 export async function POST(request: Request) {
@@ -30,10 +30,18 @@ export async function POST(request: Request) {
       throw new ApiError(409, "STORAGE_LIMIT_EXCEEDED", "Uploading this document would exceed the configured storage limit.");
     }
 
+    // Optional duplicate detection: the client may send a SHA-256 hex of the bytes.
+    let duplicateOf: { id: string; originalName: string } | null = null;
+    if (input.contentHash) {
+      const existing = await findActiveFileByContentHash(input.contentHash);
+      if (existing) duplicateOf = { id: existing.id, originalName: existing.originalName };
+    }
+
     const retention = input.retention ?? defaultRetention(settings);
+    const path = storagePath(document.extension);
     const file = await createUploadingFile({
-      storageKey: storageKey("documents", document.extension),
-      uploadKey: storageKey("uploads", document.extension),
+      storagePath: path,
+      uploadKey: null,
       originalName: input.originalName,
       title: input.title || stripDocumentExtension(input.originalName),
       description: input.description,
@@ -43,25 +51,26 @@ export async function POST(request: Request) {
       extension: document.extension,
       size: input.size,
       uploadedBy: actor.uid,
+      contentHash: input.contentHash ?? null,
       retention,
     });
 
     try {
       const expiresInSeconds = Math.min(20 * 60, Math.max(5 * 60, settings.signedUrlExpirySeconds));
-      const uploadUrl = await getStorageService().getSignedUploadUrl(file.uploadKey!, {
+      // Direct browser-to-Blob upload: bytes never transit the Next.js server.
+      const uploadUrl = await getStorageService().getSignedUploadUrl(file.storagePath, {
         expiresInSeconds,
         contentType: document.mimeType,
         contentLength: file.size,
-        metadata: { "file-id": file.id },
+        metadata: {},
       });
       return success({
         file: serializeFile(file),
         uploadUrl,
-        uploadHeaders: {
-          "Content-Type": document.mimeType,
-          "x-amz-meta-file-id": file.id,
-        },
+        uploadMethod: "PUT",
+        uploadHeaders: { "Content-Type": document.mimeType },
         expiresAt: new Date(Date.now() + expiresInSeconds * 1000).toISOString(),
+        duplicateOf,
       }, requestId, 201);
     } catch (error) {
       await markUploadFailed(file.id, "UPLOAD_URL_GENERATION_FAILED");

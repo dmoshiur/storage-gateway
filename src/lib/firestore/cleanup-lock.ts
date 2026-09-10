@@ -28,3 +28,25 @@ export async function releaseCleanupLock(summary: Record<string, unknown>, error
     lastError: error ?? null,
   }, { merge: true });
 }
+
+export interface CleanupStatus {
+  state: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  lastSummary: Record<string, unknown> | null;
+  lastError: string | null;
+}
+
+export async function getCleanupStatus(): Promise<CleanupStatus> {
+  const snapshot = await getAdminDb().collection("system").doc(LOCK_DOCUMENT).get();
+  const data = snapshot.data();
+  return {
+    state: typeof data?.state === "string" ? data.state : "unknown",
+    startedAt: asDate(data?.startedAt)?.toISOString() ?? null,
+    completedAt: asDate(data?.completedAt)?.toISOString() ?? null,
+    lastSummary: data?.lastSummary && typeof data.lastSummary === "object"
+      ? data.lastSummary as Record<string, unknown>
+      : null,
+    lastError: typeof data?.lastError === "string" ? data.lastError : null,
+  };
+}

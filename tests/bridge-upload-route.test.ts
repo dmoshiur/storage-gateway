@@ -94,7 +94,9 @@ describe("POST /api/v1/storage/upload — embedded bridge (single Vercel deploym
     }));
     createBridgeFile.mockImplementation(async (input: Record<string, unknown>) => ({ id: "file-1", ...input }));
     getStorageService.mockReturnValue(storage);
-    storage.getSignedUrl.mockResolvedValue("https://r2.example/signed?sig=abc");
+    storage.upload.mockResolvedValue({ url: "https://blob.example/pdfs/2026/09/test.pdf", pathname: "pdfs/2026/09/test.pdf" });
+    storage.getMetadata.mockResolvedValue({ contentLength: PDF_CONTENT.length, contentType: "application/pdf" });
+    storage.getSignedUrl.mockResolvedValue("https://blob.example/signed?sig=abc");
   });
 
   afterEach(() => {
@@ -189,7 +191,7 @@ describe("POST /api/v1/storage/upload — embedded bridge (single Vercel deploym
     expect(storage.upload).not.toHaveBeenCalled();
   });
 
-  it("stores a valid dual-token upload in R2, registers it, and returns a signed URL", async () => {
+  it("stores a valid dual-token upload in Blob, registers it, and returns a signed URL", async () => {
     verifyApiCredential.mockResolvedValue("rec-1");
     storage.getMetadata.mockResolvedValue({ contentLength: PDF_CONTENT.length, contentType: "application/pdf" });
 
@@ -202,14 +204,14 @@ describe("POST /api/v1/storage/upload — embedded bridge (single Vercel deploym
     expect(body.success).toBe(true);
     expect(body.data.filename).toBe("annual-report.pdf");
     expect(body.data.size).toBe(PDF_CONTENT.length);
-    expect(body.data.url).toBe("https://r2.example/signed?sig=abc");
+    expect(body.data.url).toBe("https://blob.example/signed?sig=abc");
     expect(body.data.expiresAt).toBeTruthy();
     expect(body.data.file).toMatchObject({ id: "file-1", status: "active" });
     expect(body.requestId).toBeTruthy();
 
     expect(storage.upload).toHaveBeenCalledTimes(1);
-    const uploadInput = storage.upload.mock.calls[0]![0] as { key: string; contentType: string; contentLength: number };
-    expect(uploadInput.key).toMatch(/^documents\/\d{4}\/\d{2}\/[A-Za-z0-9-]+\.pdf$/);
+    const uploadInput = storage.upload.mock.calls[0]![0] as { pathname: string; contentType: string; contentLength: number };
+    expect(uploadInput.pathname).toMatch(/^pdfs\/\d{4}\/\d{2}\/[A-Za-z0-9-]+\.pdf$/);
     expect(uploadInput.contentType).toBe("application/pdf");
     expect(uploadInput.contentLength).toBe(PDF_CONTENT.length);
 
@@ -277,7 +279,7 @@ describe("POST /api/v1/storage/upload — embedded bridge (single Vercel deploym
     expect(recordApiRequestSafe).toHaveBeenCalledWith("static");
   });
 
-  it("maps an R2 outage to R2_UPLOAD_FAILED and removes the partial object", async () => {
+  it("maps a Blob outage to BLOB_UPLOAD_FAILED and removes the partial object", async () => {
     verifyApiCredential.mockResolvedValue("rec-1");
     storage.upload.mockRejectedValue(new Error("socket hang up"));
 
@@ -287,10 +289,10 @@ describe("POST /api/v1/storage/upload — embedded bridge (single Vercel deploym
 
     expect(response.status).toBe(502);
     const body = await response.json();
-    expect(body.error.code).toBe("R2_UPLOAD_FAILED");
+    expect(body.error.code).toBe("BLOB_UPLOAD_FAILED");
     expect(storage.delete).toHaveBeenCalledTimes(1);
     expect(createBridgeFile).not.toHaveBeenCalled();
-    expect(recordUploadLog).toHaveBeenCalledWith(expect.objectContaining({ status: "failed", failureCode: "R2_UPLOAD_FAILED" }));
+    expect(recordUploadLog).toHaveBeenCalledWith(expect.objectContaining({ status: "failed", failureCode: "BLOB_UPLOAD_FAILED" }));
   });
 
   it("answers GET with 405 JSON (never an HTML page)", async () => {

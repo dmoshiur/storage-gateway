@@ -140,14 +140,14 @@ describe("internal bridge upload-logs (dashboard API activity feed)", () => {
       filename: "invoice.pdf",
       sizeBytes: 0,
       status: "failed",
-      failureCode: "R2_UPLOAD_FAILED",
+      failureCode: "BLOB_UPLOAD_FAILED",
       requestId: "req-124",
       timestamp: "2026-09-09T12:01:00.000Z",
     }));
     expect(response.status).toBe(200);
     expect(recordUploadLog).toHaveBeenCalledWith(expect.objectContaining({
       status: "failed",
-      failureCode: "R2_UPLOAD_FAILED",
+      failureCode: "BLOB_UPLOAD_FAILED",
     }));
   });
 

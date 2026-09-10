@@ -9,12 +9,9 @@ const firebaseAdminSchema = z.object({
   FIREBASE_PRIVATE_KEY: z.string().min(32),
 });
 
-const r2Schema = z.object({
-  R2_ACCOUNT_ID: z.string().min(1),
-  R2_ACCESS_KEY_ID: z.string().min(1),
-  R2_SECRET_ACCESS_KEY: z.string().min(1),
-  R2_BUCKET_NAME: z.string().min(3),
-  R2_ENDPOINT: z.string().url(),
+const blobSchema = z.object({
+  BLOB_READ_WRITE_TOKEN: z.string().min(1).optional(),
+  BLOB_STORE_ID: z.string().min(1).optional(),
 });
 
 function configurationError(area: string, issues: string[]): never {
@@ -33,16 +30,25 @@ export function getFirebaseAdminEnv() {
   return { ...parsed.data, FIREBASE_PRIVATE_KEY: parsed.data.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n") };
 }
 
-export function getR2Env() {
-  const parsed = r2Schema.safeParse({
-    R2_ACCOUNT_ID: process.env.R2_ACCOUNT_ID,
-    R2_ACCESS_KEY_ID: process.env.R2_ACCESS_KEY_ID,
-    R2_SECRET_ACCESS_KEY: process.env.R2_SECRET_ACCESS_KEY,
-    R2_BUCKET_NAME: process.env.R2_BUCKET_NAME,
-    R2_ENDPOINT: process.env.R2_ENDPOINT,
+/**
+ * Vercel Private Blob store configuration (server only).
+ *
+ * When the Vercel Blob integration is attached, `BLOB_READ_WRITE_TOKEN` is
+ * injected automatically. On Vercel runtimes without an explicit token, the
+ * SDK authenticates with OIDC (`VERCEL_OIDC_TOKEN` + `BLOB_STORE_ID`).
+ */
+export function getBlobStoreConfig(): { token: string | null; storeId: string | null } {
+  const parsed = blobSchema.safeParse({
+    BLOB_READ_WRITE_TOKEN: process.env.BLOB_READ_WRITE_TOKEN || undefined,
+    BLOB_STORE_ID: process.env.BLOB_STORE_ID || undefined,
   });
-  if (!parsed.success) return configurationError("r2", parsed.error.issues.map((issue) => issue.path.join(".")));
-  return parsed.data;
+  if (!parsed.success) return configurationError("blob", parsed.error.issues.map((issue) => issue.path.join(".")));
+  const explicitToken = parsed.data.BLOB_READ_WRITE_TOKEN ?? null;
+  const oidcAvailable = Boolean(process.env.VERCEL_OIDC_TOKEN?.trim());
+  if (!explicitToken && !oidcAvailable) {
+    return configurationError("blob", ["BLOB_READ_WRITE_TOKEN"]);
+  }
+  return { token: explicitToken, storeId: parsed.data.BLOB_STORE_ID ?? null };
 }
 
 export function getRequiredSecret(name: "INTEGRATION_API_KEY" | "CRON_SECRET"): string {

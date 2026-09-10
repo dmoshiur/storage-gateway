@@ -58,6 +58,18 @@ export async function parseJson<T extends z.ZodTypeAny>(
   return parsed.data;
 }
 
+/** Parse an optional JSON body; returns null when no body was sent. */
+export async function parseJsonOptional<T extends z.ZodTypeAny>(
+  request: Request,
+  schema: T,
+  maxBytes = 64 * 1024,
+): Promise<z.infer<T> | null> {
+  const length = Number(request.headers.get("content-length") ?? "0");
+  const contentType = request.headers.get("content-type")?.toLowerCase() ?? "";
+  if ((!Number.isFinite(length) || length === 0) && !contentType) return null;
+  return parseJson(request, schema, maxBytes);
+}
+
 export function parseQuery<T extends z.ZodTypeAny>(values: Record<string, string>, schema: T): z.infer<T> {
   const parsed = schema.safeParse(values);
   if (!parsed.success) {

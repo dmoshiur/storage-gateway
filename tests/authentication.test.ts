@@ -18,8 +18,19 @@ describe("authentication and authorization policy", () => {
   });
   it("keeps role capabilities centralized and separate from sign-in", () => {
     expect(can("admin", "manage_files")).toBe(true);
+    expect(can("admin", "permanent_delete")).toBe(true);
+    expect(can("admin", "manage_users")).toBe(true);
+    expect(can("admin", "manage_api")).toBe(true);
+    expect(can("admin", "manage_webhooks")).toBe(true);
+    expect(can("admin", "view_audit")).toBe(true);
     expect(can("editor", "read_files")).toBe(true);
-    expect(can("editor", "manage_files")).toBe(false);
+    // Editors manage the document lifecycle but never destroy or administer.
+    expect(can("editor", "manage_files")).toBe(true);
+    expect(can("editor", "permanent_delete")).toBe(false);
     expect(can("editor", "manage_settings")).toBe(false);
+    expect(can("editor", "manage_users")).toBe(false);
+    expect(can("editor", "manage_api")).toBe(false);
+    expect(can("viewer", "manage_files")).toBe(false);
+    expect(can("viewer", "view_audit")).toBe(false);
   });
 });

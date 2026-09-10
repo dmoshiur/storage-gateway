@@ -107,7 +107,7 @@ describe("internal bridge file registration", () => {
     defaultRetention.mockReturnValue({ autoDeleteEnabled: false, retentionType: "6_months", customDeleteAt: null });
     createBridgeFile.mockImplementation(async (input: Record<string, unknown>) => ({
       id: "bridge-file-1",
-      storageKey: input.storageKey,
+      storagePath: input.storagePath,
       originalName: input.originalName,
       title: input.title,
       size: input.size,
@@ -120,7 +120,7 @@ describe("internal bridge file registration", () => {
     const response = await registerRoute.POST(internalRequest("https://gateway.test/api/internal/bridge/files", {
       method: "POST",
       body: JSON.stringify({
-        storageKey: "pdfs/2026/09/6fd9b9a4-07bd-4d2b-b0b9-6f0a0f0f0f0f.pdf",
+        storagePath: "pdfs/2026/09/6fd9b9a4-07bd-4d2b-b0b9-6f0a0f0f0f0f.pdf",
         originalName: "annual-report.pdf",
         title: "Annual Report 2026",
         description: "",
@@ -141,7 +141,7 @@ describe("internal bridge file registration", () => {
     const response = await registerRoute.POST(internalRequest("https://gateway.test/api/internal/bridge/files", {
       method: "POST",
       body: JSON.stringify({
-        storageKey: "documents/2026/09/6fd9b9a4-07bd-4d2b-b0b9-6f0a0f0f0f0f.txt",
+        storagePath: "documents/2026/09/6fd9b9a4-07bd-4d2b-b0b9-6f0a0f0f0f0f.txt",
         originalName: "meeting-notes.txt",
         title: "Meeting notes",
         size: 64,
@@ -159,7 +159,7 @@ describe("internal bridge file registration", () => {
     const badName = await registerRoute.POST(internalRequest("https://gateway.test/api/internal/bridge/files", {
       method: "POST",
       body: JSON.stringify({
-        storageKey: "pdfs/2026/09/6fd9b9a4-07bd-4d2b-b0b9-6f0a0f0f0f0f.pdf",
+        storagePath: "pdfs/2026/09/6fd9b9a4-07bd-4d2b-b0b9-6f0a0f0f0f0f.pdf",
         originalName: "notes.exe",
         size: 100,
       }),
@@ -170,7 +170,7 @@ describe("internal bridge file registration", () => {
     const tooLarge = await registerRoute.POST(internalRequest("https://gateway.test/api/internal/bridge/files", {
       method: "POST",
       body: JSON.stringify({
-        storageKey: "pdfs/2026/09/6fd9b9a4-07bd-4d2b-b0b9-6f0a0f0f0f0f.pdf",
+        storagePath: "pdfs/2026/09/6fd9b9a4-07bd-4d2b-b0b9-6f0a0f0f0f0f.pdf",
         originalName: "huge.pdf",
         size: 500 * 1024 * 1024,
       }),
@@ -191,7 +191,7 @@ describe("internal bridge file registration", () => {
     const response = await registerRoute.POST(internalRequest("https://gateway.test/api/internal/bridge/files", {
       method: "POST",
       body: JSON.stringify({
-        storageKey: "pdfs/2026/09/6fd9b9a4-07bd-4d2b-b0b9-6f0a0f0f0f0f.pdf",
+        storagePath: "pdfs/2026/09/6fd9b9a4-07bd-4d2b-b0b9-6f0a0f0f0f0f.pdf",
         originalName: "big.pdf",
         size: 900 * 1024 * 1024,
       }),

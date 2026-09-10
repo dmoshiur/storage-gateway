@@ -6,7 +6,7 @@ import { bridgePreflightResponse, withBridgeCors } from "@/lib/bridge/upload";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-/** Document validation + R2 streaming can take longer than the default budget. */
+/** Document validation + Blob streaming can take longer than the default budget. */
 export const maxDuration = 60;
 
 /**
@@ -16,7 +16,7 @@ export const maxDuration = 60;
  * DOCX, TXT, PPT, PPTX) authenticated with the dashboard-managed dual-token
  * credential (`X-AM-Storage-Key-Id` + `X-AM-Storage-Key-Secret`), an HMAC
  * signature, or a legacy single key. It validates the credential, checks the
- * document structure, streams the bytes into private Cloudflare R2, registers
+ * document structure, streams the bytes into the private Blob store, registers
  * the document, logs the attempt for the dashboard, and returns a signed
  * document URL.
  *

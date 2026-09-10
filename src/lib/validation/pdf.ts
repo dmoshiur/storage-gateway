@@ -1,7 +1,7 @@
 import { ApiError } from "@/lib/api/errors";
 import {
   assertDocumentMetadata,
-  assertValidatedR2Document,
+  assertValidatedBlobDocument,
   getDocumentExtension,
   inspectDocumentSignature,
 } from "@/lib/validation/documents";
@@ -25,7 +25,7 @@ export function assertUploadMetadata(name: string, size: number, maximumSize: nu
   return { extension: "pdf", mimeType: metadata.mimeType };
 }
 
-export function assertValidatedR2Pdf(input: {
+export function assertValidatedBlobPdf(input: {
   originalName: string;
   expectedSize: number;
   actualSize?: number;
@@ -35,5 +35,5 @@ export function assertValidatedR2Pdf(input: {
   objectFileId?: string;
   expectedFileId: string;
 }): void {
-  assertValidatedR2Document(input);
+  assertValidatedBlobDocument(input);
 }

@@ -1,20 +1,14 @@
 import type { NextConfig } from "next";
 
-function r2Origin(): string {
-  try {
-    return process.env.R2_ENDPOINT ? new URL(process.env.R2_ENDPOINT).origin : "";
-  } catch {
-    return "";
-  }
-}
-
+// Vercel Blob object hosts (private stores included) + Firebase Auth endpoints.
 const connectSources = [
   "'self'",
   "https://identitytoolkit.googleapis.com",
   "https://securetoken.googleapis.com",
   "https://www.googleapis.com",
-  r2Origin(),
-].filter(Boolean).join(" ");
+  "https://*.blob.vercel-storage.com",
+  "https://blob.vercel-storage.com",
+].join(" ");
 
 const contentSecurityPolicy = [
   "default-src 'self'",
@@ -24,7 +18,8 @@ const contentSecurityPolicy = [
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
   `connect-src ${connectSources}${process.env.NODE_ENV !== "production" ? " ws: wss:" : ""}`,
-  "frame-src 'self'",
+  // PDF preview renders authorized, short-lived Blob URLs inside the app shell.
+  "frame-src 'self' https://*.blob.vercel-storage.com https://blob.vercel-storage.com blob:",
   "worker-src 'self' blob:",
   "object-src 'none'",
   "base-uri 'self'",
@@ -46,6 +41,7 @@ const nextConfig: NextConfig = {
         { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), payment=(), usb=()" },
         { key: "X-Frame-Options", value: "DENY" },
         { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
+        { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains; preload" },
       ],
     }];
   },

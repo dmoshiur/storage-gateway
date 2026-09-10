@@ -16,14 +16,13 @@ export const runtime = "nodejs";
 /**
  * Internal, server-to-server metadata registration for bridge uploads.
  *
- * The optional external (legacy FastAPI) bridge validates the document structure
- * itself (header, EOF marker, declared size) and streams the bytes straight
- * into R2 with its own private R2 credentials. Only after the object exists
- * and passes a HEAD verification does the bridge call this endpoint so the
- * document becomes visible to the dashboard, retention, Trash, and NGO website
- * listing with one source of truth for metadata. R2 credentials never travel
- * to the client site. The embedded bridge registers documents in-process and
- * does not use this route.
+ * A trusted server-side uploader validates the document structure itself
+ * (header, EOF marker, declared size) and streams the bytes straight into the
+ * private Blob store. Only after the object exists and passes verification
+ * does the uploader call this endpoint so the document becomes visible to the
+ * dashboard, retention, Trash, and NGO website listing with one source of
+ * truth for metadata. Blob credentials never travel to the client site. The
+ * embedded bridge registers documents in-process and does not use this route.
  */
 export async function POST(request: Request) {
   return apiRoute(request, async (requestId) => {
@@ -36,7 +35,7 @@ export async function POST(request: Request) {
     }
 
     const file = await createBridgeFile({
-      storageKey: input.storageKey,
+      storagePath: input.storagePath,
       originalName: input.originalName,
       title: input.title || stripDocumentExtension(input.originalName),
       description: input.description,

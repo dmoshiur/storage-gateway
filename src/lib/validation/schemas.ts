@@ -24,8 +24,16 @@ export const uploadInitSchema = z.object({
   description: optionalText(2000),
   category: optionalText(80),
   tags: z.array(tagText).max(20).optional().default([]),
+  // Optional client-computed SHA-256 hex of the bytes, used for duplicate detection hints only.
+  contentHash: z.string().regex(/^[0-9a-f]{64}$/i, "Use a SHA-256 hex digest.").optional(),
   retention: retentionInputSchema.optional(),
 });
+
+export const completeUploadSchema = z.object({
+  contentHash: z.string().regex(/^[0-9a-f]{64}$/i, "Use a SHA-256 hex digest.").optional(),
+});
+
+export const favoriteSchema = z.object({ isFavorite: z.boolean() });
 
 export const fileUpdateSchema = z.object({
   title: safeText(160).optional(),
@@ -39,8 +47,8 @@ export const listFilesQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).default(25),
   cursor: z.string().min(1).max(500).optional(),
   status: z.enum(["all", ...FILE_STATUSES]).default("active"),
-  filter: z.enum(["all", "active", "trash", "auto_delete", "never_delete", "expiring_soon", "expired"]).default("all"),
-  sort: z.enum(["newest", "oldest", "largest", "smallest", "delete_date"]).default("newest"),
+  filter: z.enum(["all", "active", "trash", "auto_delete", "never_delete", "expiring_soon", "expired", "favorites", "recent"]).default("all"),
+  sort: z.enum(["newest", "oldest", "largest", "smallest", "delete_date", "name"]).default("newest"),
   search: z.string().trim().max(100).optional().default(""),
 });
 
