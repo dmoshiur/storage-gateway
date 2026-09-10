@@ -22,8 +22,9 @@ interface NewCredential {
   keySecret: string;
 }
 
-/** Public bridge origin shown in the copyable snippets. Set NEXT_PUBLIC_BRIDGE_URL to the deployed bridge origin. */
-const bridgeUrl = (process.env.NEXT_PUBLIC_BRIDGE_URL ?? "https://bridge.your-domain.example").replace(/\/+$/, "");
+/** Public bridge origin shown in the copyable snippets. Set NEXT_PUBLIC_BRIDGE_URL to the deployed FastAPI bridge origin. */
+const DEFAULT_BRIDGE_URL = "https://bridge.your-domain.example";
+const bridgeUrl = (process.env.NEXT_PUBLIC_BRIDGE_URL ?? DEFAULT_BRIDGE_URL).replace(/\/+$/, "");
 
 function apiError(caught: unknown, fallback: string): string {
   return caught instanceof ClientApiError ? caught.message : fallback;
@@ -158,6 +159,19 @@ export function ApiManagement() {
       </header>
 
       {error && <Notice type="error">{error}</Notice>}
+
+      {bridgeUrl !== DEFAULT_BRIDGE_URL ? (
+        <Notice type="info">
+          Integration endpoint: <code className="font-mono text-xs">POST {bridgeUrl}/api/v1/storage/upload</code>.{" "}
+          <strong>This must be the FastAPI bridge origin, not the Next.js gateway origin.</strong> If it points to the
+          gateway, integrations receive a 404 HTML page.
+        </Notice>
+      ) : (
+        <Notice type="warning">
+          <strong>NEXT_PUBLIC_BRIDGE_URL is not set in this build.</strong> The snippets below use the placeholder{" "}
+          {bridgeUrl}. Set it to the deployed FastAPI bridge origin before sharing credentials with gramunnayan.com.
+        </Notice>
+      )}
 
       {newCredential && (
         <Notice type="warning">

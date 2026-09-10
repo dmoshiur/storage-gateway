@@ -79,6 +79,23 @@ gramunnayan.com (server)
    returns `{ file, url }` where `url` is a short-lived signed PDF URL for
    visitors.
 
+### Troubleshooting — `POST /api/v1/storage/upload` returns HTTP 404 HTML
+
+If the upload sends `POST https://<gateway-host>/api/v1/storage/upload` and
+receives a **404 with an HTML/`/_next/static/...` body**, the request is
+hitting the **Next.js gateway**, not the **FastAPI bridge**.
+
+- `st.thamjj13.top` resolves to a Vercel deployment (`*.vercel-dns-*.com`),
+  which is the Next.js gateway, not the FastAPI bridge.
+- The gateway intentionally has **no** `/api/v1/storage/upload` route. That path
+  exists only on the FastAPI bridge (`fastapi/app/main.py`, `UPLOAD_PATH`).
+- Fix the integration origin, not the gateway: set `AM_STORAGE_BRIDGE_URL` on
+  the gramunnayan.com server (and `NEXT_PUBLIC_BRIDGE_URL` / `BRIDGE_URL` on the
+  gateway) to the deployed **FastAPI** bridge origin. Verify it with
+  `GET <bridge-origin>/health`; the response includes `"bridge": "ready"`.
+- The gateway now returns a JSON `BRIDGE_ENDPOINT_NOT_AT_GATEWAY` error for
+  `/api/v1/*` so this misconfiguration is easy to identify in integration logs.
+
 See [`fastapi/README.md`](fastapi/README.md) for deployment, environment
 variables, and the full endpoint reference. The gateway-internal bridge routes
 (`POST /api/internal/bridge/verify-key`, `POST /api/internal/bridge/files`) are

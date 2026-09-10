@@ -67,6 +67,12 @@ integration modes:
    (the secret is then stored AES-256-GCM encrypted so HMACs can be verified
    without persisting plaintext). Revocation takes effect on the next request.
 
+   > **`POST /api/v1/storage/upload` is owned by the FastAPI bridge, not by
+   > this Next.js gateway.** Calling it on the gateway origin will not upload
+   > anything; the gateway returns a JSON 404
+   > (`BRIDGE_ENDPOINT_NOT_AT_GATEWAY`). Point `AM_STORAGE_BRIDGE_URL`,
+   > `NEXT_PUBLIC_BRIDGE_URL`, and `BRIDGE_URL` at the bridge origin.
+
 2. **Direct read-only gateway access** from the NGO server's own backend with:
 
    ```http

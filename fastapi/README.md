@@ -155,6 +155,34 @@ with the signed URL.
 
 ## Behavior notes
 
+### Troubleshooting: Next.js 404 HTML on `POST /api/v1/storage/upload`
+
+A 404 response containing `<!DOCTYPE html>` / `/_next/static/...` means the
+request reached the **Next.js gateway (Vercel)** instead of this **FastAPI
+bridge**.
+
+`POST /api/v1/storage/upload` is a bridge route (defined in `app/main.py` as
+`UPLOAD_PATH`) and is **not** implemented by the gateway. The gateway serves
+`/api/internal/bridge/...`, `/api/files`, `/api/storage`, etc. A custom domain
+pointing to Vercel (e.g. `https://st.thamjj13.top`, CNAME to a
+`*.vercel-dns-*.com` host) will always return the gateway's 404 page for this
+path unless the FastAPI bridge is running behind a separate origin.
+
+To resolve the integration:
+
+1. Deploy/start this FastAPI bridge on its own host (`uvicorn main:app --host
+   0.0.0.0 --port 8000 --workers 4`).
+2. Set `NEXT_PUBLIC_BRIDGE_URL` / `BRIDGE_URL` on the gateway and
+   `AM_STORAGE_BRIDGE_URL` on the NGO website server to that bridge origin (for
+   example `https://bridge.example.org`), not to the gateway host.
+3. Confirm with `GET <bridge-origin>/health` — it must return
+   `{"status":"ok","bridge":"ready",...}`.
+4. Re-run the upload call against `<bridge-origin>/api/v1/storage/upload`.
+
+The gateway now answers calls to `/api/v1/*` with a JSON 404
+(`BRIDGE_ENDPOINT_NOT_AT_GATEWAY`) rather than an HTML page, which makes this
+misconfiguration visible in client logs.
+
 - Errors use the gateway envelope: `{"success": false, "error": {"code", "message"}, "requestId"}`.
 - Every request gets an id (`X-Request-Id`), a structured access log line, and a
   per-IP rate limit. Successful credential checks refresh `lastUsedAt` and
