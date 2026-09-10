@@ -57,20 +57,23 @@ export async function POST(request: Request) {
 
     try {
       const expiresInSeconds = Math.min(20 * 60, Math.max(5 * 60, settings.signedUrlExpirySeconds));
-      // Direct browser-to-Blob upload: bytes never transit the Next.js server.
-      // This now uses issueSignedToken + presignUrl which is OIDC-compatible
-      // (storeId + VERCEL_OIDC_TOKEN). For full OIDC client flow, frontend
-      // should use /api/blob/upload via uploadPresigned, but we keep this
-      // URL for backward compat and return pathname for the new flow.
-      const uploadUrl = await getStorageService().getSignedUploadUrl(file.storagePath, {
-        expiresInSeconds,
-        contentType: document.mimeType,
-        contentLength: file.size,
-        metadata: {},
-      });
+
+      // Legacy flow: mint a server-side presigned PUT URL here. The dashboard
+      // now uses the OIDC client flow (uploadPresigned -> /api/blob/upload)
+      // and sends directToStorage: true, which skips this extra Vercel API
+      // roundtrip entirely — one fewer network call that could stall init.
+      let uploadUrl: string | null = null;
+      if (!input.directToStorage) {
+        uploadUrl = await getStorageService().getSignedUploadUrl(file.storagePath, {
+          expiresInSeconds,
+          contentType: document.mimeType,
+          contentLength: file.size,
+          metadata: {},
+        });
+      }
       return success({
         file: serializeFile(file),
-        // Expose pathname for OIDC presigned flow (uploadPresigned needs it)
+        // Storage pathname the client uploads to via /api/blob/upload.
         pathname: file.storagePath,
         uploadUrl,
         uploadMethod: "PUT",

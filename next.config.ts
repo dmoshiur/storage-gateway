@@ -1,8 +1,16 @@
 import type { NextConfig } from "next";
 
 // Vercel Blob object hosts (private stores included) + Firebase Auth endpoints.
+//
+// CRITICAL for direct-to-storage uploads: the @vercel/blob client
+// (`upload`/`uploadPresigned`) does NOT upload to *.blob.vercel-storage.com —
+// it PUTs to the Blob control-plane API at https://vercel.com/api/blob.
+// If "https://vercel.com" is missing from connect-src, the browser blocks the
+// PUT (TypeError "Failed to fetch") and the SDK retries with exponential
+// backoff for ~17 minutes, which surfaces as "Uploading… 0%" forever.
 const connectSources = [
   "'self'",
+  "https://vercel.com",
   "https://identitytoolkit.googleapis.com",
   "https://securetoken.googleapis.com",
   "https://www.googleapis.com",

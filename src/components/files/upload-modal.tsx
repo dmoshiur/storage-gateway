@@ -24,28 +24,129 @@ interface QueueItem {
 const ACCEPT = ".pdf,.doc,.docx,.txt,.ppt,.pptx,application/pdf";
 const SUPPORTED_NAME = /\.(pdf|doc|docx|txt|ppt|pptx)$/i;
 
+/**
+ * Guard rails that make a wedged upload impossible.
+ *
+ * The @vercel/blob client has NO built-in timeouts and its token fetch ignores
+ * `abortSignal`; on failure it retries 10x with exponential backoff (~17 min).
+ * That combination is what produced the "Uploading… 0%" forever hang. We
+ * therefore race the SDK promise against three guards:
+ *   - stall watchdog: no progress callback for 45s -> abort + fail
+ *   - hard deadline : 10 minutes total -> abort + fail
+ *   - CSP detector  : browser reports connect-src blocking of the Blob API
+ *                     -> abort + fail immediately with an actionable message
+ */
+const UPLOAD_STALL_MS = 45_000;
+const UPLOAD_HARD_TIMEOUT_MS = 10 * 60_000;
+const WATCHDOG_POLL_MS = 5_000;
+const BLOB_API_PATTERN = /vercel\.com|blob\.vercel-storage\.com/;
+
 async function sha256Hex(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
   const digest = await crypto.subtle.digest("SHA-256", buffer);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+/** Maps any failure to a message a human can act on — never a silent hang. */
+function uploadErrorMessage(error: unknown): string {
+  if (error instanceof ClientApiError) return error.message;
+  const raw = error instanceof Error ? error.message : String(error);
+  if (/aborted|cancelled/i.test(raw)) return "Upload cancelled.";
+  if (raw.includes("Failed to retrieve the presigned URL")) {
+    return "The server could not issue an upload token (/api/blob/upload). Check the server logs and the Blob store configuration, then retry.";
+  }
+  if (/Failed to fetch|Network request failed|network error|Load failed/i.test(raw)) {
+    return "The direct upload to Vercel Blob was blocked by the browser or network. Ensure connect-src allows https://vercel.com in the Content-Security-Policy and that vercel.com is reachable.";
+  }
+  return raw || "Upload failed.";
+}
+
+interface GuardedUploadParams {
+  file: File;
+  pathname: string;
+  clientPayload: string;
+  controller: AbortController;
+  onProgress: (percentage: number) => void;
+}
+
 /**
- * OIDC-compatible upload using Vercel Blob presigned URLs.
- *
- * Previous implementation used raw XMLHttpRequest PUT to a presigned URL
- * generated via issueSignedToken+presignUrl. That flow broke under OIDC-only
- * deployments because:
- * 1. handleUpload requires BLOB_READ_WRITE_TOKEN and fails with OIDC
- * 2. Direct XHR PUT to presigned URL surfaces as "Network error" on CORS/preflight
- * 3. Missing handleUploadPresigned route that works with OIDC + BLOB_WEBHOOK_PUBLIC_KEY
- *
- * Fixed flow (Vercel recommended for OIDC):
- * - POST /api/files/upload/init -> creates Firestore file record, returns pathname (pdfs/YYYY/MM/<uuid>.ext)
- * - uploadPresigned(pathname, file, { handleUploadUrl: '/api/blob/upload', ... }) 
- *   -> calls /api/blob/upload which uses handleUploadPresigned + issueSignedToken (OIDC compatible)
- *   -> browser PUTs directly to Blob via presigned URL (no token in flight)
- * - POST /api/files/[id]/complete -> validates PDF header/trailer and activates file
+ * Runs `uploadPresigned` with stall/hard-timeout/CSP guards.
+ * The returned promise ALWAYS settles within the guard bounds.
+ */
+async function uploadPresignedGuarded(params: GuardedUploadParams): Promise<void> {
+  const { controller } = params;
+  let lastActivityAt = Date.now();
+  let cspBlockedUrl: string | null = null;
+
+  const onViolation = (event: SecurityPolicyViolationEvent) => {
+    if (event.effectiveDirective === "connect-src" && BLOB_API_PATTERN.test(event.blockedURI)) {
+      cspBlockedUrl = event.blockedURI;
+      controller.abort(); // stop the SDK's silent retry loop immediately
+    }
+  };
+
+  let pollId = 0;
+  let hardTimerId = 0;
+  document.addEventListener("securitypolicyviolation", onViolation);
+  try {
+    const work = uploadPresigned(params.pathname, params.file, {
+      access: "private",
+      handleUploadUrl: "/api/blob/upload",
+      clientPayload: params.clientPayload,
+      abortSignal: controller.signal,
+      onUploadProgress: ({ percentage }) => {
+        lastActivityAt = Date.now();
+        params.onProgress(Math.round(percentage));
+      },
+    });
+
+    // Rejects from the first guard that trips; cleared when `work` settles.
+    const guards = new Promise<never>((_, reject) => {
+      pollId = window.setInterval(() => {
+        if (cspBlockedUrl) {
+          controller.abort();
+          reject(
+            new Error(
+              `Upload blocked by the browser Content-Security-Policy (${cspBlockedUrl}). Add the Vercel Blob API host to connect-src in next.config.ts.`,
+            ),
+          );
+          return;
+        }
+        if (Date.now() - lastActivityAt > UPLOAD_STALL_MS) {
+          controller.abort();
+          reject(new Error(`Upload stalled: no progress for ${Math.round(UPLOAD_STALL_MS / 1000)} seconds. Check your connection and retry.`));
+        }
+      }, WATCHDOG_POLL_MS);
+      hardTimerId = window.setTimeout(() => {
+        controller.abort();
+        reject(new Error("Upload timed out. Please retry with a smaller file or a more stable connection."));
+      }, UPLOAD_HARD_TIMEOUT_MS);
+    });
+
+    await Promise.race([work, guards]);
+    // `work` won: the PUT succeeded (or threw) within the guard bounds.
+  } finally {
+    window.clearInterval(pollId);
+    window.clearTimeout(hardTimerId);
+    document.removeEventListener("securitypolicyviolation", onViolation);
+  }
+}
+
+/**
+ * OIDC-compatible direct-to-storage upload (fixed flow):
+ *  1. POST /api/files/upload/init — creates the Firestore file record and
+ *     returns the storage pathname (pdfs/YYYY/MM/<uuid>.ext).
+ *  2. uploadPresigned(pathname, file) — POSTs /api/blob/upload, which signs a
+ *     put-scoped delegation with `issueSignedToken` (works with OIDC
+ *     BLOB_STORE_ID + VERCEL_OIDC_TOKEN or a static read-write token), then
+ *     PUTs the bytes straight to https://vercel.com/api/blob. The browser
+ *     must be allowed to reach that host (CSP connect-src).
+ *  3. POST /api/files/[id]/complete — server-side PDF header/trailer
+ *     validation and activation.
  */
 
 export function UploadModal({ onClose }: { onClose: () => void }) {
@@ -74,8 +175,6 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
       const init = await apiFetch<{
         file: SerializedFile;
         pathname: string;
-        uploadUrl: string;
-        uploadHeaders: Record<string, string>;
         duplicateOf: { id: string; originalName: string } | null;
       }>("/api/files/upload/init", {
         method: "POST",
@@ -84,6 +183,7 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
           size: item.file.size,
           mimeType: item.file.type || undefined,
           category,
+          directToStorage: true,
           ...(contentHash ? { contentHash } : {}),
         }),
         signal: controller.signal,
@@ -92,16 +192,14 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
       if (controller.signal.aborted) return;
       patch(item.key, { status: "uploading", progress: 0, duplicateOf: init.duplicateOf, fileId: init.file.id });
 
-      // OIDC-compatible client upload via @vercel/blob/client
-      // Uses /api/blob/upload which implements handleUploadPresigned
-      // Works with BOTH BLOB_READ_WRITE_TOKEN and OIDC (BLOB_STORE_ID + VERCEL_OIDC_TOKEN)
-      await uploadPresigned(init.pathname, item.file, {
-        access: "private",
-        handleUploadUrl: "/api/blob/upload",
+      // Direct browser-to-Blob upload, guarded so it can never hang at 0%.
+      await uploadPresignedGuarded({
+        file: item.file,
+        pathname: init.pathname,
         clientPayload: JSON.stringify({ fileId: init.file.id, originalName: item.file.name }),
-        abortSignal: controller.signal,
-        onUploadProgress: ({ percentage }) => {
-          patch(item.key, { progress: Math.round(percentage) });
+        controller,
+        onProgress: (percentage) => {
+          patch(item.key, { progress: percentage });
         },
       });
 
@@ -113,25 +211,14 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
       );
       patch(item.key, { status: "done", progress: 100, duplicateOf: completed.duplicateOf ?? init.duplicateOf });
     } catch (error) {
-      if (controller.signal.aborted) {
-        patch(item.key, { status: "error", error: "Upload cancelled." });
+      if (isAbortError(error) || controller.signal.aborted) {
+        // Aborts come from the user (cancel) or a guard tripping; guards embed
+        // their own message in the rejection, so only plain aborts say "cancelled".
+        const message = error instanceof Error && !isAbortError(error) ? uploadErrorMessage(error) : "Upload cancelled.";
+        patch(item.key, { status: "error", error: message });
         return;
       }
-      // @vercel/blob/client throws BlobError with message "Failed to retrieve the client token" when
-      // handleUpload (not presigned) is used with OIDC. Our new route uses handleUploadPresigned so this
-      // should not happen, but we surface the message clearly.
-      const message =
-        error instanceof ClientApiError
-          ? error.message
-          : error instanceof Error
-            ? error.message.includes("Failed to retrieve the client token")
-              ? "Upload token generation failed (OIDC requires handleUploadPresigned). Please retry."
-              : error.message
-            : "Upload failed.";
-      patch(item.key, {
-        status: "error",
-        error: message,
-      });
+      patch(item.key, { status: "error", error: uploadErrorMessage(error) });
     } finally {
       aborters.current.delete(item.key);
     }
