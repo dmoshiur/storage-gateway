@@ -11,6 +11,7 @@ export const runtime = "nodejs";
 const createSchema = z.object({
   name: z.string().trim().min(1).max(80),
   description: z.string().trim().max(200).optional(),
+  color: z.string().trim().min(1).max(24).optional(),
 });
 
 export async function GET(request: Request) {

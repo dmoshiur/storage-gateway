@@ -1,10 +1,19 @@
-import { FileManager } from "@/components/files/file-manager";
-import { getSessionActorFromCookies } from "@/lib/auth/session";
-import { can } from "@/lib/auth/authorization";
+"use client";
 
-export const metadata = { title: "Files" };
+import { Suspense } from "react";
+import { FilesView } from "@/components/files/files-view";
+import { PageSkeleton } from "@/components/ui/feedback";
 
-export default async function FilesPage() {
-  const actor = await getSessionActorFromCookies();
-  return <FileManager canManage={actor ? can(actor.role, "manage_files") : false} />;
+export default function FilesPage() {
+  return (
+    <Suspense fallback={<PageSkeleton />}>
+      <FilesView
+        mode="files"
+        title="Files"
+        description="Browse, preview, and manage every document in the library."
+        emptyTitle="No PDF files yet"
+        emptyDescription="Upload your organization's first document to get started."
+      />
+    </Suspense>
+  );
 }

@@ -1,74 +1,302 @@
 "use client";
 
-import { useState } from "react";
-import { Download, Edit3, Eye, FileText, LoaderCircle, RotateCcw, Trash2 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Notice } from "@/components/ui/notice";
-import { apiFetch, ClientApiError } from "@/lib/client/api";
+import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  Columns3,
+  Eye,
+  Heart,
+  MoreHorizontal,
+} from "lucide-react";
+import { Dropdown } from "@/components/ui/overlays";
+import { Pagination } from "@/components/ui/data";
+import { EmptyState } from "@/components/ui/feedback";
 import type { SerializedFile } from "@/types/file";
-import { formatBytes, formatDate, retentionLabel } from "@/utils/format";
+import { formatBytes, formatDate, formatRelative, truncateMiddle } from "@/utils/format";
+import { RetentionLabel, StatusBadge, displayName, useFileActions, FileTypeIcon, FILE_ACTION_ICONS } from "@/components/files/file-helpers";
 
-export function FileTable({ files, trash = false, canManage = true, loading, onEdit, onTrash, onRestore, onPermanentDelete }: {
-  files: SerializedFile[];
-  trash?: boolean;
-  canManage?: boolean;
-  loading?: boolean;
-  onEdit: (file: SerializedFile) => void;
-  onTrash: (file: SerializedFile) => void;
-  onRestore: (file: SerializedFile) => void;
-  onPermanentDelete: (file: SerializedFile) => void;
+export type FileSortKey = "name" | "size" | "createdAt" | "deleteAt";
+
+export interface ColumnDef {
+  id: string;
+  label: string;
+  defaultVisible: boolean;
+}
+
+export const FILE_COLUMNS: ColumnDef[] = [
+  { id: "category", label: "Category", defaultVisible: true },
+  { id: "size", label: "Size", defaultVisible: true },
+  { id: "uploader", label: "Uploaded by", defaultVisible: true },
+  { id: "uploaded", label: "Uploaded", defaultVisible: true },
+  { id: "retention", label: "Retention", defaultVisible: true },
+  { id: "status", label: "Status", defaultVisible: true },
+];
+
+function SortHeader({
+  label,
+  sortKey,
+  sort,
+  onSort,
+}: {
+  label: string;
+  sortKey: FileSortKey;
+  sort: { key: FileSortKey; dir: "asc" | "desc" };
+  onSort: (key: FileSortKey) => void;
 }) {
-  const [openingId, setOpeningId] = useState<string | null>(null);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
+  return (
+    <button
+      type="button"
+      onClick={() => onSort(sortKey)}
+      className="inline-flex items-center gap-1 uppercase hover:text-ink"
+      aria-label={`Sort by ${label}`}
+    >
+      {label}
+      {sort.key !== sortKey && <ArrowUpDown className="h-3 w-3 opacity-50" />}
+      {sort.key === sortKey && sort.dir === "asc" && <ArrowUp className="h-3 w-3" />}
+      {sort.key === sortKey && sort.dir === "desc" && <ArrowDown className="h-3 w-3" />}
+    </button>
+  );
+}
 
-  async function open(file: SerializedFile, disposition: "inline" | "attachment") {
-    if (openingId) return;
-    // Opening a blank tab synchronously preserves the user gesture; it is filled only after authorization succeeds.
-    const target = window.open("", "_blank");
-    if (target) {
-      target.opener = null;
-      target.document.title = "Preparing private document…";
-    }
-    setOpeningId(file.id);
-    setDownloadError(null);
-    try {
-      const { url } = await apiFetch<{ url: string }>(`/api/files/${file.id}/download?disposition=${disposition}`);
-      if (target && !target.closed) target.location.replace(url);
-      else window.open(`/api/files/${file.id}/download?disposition=${disposition}&redirect=true`, "_blank", "noopener");
-    } catch (caught) {
-      target?.close();
-      setDownloadError(caught instanceof ClientApiError ? caught.message : "A temporary document link could not be generated. Please try again.");
-    } finally {
-      setOpeningId(null);
-    }
+export function FileTable({
+  files,
+  selected,
+  onToggleSelect,
+  onToggleAll,
+  allSelected,
+  sort,
+  onSort,
+  visibleColumns,
+  onOpen,
+  onDetails,
+  onEdit,
+  hasPrev,
+  hasNext,
+  onPrev,
+  onNext,
+  pageLabel,
+  empty,
+  refresh,
+  trashView,
+}: {
+  files: SerializedFile[];
+  selected: Set<string>;
+  onToggleSelect: (id: string) => void;
+  onToggleAll: () => void;
+  allSelected: boolean;
+  sort: { key: FileSortKey; dir: "asc" | "desc" };
+  onSort: (key: FileSortKey) => void;
+  visibleColumns: Set<string>;
+  onOpen: (file: SerializedFile) => void;
+  onDetails: (file: SerializedFile) => void;
+  onEdit: (file: SerializedFile) => void;
+  hasPrev: boolean;
+  hasNext: boolean;
+  onPrev: () => void;
+  onNext: () => void;
+  pageLabel: string;
+  empty: { title: string; description: string };
+  refresh: () => void;
+  trashView?: boolean;
+}) {
+  const actions = useFileActions(refresh);
+
+  const show = (id: string) => visibleColumns.has(id);
+
+  if (files.length === 0) {
+    return (
+      <div className="tbl-wrap">
+        <EmptyState title={empty.title} description={empty.description} />
+      </div>
+    );
   }
 
-  if (!loading && files.length === 0) return <EmptyState icon={trash ? Trash2 : FileText} title={trash ? "Trash is empty" : "No matching documents"} detail={trash ? "Files moved to Trash can be restored here until their scheduled permanent deletion." : "Try changing the filters or upload a new document."} />;
-
-  return <>
-    {downloadError && <div className="mb-4"><Notice type="error">{downloadError}</Notice></div>}
-    <div className="hidden overflow-x-auto rounded-xl border border-slate-200 md:block">
-      <table className="min-w-full divide-y divide-slate-200">
-        <thead className="bg-slate-50"><tr><th className="table-heading px-4 py-3">Document</th><th className="table-heading px-4 py-3">Category</th><th className="table-heading px-4 py-3">Size</th><th className="table-heading px-4 py-3">{trash ? "Deleted" : "Uploaded"}</th>{trash && <th className="table-heading px-4 py-3">Reason</th>}<th className="table-heading px-4 py-3">{trash ? "Permanent deletion" : "Delete date"}</th><th className="table-heading px-4 py-3">Status</th><th className="table-heading px-4 py-3"><span className="sr-only">Actions</span></th></tr></thead>
-        <tbody className="divide-y divide-slate-100 bg-white">{files.map((file) => <tr key={file.id} className="align-top hover:bg-slate-50"><td className="max-w-xs px-4 py-4"><FileIdentity file={file} /></td><td className="px-4 py-4 text-sm text-slate-600">{file.category || "—"}</td><td className="whitespace-nowrap px-4 py-4 text-sm text-slate-600">{formatBytes(file.size)}</td><td className="whitespace-nowrap px-4 py-4 text-sm text-slate-600">{formatDate(trash ? file.deletedAt : file.createdAt)}</td>{trash && <td className="px-4 py-4 text-sm text-slate-600">{deletionReasonLabel(file.deletionReason)}</td>}<td className="whitespace-nowrap px-4 py-4 text-sm text-slate-600">{trash ? formatDate(file.permanentDeleteAt) : file.autoDeleteEnabled ? formatDate(file.deleteAt) : "Never"}</td><td className="px-4 py-4"><Badge status={file.status}>{file.status === "active" ? (file.autoDeleteEnabled ? `Active · ${retentionLabel(file.retentionType)}` : "Active") : file.status}</Badge></td><td className="px-4 py-3"><DesktopActions file={file} trash={trash} canManage={canManage} opening={openingId === file.id} onOpen={open} onEdit={onEdit} onTrash={onTrash} onRestore={onRestore} onPermanentDelete={onPermanentDelete} /></td></tr>)}</tbody>
-      </table>
+  return (
+    <div className="tbl-wrap">
+      <div className="hidden overflow-x-auto lg:block">
+        <table className="tbl min-w-[900px]">
+          <thead>
+            <tr>
+              <th className="w-10">
+                <input
+                  type="checkbox"
+                  aria-label="Select all files on this page"
+                  className="field-check"
+                  checked={allSelected}
+                  onChange={onToggleAll}
+                />
+              </th>
+              <th><SortHeader label="Name" sortKey="name" sort={sort} onSort={onSort} /></th>
+              {show("category") && <th>Category</th>}
+              {show("size") && <th><SortHeader label="Size" sortKey="size" sort={sort} onSort={onSort} /></th>}
+              {show("uploader") && <th>Uploaded by</th>}
+              {show("uploaded") && <th><SortHeader label={trashView ? "Deleted" : "Uploaded"} sortKey="createdAt" sort={sort} onSort={onSort} /></th>}
+              {show("retention") && !trashView && <th><SortHeader label="Retention" sortKey="deleteAt" sort={sort} onSort={onSort} /></th>}
+              {show("retention") && trashView && <th>Permanently deleted</th>}
+              {show("status") && <th>Status</th>}
+              <th className="w-20 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {files.map((file) => {
+              const PreviewIcon = FILE_ACTION_ICONS.preview;
+              const DownloadIcon = FILE_ACTION_ICONS.download;
+              const LinkIcon = FILE_ACTION_ICONS.copyLink;
+              const FavoriteIcon = FILE_ACTION_ICONS.favorite;
+              const EditIcon = FILE_ACTION_ICONS.edit;
+              const TrashIcon = FILE_ACTION_ICONS.trash;
+              const RestoreIcon = FILE_ACTION_ICONS.restore;
+              return (
+                <tr key={file.id} data-selected={selected.has(file.id)}>
+                  <td>
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${displayName(file)}`}
+                      className="field-check"
+                      checked={selected.has(file.id)}
+                      onChange={() => onToggleSelect(file.id)}
+                    />
+                  </td>
+                  <td>
+                    <div className="flex min-w-0 items-center gap-2.5">
+                      <FileTypeIcon extension={file.extension} />
+                      <div className="min-w-0">
+                        <button
+                          type="button"
+                          onClick={() => onOpen(file)}
+                          title={displayName(file)}
+                          className="block max-w-[280px] truncate text-left text-[13px] font-medium text-ink hover:underline"
+                        >
+                          {truncateMiddle(displayName(file), 44)}
+                        </button>
+                        <p className="truncate font-mono text-[11px] text-ink-faint" title={file.originalName}>
+                          {truncateMiddle(file.originalName, 44)}
+                        </p>
+                      </div>
+                      {file.isFavorite && <Heart className="h-3.5 w-3.5 shrink-0 fill-amber-400 text-amber-400" aria-label="Favorite" />}
+                    </div>
+                  </td>
+                  {show("category") && (
+                    <td>{file.category ? <span className="badge-neutral">{file.category}</span> : <span className="text-ink-faint">—</span>}</td>
+                  )}
+                  {show("size") && <td className="tnum whitespace-nowrap">{formatBytes(file.size)}</td>}
+                  {show("uploader") && (
+                    <td className="max-w-[160px] truncate text-[13px] text-ink-muted" title={file.uploadedBy}>
+                      {file.uploadedBy.startsWith("bridge:") ? "Website API" : file.uploadedBy}
+                    </td>
+                  )}
+                  {show("uploaded") && (
+                    <td className="whitespace-nowrap text-[13px] text-ink-muted" title={formatDate(trashView ? file.deletedAt : file.createdAt)}>
+                      {formatRelative(trashView ? file.deletedAt : file.createdAt)}
+                    </td>
+                  )}
+                  {show("retention") && !trashView && (
+                    <td className="text-[13px] text-ink-muted"><RetentionLabel file={file} /></td>
+                  )}
+                  {show("retention") && trashView && (
+                    <td className="whitespace-nowrap text-[13px] text-ink-muted">{formatRelative(file.permanentDeleteAt)}</td>
+                  )}
+                  {show("status") && <td><StatusBadge file={file} /></td>}
+                  <td className="text-right">
+                    <div className="flex items-center justify-end gap-0.5">
+                      {!trashView && (
+                        <button type="button" aria-label={`Preview ${displayName(file)}`} title="Preview" onClick={() => onOpen(file)} className="btn-icon h-7 w-7">
+                          <Eye className="h-4 w-4" />
+                        </button>
+                      )}
+                      <Dropdown
+                        label={`Actions for ${displayName(file)}`}
+                        trigger={
+                          <span role="button" tabIndex={0} aria-label={`Actions for ${displayName(file)}`} className="btn-icon h-7 w-7">
+                            <MoreHorizontal className="h-4 w-4" />
+                          </span>
+                        }
+                      >
+                        {!trashView && (
+                          <>
+                            <button type="button" className="menu-item" onClick={() => onOpen(file)}><PreviewIcon className="h-4 w-4" /> Open preview</button>
+                            <button type="button" className="menu-item" onClick={() => actions.download(file)}><DownloadIcon className="h-4 w-4" /> Download</button>
+                            <button type="button" className="menu-item" onClick={() => actions.copyLink(file)}><LinkIcon className="h-4 w-4" /> Copy temporary link</button>
+                            <button type="button" className="menu-item" onClick={() => onDetails(file)}><Eye className="h-4 w-4" /> View details</button>
+                            <div className="menu-sep" />
+                          </>
+                        )}
+                        {actions.canManage && !trashView && (
+                          <>
+                            <button type="button" className="menu-item" onClick={() => actions.toggleFavorite(file)}>
+                              <FavoriteIcon className="h-4 w-4" /> {file.isFavorite ? "Remove favorite" : "Add to favorites"}
+                            </button>
+                            <button type="button" className="menu-item" onClick={() => onEdit(file)}><EditIcon className="h-4 w-4" /> Edit metadata</button>
+                            <button type="button" className="menu-item" onClick={() => onEdit(file)}><EditIcon className="h-4 w-4" /> Change retention</button>
+                            <div className="menu-sep" />
+                            <button type="button" className="menu-item" onClick={() => actions.trash(file)}><TrashIcon className="h-4 w-4" /> Move to Trash</button>
+                          </>
+                        )}
+                        {trashView && actions.canManage && (
+                          <button type="button" className="menu-item" onClick={() => actions.restore(file)}><RestoreIcon className="h-4 w-4" /> Restore</button>
+                        )}
+                        {actions.canDestroy && (
+                          <button type="button" className="menu-item" data-danger="true" onClick={() => actions.destroy(file)}><TrashIcon className="h-4 w-4" /> Delete permanently</button>
+                        )}
+                      </Dropdown>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {/* mobile cards */}
+      <div className="divide-y divide-line lg:hidden">
+        {files.map((file) => (
+          <div key={`m-${file.id}`} className="flex items-center gap-3 p-3 lg:hidden">
+            <input
+              type="checkbox"
+              aria-label={`Select ${displayName(file)}`}
+              className="field-check"
+              checked={selected.has(file.id)}
+              onChange={() => onToggleSelect(file.id)}
+            />
+            <button type="button" className="flex min-w-0 flex-1 items-center gap-2.5 text-left" onClick={() => onDetails(file)}>
+              <FileTypeIcon extension={file.extension} />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[13px] font-medium text-ink">{displayName(file)}</span>
+                <span className="tnum block text-xs text-ink-faint">{formatBytes(file.size)} · {formatRelative(file.createdAt)}</span>
+              </span>
+            </button>
+            <StatusBadge file={file} />
+          </div>
+        ))}
+      </div>
+      <Pagination hasPrev={hasPrev} hasNext={hasNext} onPrev={onPrev} onNext={onNext} label={pageLabel} />
     </div>
-    <div className="space-y-3 md:hidden">{files.map((file) => <article key={file.id} className="rounded-xl border border-slate-200 bg-white p-4"><div className="flex gap-3"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-red-50 text-red-700"><FileText className="h-4 w-4" /></span><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold text-ink-900">{file.title || file.originalName}</p><p className="mt-0.5 truncate text-xs text-slate-500">{file.originalName}</p><div className="mt-2"><Badge status={file.status}>{file.status === "active" ? "Active" : file.status}</Badge></div></div></div><dl className="mt-4 grid grid-cols-2 gap-x-3 gap-y-3 text-sm"><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Category</dt><dd className="mt-0.5 text-slate-700">{file.category || "—"}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Size</dt><dd className="mt-0.5 text-slate-700">{formatBytes(file.size)}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">{trash ? "Delete on" : "Retention"}</dt><dd className="mt-0.5 text-slate-700">{trash ? formatDate(file.permanentDeleteAt) : file.autoDeleteEnabled ? formatDate(file.deleteAt) : "Never"}</dd></div><div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">{trash ? "Deleted" : "Uploaded"}</dt><dd className="mt-0.5 text-slate-700">{formatDate(trash ? file.deletedAt : file.createdAt)}</dd></div>{trash && <div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Reason</dt><dd className="mt-0.5 text-slate-700">{deletionReasonLabel(file.deletionReason)}</dd></div>}</dl><div className="mt-4 flex flex-wrap gap-2 border-t border-slate-100 pt-3"><MobileActions file={file} trash={trash} canManage={canManage} opening={openingId === file.id} onOpen={open} onEdit={onEdit} onTrash={onTrash} onRestore={onRestore} onPermanentDelete={onPermanentDelete} /></div></article>)}</div>
-  </>;
+  );
 }
 
-function FileIdentity({ file }: { file: SerializedFile }) {
-  return <div className="flex gap-3"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-red-50 text-red-700"><FileText className="h-4 w-4" /></span><div className="min-w-0"><p className="truncate text-sm font-bold text-ink-900" title={file.title || file.originalName}>{file.title || file.originalName}</p><p className="mt-0.5 truncate text-xs text-slate-500" title={file.originalName}>{file.originalName}</p>{file.tags.length > 0 && <p className="mt-1 truncate text-xs text-slate-500">{file.tags.join(", ")}</p>}</div></div>;
+export function ColumnToggle({ visible, onToggle }: { visible: Set<string>; onToggle: (id: string) => void }) {
+  return (
+    <Dropdown
+      label="Toggle columns"
+      trigger={
+        <span role="button" tabIndex={0} className="btn-secondary btn-sm" aria-label="Toggle columns">
+          <Columns3 className="h-4 w-4" /> <span className="hidden sm:inline">Columns</span>
+        </span>
+      }
+    >
+      <p className="menu-label">Visible columns</p>
+      {FILE_COLUMNS.map((column) => (
+        <label key={column.id} className="menu-item cursor-pointer gap-2.5" onClick={(event) => event.stopPropagation()}>
+          <input
+            type="checkbox"
+            className="field-check"
+            checked={visible.has(column.id)}
+            onChange={() => onToggle(column.id)}
+          />
+          {column.label}
+        </label>
+      ))}
+    </Dropdown>
+  );
 }
-
-interface ActionProps { file: SerializedFile; trash: boolean; canManage: boolean; opening: boolean; onOpen: (file: SerializedFile, disposition: "inline" | "attachment") => void; onEdit: (file: SerializedFile) => void; onTrash: (file: SerializedFile) => void; onRestore: (file: SerializedFile) => void; onPermanentDelete: (file: SerializedFile) => void; }
-function DesktopActions({ file, trash, canManage, opening, onOpen, onEdit, onTrash, onRestore, onPermanentDelete }: ActionProps) {
-  return <div className="flex justify-end gap-1">{trash ? <>{canManage && <IconButton label={`Restore ${file.originalName}`} onClick={() => onRestore(file)}><RotateCcw className="h-4 w-4" /></IconButton>}{canManage && <IconButton label={`Permanently delete ${file.originalName}`} danger onClick={() => onPermanentDelete(file)}><Trash2 className="h-4 w-4" /></IconButton>}</> : <><IconButton label={`View ${file.originalName}`} disabled={opening} onClick={() => void onOpen(file, "inline")}>{opening ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Eye className="h-4 w-4" />}</IconButton><IconButton label={`Download ${file.originalName}`} disabled={opening} onClick={() => void onOpen(file, "attachment")}><Download className="h-4 w-4" /></IconButton>{canManage && <IconButton label={`Edit ${file.originalName}`} onClick={() => onEdit(file)}><Edit3 className="h-4 w-4" /></IconButton>}{canManage && <IconButton label={`Move ${file.originalName} to Trash`} danger onClick={() => onTrash(file)}><Trash2 className="h-4 w-4" /></IconButton>}</>}</div>;
-}
-function MobileActions({ file, trash, canManage, opening, onOpen, onEdit, onTrash, onRestore, onPermanentDelete }: ActionProps) {
-  return trash ? <>{canManage && <Button variant="secondary" className="flex-1" onClick={() => onRestore(file)}><RotateCcw className="h-4 w-4" />Restore</Button>}{canManage && <Button variant="danger" className="flex-1" onClick={() => onPermanentDelete(file)}><Trash2 className="h-4 w-4" />Delete</Button>}</> : <><Button variant="secondary" disabled={opening} onClick={() => void onOpen(file, "inline")}>{opening ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Eye className="h-4 w-4" />}View</Button><Button variant="secondary" disabled={opening} onClick={() => void onOpen(file, "attachment")}><Download className="h-4 w-4" />Download</Button>{canManage && <Button variant="secondary" onClick={() => onEdit(file)}><Edit3 className="h-4 w-4" />Edit</Button>}{canManage && <Button variant="danger" onClick={() => onTrash(file)}><Trash2 className="h-4 w-4" />Trash</Button>}</>;
-}
-function deletionReasonLabel(reason: SerializedFile["deletionReason"]): string { if (reason === "auto_retention") return "Automatic retention"; if (reason === "manual") return "Manual action"; if (reason === "cleanup") return "Cleanup"; return "—"; }
-function IconButton({ label, children, onClick, danger = false, disabled = false }: { label: string; children: React.ReactNode; onClick: () => void; danger?: boolean; disabled?: boolean }) { return <button type="button" disabled={disabled} aria-label={label} title={label} onClick={onClick} className={danger ? "grid h-9 w-9 place-items-center rounded-lg text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:text-slate-400" : "grid h-9 w-9 place-items-center rounded-lg text-ink-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-400"}>{children}</button>; }

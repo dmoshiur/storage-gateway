@@ -1,10 +1,19 @@
-import { FileManager } from "@/components/files/file-manager";
-import { getSessionActorFromCookies } from "@/lib/auth/session";
-import { can } from "@/lib/auth/authorization";
+"use client";
 
-export const metadata = { title: "Trash" };
+import { Suspense } from "react";
+import { FilesView } from "@/components/files/files-view";
+import { PageSkeleton } from "@/components/ui/feedback";
 
-export default async function TrashPage() {
-  const actor = await getSessionActorFromCookies();
-  return <FileManager trash canManage={actor ? can(actor.role, "manage_files") : false} />;
+export default function TrashPage() {
+  return (
+    <Suspense fallback={<PageSkeleton />}>
+      <FilesView
+        mode="trash"
+        title="Trash"
+        description="Files are permanently deleted after the Trash retention period."
+        emptyTitle="Trash is empty"
+        emptyDescription="Deleted files will appear here until they expire."
+      />
+    </Suspense>
+  );
 }

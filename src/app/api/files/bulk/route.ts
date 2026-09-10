@@ -13,7 +13,6 @@ import {
   moveFileToTrash,
   restoreFileFromTrash,
   revertPermanentDeletion,
-  serializeFile,
   setFileFavorite,
   updateFileDetails,
 } from "@/lib/firestore/files";

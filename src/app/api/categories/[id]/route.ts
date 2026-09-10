@@ -12,6 +12,7 @@ export const runtime = "nodejs";
 const updateSchema = z.object({
   name: z.string().trim().min(1).max(80).optional(),
   description: z.string().trim().max(200).optional(),
+  color: z.string().trim().min(1).max(24).optional(),
 }).refine((data) => Object.keys(data).length > 0, "Provide at least one field to update.");
 
 function routeId(value: string): string {

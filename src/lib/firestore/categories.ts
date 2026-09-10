@@ -20,6 +20,7 @@ export interface CategoryRecord {
   id: string;
   name: string;
   description: string;
+  color: string;
   fileCount: number;
   createdAt: string;
   updatedAt: string;
@@ -30,6 +31,7 @@ function serialize(id: string, data: Record<string, unknown>): CategoryRecord {
     id,
     name: String(data.name ?? ""),
     description: typeof data.description === "string" ? data.description : "",
+    color: typeof data.color === "string" && data.color ? data.color : "slate",
     fileCount: typeof data.fileCount === "number" ? data.fileCount : 0,
     createdAt: asDate(data.createdAt)?.toISOString() ?? new Date(0).toISOString(),
     updatedAt: asDate(data.updatedAt)?.toISOString() ?? new Date(0).toISOString(),
@@ -57,12 +59,13 @@ async function seedDefaultCategories(): Promise<void> {
   await batch.commit();
 }
 
-export async function createCategory(input: { name: string; description?: string }): Promise<CategoryRecord> {
+export async function createCategory(input: { name: string; description?: string; color?: string }): Promise<CategoryRecord> {
   const name = input.name.trim().slice(0, 80);
   const now = new Date();
   const ref = await getAdminDb().collection(CATEGORIES).add({
     name,
     description: input.description?.trim().slice(0, 200) ?? "",
+    color: input.color?.trim().slice(0, 24) || "slate",
     fileCount: 0,
     createdAt: now,
     updatedAt: now,
@@ -71,10 +74,11 @@ export async function createCategory(input: { name: string; description?: string
   return serialize(ref.id, snapshot.data() ?? {});
 }
 
-export async function updateCategory(id: string, patch: { name?: string; description?: string }): Promise<CategoryRecord> {
+export async function updateCategory(id: string, patch: { name?: string; description?: string; color?: string }): Promise<CategoryRecord> {
   const updates: Record<string, unknown> = { updatedAt: new Date() };
   if (patch.name !== undefined) updates.name = patch.name.trim().slice(0, 80);
   if (patch.description !== undefined) updates.description = patch.description.trim().slice(0, 200);
+  if (patch.color !== undefined) updates.color = patch.color.trim().slice(0, 24) || "slate";
   const ref = getAdminDb().collection(CATEGORIES).doc(id);
   await ref.set(updates, { merge: true });
   const snapshot = await ref.get();

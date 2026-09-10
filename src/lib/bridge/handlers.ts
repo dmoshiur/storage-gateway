@@ -10,7 +10,6 @@ import { DIRECT_UPLOAD_GUIDANCE_BYTES, getBridgeMaxDocumentBytes, getBridgeSigne
 import {
   bridgeUploader,
   buildBridgeObjectKey,
-  buildBridgeStagingKey,
   cleanBridgeFilename,
   logBridgeUploadAttempt,
   parseBridgeTags,

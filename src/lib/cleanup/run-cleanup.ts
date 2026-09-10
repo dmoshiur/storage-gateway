@@ -23,7 +23,6 @@ import {
 import { getSettings } from "@/lib/firestore/settings";
 import { getStorageStats } from "@/lib/firestore/stats";
 import { createNotificationSafe, pruneNotifications } from "@/lib/firestore/notifications";
-import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
 import { logger } from "@/lib/logging/logger";
 import { isDueForAutomaticCleanup, isDueForTrashExpiry, isStaleUpload } from "@/lib/cleanup/eligibility";
 import { getStorageService } from "@/lib/storage";
