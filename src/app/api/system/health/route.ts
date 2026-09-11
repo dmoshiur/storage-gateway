@@ -7,10 +7,16 @@ import { describeAdminCredentialIdentity, getAdminDb } from "@/lib/firebase/admi
 import { getEffectiveFirebaseWebConfig } from "@/lib/firebase/runtime-store";
 import { getStorageService } from "@/lib/storage";
 import { getCleanupStatus } from "@/lib/firestore/cleanup-lock";
+import { withTimeout } from "@/lib/firestore/with-timeout";
 import { version as appVersion } from "../../../../../package.json";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/** Ceiling for the diagnostics Firestore read; the page must still render. */
+const DATABASE_PROBE_TIMEOUT_MS = 8_000;
+/** Same ceiling for the auxiliary cleanup-lock / runtime-store reads. */
+const AUX_PROBE_TIMEOUT_MS = 8_000;
 
 interface DatabaseProbe {
   connected: boolean;
@@ -35,7 +41,13 @@ interface DatabaseProbe {
 async function probeDatabase(): Promise<DatabaseProbe> {
   const startedAt = Date.now();
   try {
-    const snapshot = await getAdminDb().collection("files").limit(1).get();
+    // Bounded: the Admin SDK retries an unreachable endpoint for minutes, and a
+    // hung probe would leave the whole diagnostics page unrendered.
+    const snapshot = await withTimeout(
+      getAdminDb().collection("files").limit(1).get(),
+      DATABASE_PROBE_TIMEOUT_MS,
+      "system/health:files-probe",
+    );
     return { connected: true, latencyMs: Date.now() - startedAt, collection: "files", documentsRead: snapshot.size };
   } catch (error) {
     const failure = describeFailure(error, "firestore");
@@ -60,11 +72,14 @@ export async function GET(request: Request) {
   return apiRoute(request, async (requestId) => {
     const actor = await requireAdminRequest(request, "read_files");
     enforceRateLimit(`system:health:${actor.uid}`, 30);
+    // Every probe is bounded: an unreachable Firestore makes the Admin SDK retry
+    // for minutes, and an unbounded read here would leave the diagnostics page
+    // itself hanging — exactly when an operator needs it.
     const [database, blob, cleanup, firebaseWeb] = await Promise.all([
       probeDatabase(),
       getStorageService().healthCheck(),
-      getCleanupStatus().catch(() => null),
-      getEffectiveFirebaseWebConfig().catch(() => null),
+      withTimeout(getCleanupStatus(), AUX_PROBE_TIMEOUT_MS, "system/health:cleanup-lock").catch(() => null),
+      withTimeout(getEffectiveFirebaseWebConfig(), AUX_PROBE_TIMEOUT_MS, "system/health:runtime-store").catch(() => null),
     ]);
     const firebaseWebStatus = !firebaseWeb || !firebaseWeb.configured
       ? "degraded"
