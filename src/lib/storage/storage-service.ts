@@ -40,11 +40,57 @@ export interface SignedUploadOptions {
 /** Result of a lightweight store connectivity probe (never throws). */
 export interface StorageHealth {
   reachable: boolean;
+  /** False when required environment configuration is absent. */
+  configured?: boolean;
   latencyMs: number;
   checkedAt: string;
-  /** Present when the store is not connected or the probe failed. */
+  /**
+   * Exact failure reason. Never a bare "unavailable": when configuration is
+   * missing this lists the exact environment variables, and when the store
+   * rejects the request it carries the real Vercel Blob error name/message.
+   */
   error?: string | null;
+  /** Machine-readable failure classification, e.g. `BLOB_NOT_CONFIGURED`. */
+  errorCode?: string | null;
+  /** Original SDK error class name, e.g. `BlobAccessError`. */
+  errorName?: string | null;
+  /** Operator hint that explains how to fix the failure. */
+  hint?: string | null;
   authMode?: "token" | "oidc" | "none";
+  /** Blob store id the deployment is configured against (safe to display). */
+  storeId?: string | null;
+  /** Exact environment variable names that are missing, empty when usable. */
+  missingConfiguration?: string[];
+  /** Non-fatal configuration problems worth showing to the operator. */
+  warnings?: string[];
+  /** Per-variable presence report (names and booleans only, never values). */
+  variables?: Array<{
+    name: string;
+    present: boolean;
+    required: boolean;
+    role: string;
+    source: string;
+    guidance: string;
+  }>;
+  /** Non-secret detail about the probe that ran (e.g. list result). */
+  probe?: { operation: "list"; objectsVisible: number } | null;
+  /** Result of the optional write/read/delete round-trip (`?deep=true`). */
+  deepCheck?: StorageDeepCheck | null;
+}
+
+export interface StorageDeepCheckStep {
+  step: "put" | "head" | "get" | "delete";
+  ok: boolean;
+  latencyMs: number;
+  /** Real error name/message when the step failed. */
+  error?: string | null;
+}
+
+export interface StorageDeepCheck {
+  ok: boolean;
+  pathname: string;
+  steps: StorageDeepCheckStep[];
+  cleanedUp: boolean;
 }
 
 /**
@@ -80,4 +126,9 @@ export interface StorageService {
   getSignedDeleteUrl(pathname: string, expiresInSeconds: number): Promise<string>;
   /** Store connectivity probe. Resolves (never rejects) so dashboards can always render. */
   healthCheck(): Promise<StorageHealth>;
+  /**
+   * Real round-trip probe: writes a tiny object, reads its metadata and bytes,
+   * then deletes it. Proves the credential can actually write to the store.
+   */
+  deepHealthCheck(): Promise<StorageHealth>;
 }

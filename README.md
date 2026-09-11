@@ -35,10 +35,14 @@ There is no external identity provider and no client-side database SDK. Authenti
 
 Requirements: Node.js 20.9+, a Turso database (or any libSQL/SQLite URL), and a private Vercel Blob store.
 
+**Blob authentication.** Newly connected Blob stores authenticate with Vercel OIDC: connecting the store to the project adds `BLOB_STORE_ID` and `BLOB_WEBHOOK_PUBLIC_KEY`, and the runtime delivers a short-lived OIDC token on every request. Nothing else needs to be stored, and `VERCEL_OIDC_TOKEN` must never be created by hand. If the connected store still issues long-lived credentials, `BLOB_READ_WRITE_TOKEN` also works and takes precedence. Verify the wiring with `GET /api/blob/health` (add `?deep=true` for a put/head/get/delete round trip); it reports the exact missing variable and the real Blob error code instead of a generic message. See [docs/VERCEL-BLOB.md](docs/VERCEL-BLOB.md) for dashboard/CLI checks and the production PDF verification script.
+
 ```bash
 npm install
 cp .env.example .env.local
-# Configure TURSO_DATABASE_URL / TURSO_AUTH_TOKEN and BLOB_READ_WRITE_TOKEN in .env.local
+# Configure TURSO_DATABASE_URL / TURSO_AUTH_TOKEN in .env.local
+# Blob: create a private Vercel Blob store and connect it to the project,
+# or set BLOB_READ_WRITE_TOKEN / pull OIDC credentials with `vercel env pull`
 npm run db:migrate
 npm run dev
 ```
@@ -57,9 +61,10 @@ Open `http://localhost:3000/admin/login` and sign in with the created administra
 | `DIRECT_DATABASE_URL` | migrations | Optional direct Turso URL for `npm run db:migrate` |
 | `INITIAL_ADMIN_EMAIL` | first setup | Bootstrap administrator email |
 | `INITIAL_ADMIN_PASSWORD` | first setup | Bootstrap administrator password, minimum 12 characters |
-| `BLOB_READ_WRITE_TOKEN` | yes | Server-only Vercel Private Blob token |
-| `BLOB_STORE_ID` | OIDC deployments | Private Blob store identifier |
-| `VERCEL_OIDC_TOKEN` | OIDC deployments | Server-only Vercel OIDC credential |
+| `BLOB_STORE_ID` | on Vercel | Private Blob store identifier, injected by Vercel when the store is connected to the project (OIDC authentication) |
+| `BLOB_WEBHOOK_PUBLIC_KEY` | on Vercel | Injected by Vercel with `BLOB_STORE_ID`; lets the presigned upload callback be verified |
+| `BLOB_READ_WRITE_TOKEN` | optional fallback | Static server-only Blob credential. Not required on Vercel, where OIDC is used; useful for local development against a real store |
+| `VERCEL_OIDC_TOKEN` | never set manually | Issued per request by the Vercel runtime (`x-vercel-oidc-token`) and refreshed by the Blob SDK. Only `vercel env pull` writes it locally |
 | `CRON_SECRET` | cron | High-entropy secret for `/api/cron/cleanup` |
 | `NEXT_PUBLIC_APP_URL` | recommended | Canonical application URL for operational links |
 
@@ -125,6 +130,8 @@ npm run typecheck
 npm run lint
 npm test
 npm run build
+# End-to-end Blob verification against a real deployment (uploads a real PDF)
+node scripts/verify-blob.mjs --base-url https://<host> --email <admin> --password <password>
 ```
 
 For a deployment smoke test, create an administrator through the migration, create a viewer and editor in `/admin/users`, sign in as each account, verify role restrictions, upload a known-safe PDF, preview/download it, edit metadata, move it to Trash, restore it, permanently delete it, and run the cleanup route with a controlled test record. Confirm Turso contains the metadata and the private Blob store contains the bytes while no permanent public URL is exposed.

@@ -30,14 +30,22 @@ async function probeDatabase(): Promise<DatabaseProbe> {
 
 async function probeBlob(): Promise<StorageHealth> {
   try {
+    // `healthCheck` never throws for expected Blob failures: it reports the
+    // resolved auth mode, the exact missing configuration, or the real SDK
+    // error. This catch only guards against an unexpected defect.
     return await getStorageService().healthCheck();
   } catch (error) {
-    logger.error("Vercel Blob health probe failed", { error: error instanceof Error ? error.message : "unknown" });
+    const name = error instanceof Error && error.name ? error.name : "Error";
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error("Vercel Blob health probe threw unexpectedly", { errorName: name, error: message });
     return {
       reachable: false,
+      configured: false,
       latencyMs: 0,
       checkedAt: new Date().toISOString(),
-      error: "Vercel Blob health probe failed.",
+      error: `Vercel Blob health probe failed (${name}): ${message}`,
+      errorCode: "BLOB_PROBE_THREW",
+      errorName: name,
       authMode: "none",
     };
   }
@@ -71,12 +79,17 @@ export async function GET(request: Request) {
       },
       storage: {
         provider: "vercel-private-blob",
-        configured: blob.authMode === "token" || blob.authMode === "oidc",
+        configured: blob.configured ?? (blob.authMode === "token" || blob.authMode === "oidc"),
         status: blob.reachable ? "healthy" : "degraded",
         reachable: blob.reachable,
         latencyMs: blob.latencyMs,
         authMode: blob.authMode,
+        storeId: blob.storeId ?? null,
+        ...(blob.missingConfiguration?.length ? { missingConfiguration: blob.missingConfiguration } : {}),
+        ...(blob.errorCode ? { errorCode: blob.errorCode } : {}),
+        ...(blob.errorName ? { errorName: blob.errorName } : {}),
         ...(blob.error ? { error: blob.error } : {}),
+        ...(blob.hint ? { hint: blob.hint } : {}),
       },
       version: appVersion,
       checkedAt,

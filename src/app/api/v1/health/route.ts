@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { apiRoute } from "@/lib/api/route";
 import { bridgePreflightResponse, withBridgeCors } from "@/lib/bridge/upload";
 import { readBlobStoreConfig } from "@/lib/env";
+
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { getClientIp } from "@/lib/security/request-auth";
 import { version as appVersion } from "../../../../../package.json";
@@ -9,8 +10,15 @@ import { version as appVersion } from "../../../../../package.json";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function blobConfigured(): boolean {
-  return readBlobStoreConfig().ok;
+/**
+ * `BLOB_STORE_ID` (Vercel OIDC) or `BLOB_READ_WRITE_TOKEN` is a complete
+ * configuration. The OIDC token is delivered per request by Vercel, so it is
+ * NOT required in `process.env` — requiring it here reported a healthy
+ * production store as unconfigured.
+ */
+function blobConfiguration(): { blobConfigured: boolean; blobAuthMode: "token" | "oidc" | "none"; missingBlobConfig: string[] } {
+  const config = readBlobStoreConfig();
+  return { blobConfigured: config.ok, blobAuthMode: config.authMode, missingBlobConfig: config.missing };
 }
 
 /**
@@ -30,7 +38,7 @@ export async function GET(request: Request) {
         mode: "embedded",
         version: appVersion,
         auth: "bearer|dual-token",
-        blobConfigured: blobConfigured(),
+        ...blobConfiguration(),
       },
       { status: 200, headers: { "X-Request-Id": requestId, "Cache-Control": "no-store" } },
     );

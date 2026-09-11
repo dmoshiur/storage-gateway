@@ -5,6 +5,7 @@ import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { getStorageStats } from "@/lib/db/stats";
 import { getApiRequestTotals } from "@/lib/db/api-metrics";
 import { getStorageService } from "@/lib/storage/index";
+import { describeBlobStoreConfiguration } from "@/lib/env";
 import type { StorageHealth } from "@/lib/storage/storage-service";
 import { toServiceFailure } from "@/lib/api/failures";
 import { logger } from "@/lib/logging/logger";
@@ -20,12 +21,17 @@ async function checkBlobConnectivity(): Promise<StorageHealth> {
   try {
     return await getStorageService().healthCheck();
   } catch (error) {
-    logger.error("Vercel Blob health check failed", { error: error instanceof Error ? error.message : "unknown" });
+    const name = error instanceof Error && error.name ? error.name : "Error";
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error("Vercel Blob health check threw unexpectedly", { errorName: name, error: message });
     return {
       reachable: false,
+      configured: false,
       latencyMs: 0,
       checkedAt: new Date().toISOString(),
-      error: "Vercel Blob health check failed.",
+      error: `Vercel Blob health check failed (${name}): ${message}`,
+      errorCode: "BLOB_PROBE_THREW",
+      errorName: name,
       authMode: "none",
     };
   }
@@ -56,6 +62,17 @@ export async function GET(request: Request) {
         requestId,
       });
     }
-    return success({ stats, blob, apiRequests }, requestId);
+    return success(
+      {
+        stats,
+        blob,
+        // Names-and-booleans-only view of the Blob environment so the dashboard
+        // can show exactly which variable is missing instead of a generic
+        // "unavailable" message. No credential values are ever serialized.
+        configuration: describeBlobStoreConfiguration(),
+        apiRequests,
+      },
+      requestId,
+    );
   }, { route: "storage" });
 }
