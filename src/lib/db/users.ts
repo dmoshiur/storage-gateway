@@ -1,7 +1,7 @@
 import "server-only";
 
 import { ApiError } from "@/lib/api/errors";
-import { query, toDate } from "@/lib/db/client";
+import { query, toDate, SQL_NOW } from "@/lib/db/client";
 import { hashPassword, generateTemporaryPassword } from "@/lib/auth/password";
 import type { Role, SessionActor } from "@/types/auth";
 import { isValidRole } from "@/lib/auth/authorization";
@@ -66,7 +66,7 @@ export async function getUserById(uid: string): Promise<AuthUserRow | null> {
 
 export async function recordAdminLogin(actor: SessionActor): Promise<void> {
   await query(
-    `UPDATE users SET last_login_at = now(), updated_at = now() WHERE id = $1 AND deleted_at IS NULL`,
+    `UPDATE users SET last_login_at = ${SQL_NOW}, updated_at = ${SQL_NOW} WHERE id = $1 AND deleted_at IS NULL`,
     [actor.uid],
   );
 }
@@ -96,7 +96,7 @@ export async function inviteUser(input: {
   try {
     const result = await query(
       `INSERT INTO users(email, password_hash, display_name, role, email_verified_at)
-       VALUES ($1, $2, $3, $4, now())
+       VALUES ($1, $2, $3, $4, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
        RETURNING id, email, display_name, role, disabled, created_at, last_login_at`,
       [email, hashPassword(password), input.displayName?.trim() || null, input.role],
     );
@@ -112,13 +112,13 @@ export async function inviteUser(input: {
 
 export async function setUserRole(uid: string, nextRole: Role): Promise<void> {
   if (!isValidRole(nextRole)) throw new ApiError(400, "INVALID_ROLE", "The selected role is invalid.");
-  const result = await query(`UPDATE users SET role = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL`, [uid, nextRole]);
+  const result = await query(`UPDATE users SET role = $2, updated_at = ${SQL_NOW} WHERE id = $1 AND deleted_at IS NULL`, [uid, nextRole]);
   if (!result.rowCount) throw new ApiError(404, "USER_NOT_FOUND", "The user was not found.");
   await revokeUserSessions(uid);
 }
 
 export async function setUserDisabled(uid: string, disabled: boolean): Promise<void> {
-  const result = await query(`UPDATE users SET disabled = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL`, [uid, disabled]);
+  const result = await query(`UPDATE users SET disabled = $2, updated_at = ${SQL_NOW} WHERE id = $1 AND deleted_at IS NULL`, [uid, disabled]);
   if (!result.rowCount) throw new ApiError(404, "USER_NOT_FOUND", "The user was not found.");
   if (disabled) await revokeUserSessions(uid);
 }
@@ -127,19 +127,19 @@ export async function resetUserPassword(uid: string, password?: string): Promise
   const temporaryPassword = password ? undefined : generateTemporaryPassword();
   const next = password ?? temporaryPassword!;
   if (next.length < 12) throw new ApiError(400, "WEAK_PASSWORD", "Passwords must be at least 12 characters long.");
-  const result = await query(`UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL`, [uid, hashPassword(next)]);
+  const result = await query(`UPDATE users SET password_hash = $2, updated_at = ${SQL_NOW} WHERE id = $1 AND deleted_at IS NULL`, [uid, hashPassword(next)]);
   if (!result.rowCount) throw new ApiError(404, "USER_NOT_FOUND", "The user was not found.");
   await revokeUserSessions(uid);
   return temporaryPassword ? { temporaryPassword } : {};
 }
 
 export async function revokeUserSessions(uid: string): Promise<number> {
-  const result = await query(`UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, [uid]);
+  const result = await query(`UPDATE sessions SET revoked_at = ${SQL_NOW} WHERE user_id = $1 AND revoked_at IS NULL`, [uid]);
   return result.rowCount ?? 0;
 }
 
 export async function deleteUser(uid: string): Promise<void> {
-  const result = await query(`UPDATE users SET deleted_at = now(), disabled = true, updated_at = now() WHERE id = $1 AND deleted_at IS NULL`, [uid]);
+  const result = await query(`UPDATE users SET deleted_at = ${SQL_NOW}, disabled = true, updated_at = ${SQL_NOW} WHERE id = $1 AND deleted_at IS NULL`, [uid]);
   if (!result.rowCount) throw new ApiError(404, "USER_NOT_FOUND", "The user was not found.");
   await revokeUserSessions(uid);
 }
@@ -148,20 +148,22 @@ export async function listUserActivity(uid: string, limit = 100): Promise<unknow
   const result = await query(
     `SELECT id, action, actor_id AS "actorId", actor_email AS "actorEmail", actor_type AS "actorType",
             file_id AS "fileId", file_name AS "fileName", details, request_id AS "requestId", created_at AS "createdAt"
-     FROM audit_logs WHERE actor_id = $1 OR details->>'userId' = $1 ORDER BY created_at DESC LIMIT $2`,
+     FROM audit_logs WHERE actor_id = $1 OR json_extract(details, '$.userId') = $1 ORDER BY created_at DESC LIMIT $2`,
     [uid, Math.min(Math.max(Math.trunc(limit), 1), 500)],
   );
   return result.rows;
 }
 
 export async function pruneExpiredAuthData(): Promise<number> {
-  const sessions = await query(`DELETE FROM sessions WHERE expires_at < now() OR (revoked_at IS NOT NULL AND revoked_at < now() - interval '30 days')`);
-  const resetTokens = await query(`DELETE FROM password_reset_tokens WHERE expires_at < now() OR used_at < now() - interval '30 days'`);
+  const nowIso = new Date().toISOString();
+  const staleBefore = new Date(Date.now() - 30 * 86_400_000).toISOString();
+  const sessions = await query(`DELETE FROM sessions WHERE expires_at < $1 OR (revoked_at IS NOT NULL AND revoked_at < $2)`, [nowIso, staleBefore]);
+  const resetTokens = await query(`DELETE FROM password_reset_tokens WHERE expires_at < $1 OR used_at < $2`, [nowIso, staleBefore]);
   return (sessions.rowCount ?? 0) + (resetTokens.rowCount ?? 0);
 }
 
 /** Used by bootstrap checks without exposing a password. */
 export async function countUsers(): Promise<number> {
-  const result = await query<{ count: string }>(`SELECT count(*)::text AS count FROM users WHERE deleted_at IS NULL`);
+  const result = await query<{ count: string }>(`SELECT count(*) AS count FROM users WHERE deleted_at IS NULL`);
   return Number(result.rows[0]?.count ?? 0);
 }

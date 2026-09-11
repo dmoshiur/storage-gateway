@@ -70,7 +70,7 @@ export async function updateSettings(settings: AppSettings, actorUid: string): P
   await withTransaction(async (client) => {
     await client.query(
       `INSERT INTO system_settings(key, value, updated_at, updated_by)
-       VALUES ($1, $2::jsonb, $3, $4)
+       VALUES ($1, $2, $3, $4)
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by`,
       [SETTINGS_KEY, JSON.stringify(next), updatedAt, actorUid],
     );

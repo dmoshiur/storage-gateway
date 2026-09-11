@@ -26,6 +26,9 @@ const contentSecurityPolicy = [
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  // Keep the libSQL native driver outside the serverless bundle so its
+  // prebuilt binaries are traced correctly on Vercel.
+  serverExternalPackages: ["@libsql/client", "libsql"],
   async headers() {
     return [{
       source: "/(.*)",

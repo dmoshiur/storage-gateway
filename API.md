@@ -34,7 +34,7 @@ Same-origin JSON body:
 { "email": "admin@example.org", "password": "a-long-password" }
 ```
 
-On success the server creates a PostgreSQL session and sets a secure, HTTP-only, SameSite=Lax `storage_gateway_session` cookie. The session expires after seven days and is checked against account status, expiry, and revocation on every protected request.
+On success the server creates a Turso session and sets a secure, HTTP-only, SameSite=Lax `storage_gateway_session` cookie. The session expires after seven days and is checked against account status, expiry, and revocation on every protected request.
 
 ### Logout and current actor
 
@@ -47,7 +47,7 @@ On success the server creates a PostgreSQL session and sets a secure, HTTP-only,
 - `POST /api/auth/password/reset` with `{ "token": "...", "newPassword": "..." }`.
 - `POST /api/auth/password/change` with `{ "currentPassword": "...", "newPassword": "..." }`.
 
-Reset tokens are random, SHA-256 hashed in PostgreSQL, single-use, and expire in one hour. In local development a token may be returned for testing; production delivery is handled by the organization's own SMTP/notification process.
+Reset tokens are random, SHA-256 hashed in Turso, single-use, and expire in one hour. In local development a token may be returned for testing; production delivery is handled by the organization's own SMTP/notification process.
 
 ## Roles and users
 
@@ -78,7 +78,7 @@ When an administrator omits a password, the server generates a temporary passwor
 Cookie-authenticated endpoints:
 
 - `GET /api/files` — list active files with search, category, retention, status, sort, and cursor filters.
-- `POST /api/files/upload/init` — validate metadata and create a pending PostgreSQL metadata row.
+- `POST /api/files/upload/init` — validate metadata and create a pending Turso metadata row.
 - `POST /api/files/:id/complete` — verify the private Blob object and activate the row.
 - `GET /api/files/:id` — metadata.
 - `PATCH /api/files/:id` — title, description, category, tags, and retention.
@@ -132,7 +132,7 @@ A missing scope returns `403 INSUFFICIENT_SCOPE`; an invalid, expired, or revoke
 
 ## Rate limiting, audit, and status codes
 
-Login, password reset, user management, uploads, and API-key operations are rate limited. API requests and upload attempts are persisted in PostgreSQL with request IDs. Security-sensitive actions write immutable-style audit rows. Common statuses are:
+Login, password reset, user management, uploads, and API-key operations are rate limited. API requests and upload attempts are persisted in Turso with request IDs. Security-sensitive actions write immutable-style audit rows. Common statuses are:
 
 - `200` successful read/update
 - `201` created user, key, or file
@@ -144,8 +144,8 @@ Login, password reset, user management, uploads, and API-key operations are rate
 - `429` rate limit exceeded
 - `500` unexpected application failure
 - `502` private Blob operation failed
-- `503` PostgreSQL, Blob, or configuration dependency unavailable
+- `503` Turso, Blob, or configuration dependency unavailable
 
 ## Retention and cron
 
-`GET /api/cron/cleanup` requires `Authorization: Bearer <CRON_SECRET>` and is scheduled daily by `vercel.json`. It uses PostgreSQL locking, per-file failure isolation, private Blob deletion, and audit records. Administrators may call `POST /api/cleanup` for a manual run; the cron secret is never exposed to the browser.
+`GET /api/cron/cleanup` requires `Authorization: Bearer <CRON_SECRET>` and is scheduled daily by `vercel.json`. It uses Turso locking, per-file failure isolation, private Blob deletion, and audit records. Administrators may call `POST /api/cleanup` for a manual run; the cron secret is never exposed to the browser.

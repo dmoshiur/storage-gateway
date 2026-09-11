@@ -2,16 +2,16 @@
 
 The system has two production data planes:
 
-1. PostgreSQL: users, sessions, roles, file metadata, categories, tags, API-key digests, audit logs, retention rules, notifications, settings, and cleanup state.
+1. Turso: users, sessions, roles, file metadata, categories, tags, API-key digests, audit logs, retention rules, notifications, settings, and cleanup state.
 2. Vercel Private Blob: PDF and supported document bytes under random server-generated paths.
 
-Use PostgreSQL point-in-time recovery or encrypted scheduled dumps. The database backup must include `files.storage_path`, content hashes, lifecycle status, and retention timestamps so objects can be reconciled.
+Use Turso Cloud point-in-time recovery or encrypted scheduled dumps (`turso db export` / platform snapshots). The database backup must include `files.storage_path`, content hashes, lifecycle status, and retention timestamps so objects can be reconciled.
 
 Use the private Blob store's supported export/replication process for document bytes. Never make the store public while taking a backup and never export credentials into application logs.
 
 ## Recovery order
 
-1. Restore PostgreSQL and run any pending migrations.
+1. Restore Turso and run any pending migrations.
 2. Restore or reconnect the private Blob store.
 3. Reconcile active and Trash file rows against the Blob inventory using server-side credentials.
 4. Mark missing objects as failed and create audit records; do not silently recreate metadata.
