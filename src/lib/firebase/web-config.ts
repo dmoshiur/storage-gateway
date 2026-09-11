@@ -9,7 +9,7 @@ import { z } from "zod";
  * so both sides enforce the exact same contract.
  *
  * Complete flow:
- *   Settings paste box → parseFirebaseWebConfigJson() → PUT /api/firebase-config
+ *   Settings paste box → parseFirebaseWebConfig() → PUT /api/firebase-config
  *   → Firestore `settings/firebase` → GET /api/firebase-config (public,
  *   cached) → client runtime init → Auth → Firestore. Build-time
  *   NEXT_PUBLIC_FIREBASE_* variables remain the fallback and the production
@@ -17,8 +17,8 @@ import { z } from "zod";
  *   surfaced as "redeploy required" with a copy-paste env snippet.
  *
  * Security: the Web App config holds public identifiers (apiKey, projectId,
- * …) — never Admin/service-account private keys. `parseFirebaseWebConfigJson`
- * explicitly rejects service-account JSON pasted by mistake. Nothing here
+ * …) — never Admin/service-account private keys. `parseFirebaseWebConfig`
+ * explicitly rejects service-account keys pasted by mistake. Nothing here
  * logs values; use `maskFirebaseValue` / `maskedFirebaseConfig` for display.
  */
 
@@ -121,7 +121,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 export function validateFirebaseWebConfig(value: unknown): ParsedFirebaseWebConfig {
   const record = asRecord(value);
   if (!record) {
-    return failure([{ field: "config", message: "The configuration must be a JSON object, not an array or primitive value." }]);
+    return failure([{ field: "config", message: "The configuration must be an object, not an array or primitive value." }]);
   }
 
   const serviceAccountError = detectServiceAccountKey(record);
@@ -222,39 +222,364 @@ export function validateFirebaseWebConfig(value: unknown): ParsedFirebaseWebConf
   return { ok: true, config, errors: [], warnings, detected };
 }
 
+/* ---------------- tolerant config parsing (JSON + Firebase JS format) ---------------- */
+
 /**
- * Parses pasted text (raw JSON, or a `const firebaseConfig = {...};` snippet)
- * into a validated Firebase Web App config.
+ * Firebase Console → Project settings → “SDK setup and configuration” hands
+ * out the config as a JavaScript object literal — unquoted keys, single or
+ * double quotes, trailing commas — which is NOT strict JSON. The parser
+ * below accepts both strict JSON and that standard Firebase format and
+ * normalizes either one into the same canonical object for validation.
+ *
+ * Safety: this is a hand-written tokenizer with no `eval`/`Function`
+ * execution, so pasted text can never run code. Only flat string-valued
+ * objects are accepted; nested objects/arrays/functions are rejected.
  */
-export function parseFirebaseWebConfigJson(raw: string): ParsedFirebaseWebConfig {
-  const text = raw.trim();
+
+class FirebaseConfigSyntaxError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FirebaseConfigSyntaxError";
+  }
+}
+
+/**
+ * Extracts every top-level balanced `{…}` block from surrounding code (e.g.
+ * a full Firebase console snippet with `import { … }` plus
+ * `const firebaseConfig = {...}; initializeApp(firebaseConfig);`), honoring
+ * strings and comments so braces inside values don't confuse the scan.
+ */
+function extractBalancedObjects(text: string): string[] {
+  const blocks: string[] = [];
+  let blockStart = -1;
+  let depth = 0;
+  let quote: string | null = null;
+  let lineComment = false;
+  let blockComment = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i] as string;
+    const next = text[i + 1] as string | undefined;
+    if (lineComment) {
+      if (ch === "\n") lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (ch === "*" && next === "/") {
+        blockComment = false;
+        i++;
+      }
+      continue;
+    }
+    if (quote) {
+      if (ch === "\\") {
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "/" && next === "/") {
+      lineComment = true;
+      i++;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      blockComment = true;
+      i++;
+      continue;
+    }
+    if (ch === "{") {
+      if (depth === 0) blockStart = i;
+      depth++;
+    } else if (ch === "}") {
+      if (depth > 0) {
+        depth--;
+        if (depth === 0 && blockStart !== -1) {
+          blocks.push(text.slice(blockStart, i + 1));
+          blockStart = -1;
+        }
+      }
+    }
+  }
+  return blocks;
+}
+
+function stripMarkdownFences(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("```")) return trimmed;
+  const lines = trimmed.split("\n");
+  lines.shift();
+  const closing = lines.findIndex((line) => line.trim().startsWith("```"));
+  if (closing >= 0) lines.splice(closing);
+  return lines.join("\n").trim();
+}
+
+/**
+ * Parses one flat object literal with Firebase-style tolerance: unquoted or
+ * quoted keys, single/double/backtick string values with JS escapes,
+ * `//` and `/*…*\/` comments, and trailing commas. Returns a plain record;
+ * throws FirebaseConfigSyntaxError with a human-readable reason otherwise.
+ */
+function parseJsObjectLiteral(source: string): Record<string, unknown> {
+  const record: Record<string, unknown> = {};
+  let i = 0;
+
+  const syntaxError = (message: string): FirebaseConfigSyntaxError => {
+    const context = source.slice(Math.max(0, i - 24), i).replace(/\s+/g, " ").trim();
+    return new FirebaseConfigSyntaxError(context ? `${message} (near “…${context}”)` : message);
+  };
+
+  const skipTrivia = (): void => {
+    while (i < source.length) {
+      const ch = source[i] as string;
+      if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f" || ch === "\v" || ch === "\u00a0" || ch === "\ufeff") {
+        i++;
+        continue;
+      }
+      if (ch === "/" && source[i + 1] === "/") {
+        i += 2;
+        while (i < source.length && source[i] !== "\n") i++;
+        continue;
+      }
+      if (ch === "/" && source[i + 1] === "*") {
+        i += 2;
+        let closed = false;
+        while (i < source.length) {
+          if (source[i] === "*" && source[i + 1] === "/") {
+            i += 2;
+            closed = true;
+            break;
+          }
+          i++;
+        }
+        if (!closed) throw syntaxError("Unterminated block comment");
+        continue;
+      }
+      break;
+    }
+  };
+
+  const parseString = (): string => {
+    const quote = source[i] as string;
+    if (quote !== "'" && quote !== '"' && quote !== "`") throw syntaxError("Expected a string value in quotes");
+    i++;
+    let out = "";
+    while (i < source.length) {
+      const ch = source[i] as string;
+      if (ch === "\\") {
+        const esc = source[i + 1] as string | undefined;
+        if (esc === undefined) throw syntaxError("Unterminated string — a value is missing its closing quote");
+        switch (esc) {
+          case "n": out += "\n"; i += 2; break;
+          case "r": out += "\r"; i += 2; break;
+          case "t": out += "\t"; i += 2; break;
+          case "b": out += "\b"; i += 2; break;
+          case "f": out += "\f"; i += 2; break;
+          case "v": out += "\v"; i += 2; break;
+          case "0": out += "\0"; i += 2; break;
+          case "'": out += "'"; i += 2; break;
+          case '"': out += '"'; i += 2; break;
+          case "`": out += "`"; i += 2; break;
+          case "\\": out += "\\"; i += 2; break;
+          case "/": out += "/"; i += 2; break;
+          case "\n": i += 2; break;
+          case "\r":
+            i += 2;
+            if (source[i] === "\n") i++;
+            break;
+          case "u": {
+            if (source[i + 2] === "{") {
+              const end = source.indexOf("}", i + 3);
+              const hex = end === -1 ? "" : source.slice(i + 3, end);
+              if (end === -1 || !/^[0-9a-fA-F]+$/.test(hex)) throw syntaxError("Invalid unicode escape in a string value");
+              out += String.fromCodePoint(parseInt(hex, 16));
+              i = end + 1;
+            } else {
+              const hex = source.slice(i + 2, i + 6);
+              if (!/^[0-9a-fA-F]{4}$/.test(hex)) throw syntaxError("Invalid unicode escape in a string value");
+              out += String.fromCharCode(parseInt(hex, 16));
+              i += 6;
+            }
+            break;
+          }
+          case "x": {
+            const hex = source.slice(i + 2, i + 4);
+            if (!/^[0-9a-fA-F]{2}$/.test(hex)) throw syntaxError("Invalid escape in a string value");
+            out += String.fromCharCode(parseInt(hex, 16));
+            i += 4;
+            break;
+          }
+          default:
+            // Unknown escapes degrade to the literal character (JS semantics).
+            out += esc;
+            i += 2;
+            break;
+        }
+        continue;
+      }
+      if (ch === quote) {
+        i++;
+        return out;
+      }
+      if ((ch === "\n" || ch === "\r") && quote !== "`") {
+        throw syntaxError("Unterminated string — a value is missing its closing quote");
+      }
+      out += ch;
+      i++;
+    }
+    throw syntaxError("Unterminated string — a value is missing its closing quote");
+  };
+
+  const parseKey = (): string => {
+    const ch = source[i] as string;
+    if (ch === "'" || ch === '"' || ch === "`") return parseString();
+    const match = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(source.slice(i));
+    if (!match) throw syntaxError("Expected a field name");
+    i += match[0].length;
+    return match[0];
+  };
+
+  const parseValue = (): unknown => {
+    const ch = source[i] as string;
+    if (ch === "'" || ch === '"' || ch === "`") return parseString();
+    const rest = source.slice(i);
+    const boundary = (token: string): boolean => {
+      const after = rest[token.length] as string | undefined;
+      return after === undefined || !/[A-Za-z0-9_$]/.test(after);
+    };
+    if (rest.startsWith("true") && boundary("true")) { i += 4; return true; }
+    if (rest.startsWith("false") && boundary("false")) { i += 5; return false; }
+    if (rest.startsWith("null") && boundary("null")) { i += 4; return null; }
+    if (rest.startsWith("undefined") && boundary("undefined")) { i += 9; return undefined; }
+    const numeric = /^-?\d+(\.\d+)?([eE][+-]?\d+)?/.exec(rest);
+    if (numeric) {
+      i += numeric[0].length;
+      return Number(numeric[0]);
+    }
+    if (ch === "{" || ch === "[") {
+      throw syntaxError("Nested objects and arrays are not supported — config values must be strings");
+    }
+    throw syntaxError("Expected a string value in quotes");
+  };
+
+  skipTrivia();
+  if (source[i] !== "{") throw syntaxError("Expected the config to start with “{”");
+  i++;
+  skipTrivia();
+  if (source[i] === "}") {
+    i++;
+    skipTrivia();
+    if (source[i] === ";") i++;
+    skipTrivia();
+    if (i !== source.length) throw syntaxError("Unexpected text after the config object");
+    return record;
+  }
+  for (;;) {
+    skipTrivia();
+    if (i >= source.length) throw syntaxError("Unterminated config — a closing “}” is missing");
+    if (source[i] === "}") {
+      i++;
+      break;
+    }
+    const key = parseKey();
+    skipTrivia();
+    if (source[i] !== ":") throw syntaxError(`Expected “:” after field “${key}”`);
+    i++;
+    skipTrivia();
+    if (i >= source.length) throw syntaxError(`Missing value for field “${key}”`);
+    record[key] = parseValue();
+    skipTrivia();
+    if (i >= source.length) throw syntaxError("Unterminated config — a closing “}” is missing");
+    if (source[i] === ",") {
+      i++;
+      continue;
+    }
+    if (source[i] === "}") {
+      i++;
+      break;
+    }
+    throw syntaxError("Expected “,” or “}” between fields");
+  }
+  skipTrivia();
+  if (source[i] === ";") i++;
+  skipTrivia();
+  if (i !== source.length) throw syntaxError("Unexpected text after the config object");
+  return record;
+}
+
+/**
+ * Parses pasted text into a validated Firebase Web App config.
+ *
+ * Accepts strict JSON, the standard Firebase JavaScript-object format
+ * (unquoted keys, single or double quotes, trailing commas, comments), and
+ * full console snippets (`import …`, `const firebaseConfig = {...};`,
+ * `initializeApp(firebaseConfig)`) — normalizing all of them into one
+ * canonical validated object. Service-account keys are rejected.
+ */
+export function parseFirebaseWebConfig(raw: string): ParsedFirebaseWebConfig {
+  const text = stripMarkdownFences(raw);
   if (!text) {
-    return failure([{ field: "config", message: "Paste your Firebase Web App config JSON to begin." }]);
+    return failure([{ field: "config", message: "Paste your Firebase Web App config to begin." }]);
   }
   const candidates: string[] = [text];
-  // Tolerate `const firebaseConfig = {...};` / `firebaseConfig = {...}` snippets.
+  for (const block of extractBalancedObjects(text)) {
+    if (block !== text && !candidates.includes(block)) candidates.push(block);
+  }
   const firstBrace = text.indexOf("{");
   const lastBrace = text.lastIndexOf("}");
   if (firstBrace >= 0 && lastBrace > firstBrace) {
     const sliced = text.slice(firstBrace, lastBrace + 1);
-    if (sliced !== text) candidates.push(sliced);
+    if (!candidates.includes(sliced)) candidates.push(sliced);
   }
-  let lastError: unknown = null;
+  // Every candidate that parses (strict JSON first, then the standard
+  // Firebase JavaScript-object format) is validated; the first fully valid
+  // config wins, so surrounding code (`import { … }`, initializers) never
+  // shadows the real config block.
+  const parsedResults: ParsedFirebaseWebConfig[] = [];
   for (const candidate of candidates) {
     try {
-      return validateFirebaseWebConfig(JSON.parse(candidate) as unknown);
-    } catch (error) {
-      lastError = error;
+      parsedResults.push(validateFirebaseWebConfig(JSON.parse(candidate) as unknown));
+    } catch {
+      // Not strict JSON — the JavaScript-object parser tries next.
     }
   }
-  const detail = lastError instanceof Error ? lastError.message : "invalid JSON";
+  let syntaxDetail: string | null = null;
+  for (const candidate of candidates) {
+    try {
+      parsedResults.push(validateFirebaseWebConfig(parseJsObjectLiteral(candidate)));
+    } catch (error) {
+      if (syntaxDetail === null) {
+        syntaxDetail = error instanceof FirebaseConfigSyntaxError ? error.message : "invalid syntax";
+      }
+    }
+  }
+  const valid = parsedResults.find((result) => result.ok);
+  if (valid) return valid;
+  // Something parsed but failed validation: surface the field-level reasons
+  // (missing fields, service-account rejection) instead of a syntax error.
+  const firstParsed = parsedResults[0];
+  if (firstParsed) return firstParsed;
   return failure([
     {
       field: "config",
-      message: `This is not valid JSON (${detail}). Paste the complete config object, for example {"apiKey": "…", "authDomain": "…", "projectId": "…", "appId": "…"}.`,
+      message:
+        `Could not parse this Firebase config (${syntaxDetail ?? "invalid syntax"}). ` +
+        `Paste the complete config object — strict JSON or the standard Firebase format, ` +
+        `for example { apiKey: "…", authDomain: "…", projectId: "…", appId: "…" }.`,
     },
   ]);
 }
+
+/**
+ * Backwards-compatible alias for `parseFirebaseWebConfig` (the previous
+ * JSON-only implementation was replaced by the tolerant parser above).
+ * @deprecated Use `parseFirebaseWebConfig` instead.
+ */
+export const parseFirebaseWebConfigJson = parseFirebaseWebConfig;
 
 /* ---------------- display helpers (never reveal full values) ---------------- */
 
@@ -347,13 +672,13 @@ export function firebaseConfigsEqual(left: FirebaseWebConfig | null, right: Fire
 }
 
 export const FIREBASE_CONFIG_EXAMPLE = `{
-  "apiKey": "AIza…",
-  "authDomain": "my-project.firebaseapp.com",
-  "projectId": "my-project",
-  "storageBucket": "my-project.appspot.com",
-  "messagingSenderId": "123456789",
-  "appId": "1:123456789:web:abcdef123456",
-  "measurementId": "G-XXXXXXXX"
+  apiKey: "AIza…",
+  authDomain: "my-project.firebaseapp.com",
+  projectId: "my-project",
+  storageBucket: "my-project.appspot.com",
+  messagingSenderId: "123456789",
+  appId: "1:123456789:web:abcdef123456",
+  measurementId: "G-XXXXXXXX"
 }`;
 
 /**

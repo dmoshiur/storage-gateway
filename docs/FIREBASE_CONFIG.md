@@ -7,8 +7,8 @@ full path from paste to production login.
 ## Flow
 
 ```text
-Admin pastes Web App JSON in Settings
-  │  parseFirebaseWebConfigJson() — required-field detection, format checks,
+Admin pastes Web App config in Settings (strict JSON or the standard Firebase JS-object format)
+  │  parseFirebaseWebConfig() — required-field detection, format checks,
   │  service-account rejection, unknown-key warnings (all client-side, instant)
   ▼
 [Test connection] (optional, pre-save)
@@ -66,7 +66,7 @@ this UI — pasting a service-account key is rejected with guidance.
 
 ## Failure handling
 
-Invalid JSON, missing fields, malformed appId/projectId, wrong project
+Unparseable config text, missing fields, malformed appId/projectId, wrong project
 (API key belongs to project X ≠ pasted Y), invalid API key, disabled
 Email/Password provider, disabled Firestore, Firestore outage, Admin
 mismatch, network timeouts — each maps to a distinct step with the exact

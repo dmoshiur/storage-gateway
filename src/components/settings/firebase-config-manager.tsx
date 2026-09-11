@@ -23,7 +23,7 @@ import {
   OPTIONAL_FIREBASE_FIELDS,
   REQUIRED_FIREBASE_FIELDS,
   maskFirebaseValue,
-  parseFirebaseWebConfigJson,
+  parseFirebaseWebConfig,
   type FirebaseRuntimeStatus,
   type FirebaseWebConfig,
 } from "@/lib/firebase/web-config";
@@ -106,13 +106,13 @@ export function FirebaseConfigManager() {
   const [verifyError, setVerifyError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const parsed = useMemo(() => (raw.trim() ? parseFirebaseWebConfigJson(raw) : null), [raw]);
+  const parsed = useMemo(() => (raw.trim() ? parseFirebaseWebConfig(raw) : null), [raw]);
   const busy = testing || saving || resetting;
 
-  /** The config under test: pasted JSON wins, otherwise the effective config. */
+  /** The config under test: pasted config wins, otherwise the effective config. */
   const candidate: FirebaseWebConfig | null = parsed?.config ?? status?.config ?? null;
   const candidateLabel = parsed?.config
-    ? `pasted JSON (project “${parsed.config.projectId}”)`
+    ? `pasted config (project “${parsed.config.projectId}”)`
     : status?.config
       ? `current ${status.source === "stored" ? "managed" : "environment"} config (project “${status.config.projectId}”)`
       : null;
@@ -360,7 +360,7 @@ export function FirebaseConfigManager() {
           {/* Paste box */}
           <div>
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <label className="field-label" htmlFor="firebase-config-json">Paste Firebase Web App config (JSON)</label>
+              <label className="field-label" htmlFor="firebase-config-json">Paste Firebase Web App config</label>
               <div className="flex gap-2">
                 {status.config && (
                   <button
@@ -391,6 +391,7 @@ export function FirebaseConfigManager() {
             />
             <p id="firebase-config-help" className="field-hint">
               Firebase Console → Project settings → General → Your apps → Web app → SDK setup and configuration.
+              Paste it exactly as Firebase shows it (unquoted keys and single quotes are fine) or as strict JSON.
               Service-account private keys are rejected here — Admin credentials stay server-side in Vercel.
             </p>
 

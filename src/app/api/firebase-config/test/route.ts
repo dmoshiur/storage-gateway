@@ -17,7 +17,7 @@ const testSchema = z.object({ config: firebaseWebConfigSchema.optional() });
 /**
  * Authoritative server-side connection test: shape → Auth → Email/Password
  * provider → Firestore → Admin SDK project match. Accepts an optional
- * candidate config (tests the pasted-but-unsaved JSON); without one it
+ * candidate config (tests the pasted-but-unsaved config); without one it
  * tests the currently effective configuration.
  */
 export async function POST(request: Request) {
