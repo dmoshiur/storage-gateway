@@ -5,9 +5,10 @@ import { ApiError } from "@/lib/api/errors";
 import { success } from "@/lib/api/response";
 import { parseQuery } from "@/lib/api/body";
 import { getClientIp } from "@/lib/security/request-auth";
-import { enforceRateLimit } from "@/lib/security/rate-limit";
+import type { ApiRequestContext } from "@/lib/db/api-metrics";
+import { enforceRateLimit, enforceDatabaseRateLimit } from "@/lib/security/rate-limit";
 import { hasBridgeCredentialHeaders, requireBridgeCredential, type BridgeCredential } from "@/lib/bridge/auth";
-import { getApiKeyScopesByKeyId, requireScope, type ApiScope } from "@/lib/security/api-keys";
+import { getApiKeyScopes, requireScope, type ApiScope } from "@/lib/security/api-keys";
 import {
   bearerTokenFrom,
   requireBearerScope,
@@ -21,11 +22,11 @@ import {
   restoreFileFromTrash,
   serializeFile,
   updateFileDetails,
-} from "@/lib/firestore/files";
-import { getSettings } from "@/lib/firestore/settings";
+} from "@/lib/db/files";
+import { getSettings } from "@/lib/db/settings";
 import { getStorageService } from "@/lib/storage";
 import { calculateDeleteAt } from "@/lib/retention";
-import { auditActorFrom, writeAuditLogSafely } from "@/lib/firestore/audit";
+import { auditActorFrom, writeAuditLogSafely } from "@/lib/db/audit";
 import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
 import { fileUpdateSchema } from "@/lib/validation/schemas";
 
@@ -43,27 +44,29 @@ function invalidApiKey(): ApiError {
   return new ApiError(401, "INVALID_API_KEY", "Missing or invalid API key. Send Authorization: Bearer ng_live_….");
 }
 
-async function authorize(request: Request, scope: ApiScope, rateKey: string, limit: number): Promise<{
+async function authorize(request: Request, requestId: string, scope: ApiScope, rateKey: string, limit: number): Promise<{
   mode: "bearer" | "bridge";
   keyId: string | null;
   recordId: string | null;
   credential: BridgeCredential | null;
 }> {
   enforceRateLimit(`${rateKey}:${getClientIp(request)}`, limit);
+  await enforceDatabaseRateLimit(`${rateKey}:${getClientIp(request)}`, limit);
 
+  const requestContext: ApiRequestContext = { method: request.method, path: new URL(request.url).pathname, requestId, ip: getClientIp(request) };
   const bearer = bearerTokenFrom(request);
   if (bearer) {
-    const verified = await verifyBearerKeySafely(bearer);
+    const verified = await verifyBearerKeySafely(bearer, requestContext);
     if (!verified) throw invalidApiKey();
     requireBearerScope(verified.scopes, scope);
     return { mode: "bearer", keyId: verified.keyId, recordId: verified.recordId, credential: null };
   }
 
   if (!hasBridgeCredentialHeaders(request)) throw invalidApiKey();
-  const credential = await requireBridgeCredential(request);
-  const scopes = await getApiKeyScopesByKeyId(credential.keyId);
+  const credential = await requireBridgeCredential(request, requestContext);
+  const scopes = await getApiKeyScopes(credential.recordId);
   requireScope(scopes, scope);
-  return { mode: "bridge", keyId: credential.keyId, recordId: null, credential };
+  return { mode: "bridge", keyId: credential.keyId, recordId: credential.recordId, credential };
 }
 
 function cors(response: Response, request: Request): Response {
@@ -71,7 +74,7 @@ function cors(response: Response, request: Request): Response {
 }
 
 export async function handleV1ListFiles(request: Request, requestId: string): Promise<Response> {
-  await authorize(request, "files:read", "v1:files:list", 240);
+  await authorize(request, requestId, "files:read", "v1:files:list", 240);
   const query = parseQuery(Object.fromEntries(new URL(request.url).searchParams.entries()), listQuerySchema);
   const result = await listFiles({
     pageSize: query.pageSize,
@@ -87,7 +90,7 @@ export async function handleV1ListFiles(request: Request, requestId: string): Pr
 }
 
 export async function handleV1GetFile(request: Request, requestId: string, id: string): Promise<Response> {
-  await authorize(request, "metadata:read", "v1:files:get", 480);
+  await authorize(request, requestId, "metadata:read", "v1:files:get", 480);
   const file = await getFileById(id);
   const now = new Date();
   if (!file || file.status !== "active" || (file.autoDeleteEnabled && file.deleteAt && file.deleteAt <= now)) {
@@ -97,7 +100,7 @@ export async function handleV1GetFile(request: Request, requestId: string, id: s
 }
 
 export async function handleV1UpdateFile(request: Request, requestId: string, id: string): Promise<Response> {
-  const auth = await authorize(request, "metadata:write", "v1:files:update", 120);
+  const auth = await authorize(request, requestId, "metadata:write", "v1:files:update", 120);
   let body: unknown;
   try {
     body = await request.json();
@@ -117,13 +120,14 @@ export async function handleV1UpdateFile(request: Request, requestId: string, id
     fileId: result.file.id,
     fileName: result.file.originalName,
     details: { via: "api-v1", auth: auth.mode, ...(auth.keyId ? { keyId: auth.keyId } : {}) },
+    requestId,
   });
   emitWebhookEvent("file.updated", { fileId: result.file.id, fileName: result.file.originalName, via: "api" });
   return cors(success({ file: serializeFile(result.file) }, requestId), request);
 }
 
 export async function handleV1DeleteFile(request: Request, requestId: string, id: string): Promise<Response> {
-  const auth = await authorize(request, "files:delete", "v1:files:delete", 60);
+  const auth = await authorize(request, requestId, "files:delete", "v1:files:delete", 60);
   const settings = await getSettings();
   const file = await moveFileToTrash(id, settings.trashRetentionDays, "manual");
   await writeAuditLogSafely({
@@ -132,13 +136,14 @@ export async function handleV1DeleteFile(request: Request, requestId: string, id
     fileId: file.id,
     fileName: file.originalName,
     details: { via: "api-v1", auth: auth.mode, ...(auth.keyId ? { keyId: auth.keyId } : {}) },
+    requestId,
   });
   emitWebhookEvent("file.trashed", { fileId: file.id, fileName: file.originalName, via: "api" });
   return cors(success({ file: serializeFile(file) }, requestId), request);
 }
 
 export async function handleV1RestoreFile(request: Request, requestId: string, id: string): Promise<Response> {
-  const auth = await authorize(request, "files:update", "v1:files:restore", 60);
+  const auth = await authorize(request, requestId, "files:update", "v1:files:restore", 60);
   const file = await getFileById(id);
   if (!file || file.status !== "trash") {
     throw new ApiError(404, "FILE_NOT_FOUND", "The requested file was not found or is not in Trash.");
@@ -158,13 +163,14 @@ export async function handleV1RestoreFile(request: Request, requestId: string, i
     fileId: restored.id,
     fileName: restored.originalName,
     details: { via: "api-v1", auth: auth.mode, ...(auth.keyId ? { keyId: auth.keyId } : {}) },
+    requestId,
   });
   emitWebhookEvent("file.restored", { fileId: restored.id, fileName: restored.originalName, via: "api" });
   return cors(success({ file: serializeFile(restored) }, requestId), request);
 }
 
 export async function handleV1DownloadFile(request: Request, requestId: string, id: string): Promise<Response> {
-  const auth = await authorize(request, "files:download", "v1:files:download", 120);
+  const auth = await authorize(request, requestId, "files:download", "v1:files:download", 120);
   const file = await getFileById(id);
   const now = new Date();
   if (!file || file.status !== "active" || (file.autoDeleteEnabled && file.deleteAt && file.deleteAt <= now)) {
@@ -183,6 +189,7 @@ export async function handleV1DownloadFile(request: Request, requestId: string, 
     fileId: file.id,
     fileName: file.originalName,
     details: { via: "api-v1", auth: auth.mode, ...(auth.keyId ? { keyId: auth.keyId } : {}) },
+    requestId,
   });
   emitWebhookEvent("file.downloaded", { fileId: file.id, fileName: file.originalName, via: "api" });
   return cors(success({

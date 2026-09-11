@@ -6,7 +6,7 @@ import { ApiError } from "@/lib/api/errors";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { deleteWebhook, listDeliveries, updateWebhook } from "@/lib/webhooks/store";
-import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
+import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
 import { WEBHOOK_EVENTS } from "@/types/webhook";
 
 export const runtime = "nodejs";
@@ -42,6 +42,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       action: "WEBHOOK_UPDATED",
       actor: auditActorFrom(actor),
       details: { webhookId: webhook.id },
+      requestId,
     });
     return success({ webhook }, requestId);
   }, { route: "webhooks/update" });
@@ -57,6 +58,7 @@ export async function DELETE(request: Request, context: { params: Promise<{ id: 
       action: "WEBHOOK_DELETED",
       actor: auditActorFrom(actor),
       details: { webhookId: id },
+      requestId,
     });
     return success({ deleted: true }, requestId);
   }, { route: "webhooks/delete" });

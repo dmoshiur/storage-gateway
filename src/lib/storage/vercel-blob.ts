@@ -15,6 +15,7 @@ import {
 } from "@vercel/blob";
 import { ApiError } from "@/lib/api/errors";
 import { getBlobStoreConfig, readBlobStoreConfig } from "@/lib/env";
+import { logger } from "@/lib/logging/logger";
 import type {
   ObjectMetadata,
   SignedDownloadOptions,
@@ -31,7 +32,7 @@ import type {
  * This is the ONLY object-storage implementation in the platform. Every PDF is
  * stored in a private Blob store; browsers and API consumers never receive a
  * permanent Blob URL. Temporary, single-operation, single-path signed URLs are
- * minted server-side only after Firebase Auth + Firestore authorization.
+ * minted server-side only after first-party auth Auth + PostgreSQL authorization.
  *
  * Authentication (handled automatically by the SDK, in priority order):
  *  1. `BLOB_READ_WRITE_TOKEN` (Vercel Blob integration / dashboard token)
@@ -69,15 +70,17 @@ function isAccessError(error: unknown): boolean {
 function toApiError(error: unknown, fallback: string): ApiError {
   if (error instanceof ApiError) return error;
   if (isNotFound(error)) return new ApiError(404, "BLOB_NOT_FOUND", "The stored object no longer exists.");
-  const detail = error instanceof Error && error.message ? ` ${error.message}` : "";
+  logger.error("Vercel Blob operation failed", {
+    error: error instanceof Error ? error.message : "unknown",
+  });
   if (isAccessError(error)) {
     return new ApiError(
       503,
       "BLOB_ACCESS_ERROR",
-      `Vercel Blob rejected the request.${detail} Attach a private Blob store to this Vercel project (BLOB_READ_WRITE_TOKEN or OIDC + BLOB_STORE_ID).`,
+      "Vercel Blob rejected the request. Attach a private Blob store to this deployment.",
     );
   }
-  return new ApiError(502, "BLOB_REQUEST_FAILED", `${fallback}${detail}`);
+  return new ApiError(502, "BLOB_REQUEST_FAILED", fallback);
 }
 
 /** Resolve the canonical Blob URL for a pathname (exact match only). */
@@ -131,13 +134,16 @@ export class VercelBlobStorageService implements StorageService {
       if (result.statusCode === 304 || !result.stream) {
         throw new ApiError(502, "BLOB_REQUEST_FAILED", "The download from Blob storage returned no content.");
       }
+      const contentRange = result.headers.get("content-range");
+      const contentLengthHeader = result.headers.get("content-length");
       return {
         stream: result.stream,
-        // `blob` metadata is always present on a 200 response; the optional
-        // access keeps a stripped-down response from turning into a crash.
-        contentLength: result.blob?.size ?? null,
+        // The SDK exposes the upstream headers; use them so a Range request
+        // preserves 206, Content-Range, and the partial Content-Length.
+        contentLength: contentLengthHeader ? Number(contentLengthHeader) : result.blob?.size ?? null,
         contentType: result.blob?.contentType ?? null,
-        statusCode: result.statusCode,
+        contentRange,
+        statusCode: contentRange ? 206 : result.statusCode,
       };
     } catch (error) {
       throw toApiError(error, "The download from Blob storage failed.");
@@ -303,12 +309,12 @@ export class VercelBlobStorageService implements StorageService {
         authMode: config.authMode,
       };
     } catch (error) {
-      const detail = error instanceof Error ? error.message : "Blob list probe failed.";
+      logger.error("Vercel Blob store health probe failed", { error: error instanceof Error ? error.message : "unknown" });
       return {
         reachable: false,
         latencyMs: Date.now() - startedAt,
         checkedAt,
-        error: `Vercel Blob store probe failed: ${detail}`,
+        error: "Vercel Blob store probe failed.",
         authMode: config.authMode,
       };
     }

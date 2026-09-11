@@ -3,16 +3,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch, ClientApiError } from "@/lib/client/api";
 
-/** Everything the UI needs to explain a failure without hiding its real cause. */
 export interface QueryErrorInfo {
   message: string;
   code: string;
   requestId: string | null;
-  /** Underlying dependency message reported by the API (`error.details.cause`). */
-  cause: string | null;
-  causeCode: string | null;
-  hint: string | null;
-  retryable: boolean;
 }
 
 interface QueryState<T> {
@@ -29,29 +23,16 @@ interface QueryState<T> {
 
 function describeError(error: unknown): QueryErrorInfo {
   if (error instanceof ClientApiError) {
-    const details = error.details ?? {};
-    const text = (key: string): string | null => {
-      const value = details[key];
-      return typeof value === "string" && value ? value : null;
-    };
     return {
       message: error.message,
       code: error.code,
       requestId: error.requestId,
-      cause: text("cause"),
-      causeCode: text("causeCode"),
-      hint: text("hint"),
-      retryable: details.retryable === true,
     };
   }
   return {
     message: error instanceof Error ? error.message : "The request could not be completed.",
     code: "REQUEST_FAILED",
     requestId: null,
-    cause: null,
-    causeCode: null,
-    hint: null,
-    retryable: true,
   };
 }
 
@@ -81,8 +62,8 @@ export function useQuery<T>(url: string | null, options: { refreshIntervalMs?: n
         setData(result);
       } catch (fetchError) {
         if (cancelled || controller.signal.aborted) return;
-        // Keep the full structured failure (code, requestId, real cause) so the
-        // UI can show why the request failed instead of a generic message.
+        // Keep only the structured public failure (code and requestId). Server
+        // logs retain diagnostics without exposing driver details in the UI.
         setErrorInfo(describeError(fetchError));
       } finally {
         if (!cancelled) setLoading(false);
@@ -103,13 +84,7 @@ export function useQuery<T>(url: string | null, options: { refreshIntervalMs?: n
   }, [url, options.refreshIntervalMs]);
 
   const refresh = useCallback(() => setNonce((value) => value + 1), []);
-  // Every page that renders `error` shows the real cause, not just the generic
-  // summary line the API returns.
-  const error = errorInfo
-    ? errorInfo.cause && errorInfo.cause !== errorInfo.message
-      ? `${errorInfo.message} — ${errorInfo.cause}`
-      : errorInfo.message
-    : null;
+  const error = errorInfo?.message ?? null;
   // A null URL disables the query; stale state is masked rather than reset.
   return {
     data: url ? data : null,

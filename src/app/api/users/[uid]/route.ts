@@ -5,16 +5,23 @@ import { parseJson } from "@/lib/api/body";
 import { ApiError } from "@/lib/api/errors";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
-import { setUserDisabled, setUserRole } from "@/lib/firestore/users";
-import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
+import { setUserDisabled, setUserRole, deleteUser, resetUserPassword, revokeUserSessions, listUserActivity } from "@/lib/db/users";
+import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
 import { ROLES } from "@/types/auth";
 
 export const runtime = "nodejs";
 
-const updateSchema = z.object({
-  role: z.enum(ROLES).optional(),
-  disabled: z.boolean().optional(),
-}).refine((data) => data.role !== undefined || data.disabled !== undefined, "Provide a role or disabled flag.");
+const updateSchema = z.object({ role: z.enum(ROLES).optional(), disabled: z.boolean().optional() }).refine((data) => data.role !== undefined || data.disabled !== undefined, "Provide a role or disabled flag.");
+const resetSchema = z.object({ password: z.string().min(12).max(512).optional() });
+
+export async function GET(request: Request, context: { params: Promise<{ uid: string }> }) {
+  return apiRoute(request, async (requestId) => {
+    await requireAdminRequest(request, "manage_users");
+    const uid = (await context.params).uid;
+    if (!/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(uid)) throw new ApiError(400, "VALIDATION_ERROR", "The user id is invalid.");
+    return success({ activity: await listUserActivity(uid) }, requestId);
+  }, { route: "users/activity" });
+}
 
 export async function PATCH(request: Request, context: { params: Promise<{ uid: string }> }) {
   return apiRoute(request, async (requestId) => {
@@ -22,27 +29,35 @@ export async function PATCH(request: Request, context: { params: Promise<{ uid: 
     enforceRateLimit(`users:update:${actor.uid}`, 60);
     const input = await parseJson(request, updateSchema);
     const uid = (await context.params).uid;
-    if (!uid || uid.length > 128) throw new ApiError(400, "VALIDATION_ERROR", "The user id is invalid.");
-    // Admins cannot demote or disable themselves (prevents lockout).
-    if (uid === actor.uid && (input.role !== undefined && input.role !== "admin" || input.disabled === true)) {
-      throw new ApiError(409, "SELF_LOCKOUT_DENIED", "You cannot demote or disable your own administrator account.");
-    }
-    if (input.role !== undefined) {
-      await setUserRole(uid, input.role);
-      await writeAuditLogSafely({
-        action: "USER_ROLE_CHANGED",
-        actor: auditActorFrom(actor),
-        details: { uid, role: input.role },
-      });
-    }
-    if (input.disabled !== undefined) {
-      await setUserDisabled(uid, input.disabled);
-      await writeAuditLogSafely({
-        action: input.disabled ? "USER_DISABLED" : "USER_ENABLED",
-        actor: auditActorFrom(actor),
-        details: { uid },
-      });
-    }
+    if (!/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(uid)) throw new ApiError(400, "VALIDATION_ERROR", "The user id is invalid.");
+    if (uid === actor.uid && ((input.role !== undefined && input.role !== "admin") || input.disabled === true)) throw new ApiError(409, "SELF_LOCKOUT_DENIED", "You cannot demote or disable your own administrator account.");
+    if (input.role !== undefined) { await setUserRole(uid, input.role); await writeAuditLogSafely({ action: "USER_ROLE_CHANGED", actor: auditActorFrom(actor), details: { userId: uid, role: input.role }, requestId }); }
+    if (input.disabled !== undefined) { await setUserDisabled(uid, input.disabled); await writeAuditLogSafely({ action: input.disabled ? "USER_DISABLED" : "USER_ENABLED", actor: auditActorFrom(actor), details: { userId: uid }, requestId }); }
     return success({ updated: true }, requestId);
   }, { route: "users/update" });
+}
+
+export async function POST(request: Request, context: { params: Promise<{ uid: string }> }) {
+  return apiRoute(request, async (requestId) => {
+    const actor = await requireAdminRequest(request, "manage_users", true);
+    const uid = (await context.params).uid;
+    if (!/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(uid)) throw new ApiError(400, "VALIDATION_ERROR", "The user id is invalid.");
+    const input = await parseJson(request, resetSchema);
+    const result = await resetUserPassword(uid, input.password);
+    await writeAuditLogSafely({ action: "PASSWORD_RESET", actor: auditActorFrom(actor), details: { userId: uid }, requestId });
+    return success({ reset: true, ...result }, requestId);
+  }, { route: "users/reset-password" });
+}
+
+export async function DELETE(request: Request, context: { params: Promise<{ uid: string }> }) {
+  return apiRoute(request, async (requestId) => {
+    const actor = await requireAdminRequest(request, "manage_users", true);
+    const uid = (await context.params).uid;
+    if (!/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(uid)) throw new ApiError(400, "VALIDATION_ERROR", "The user id is invalid.");
+    if (uid === actor.uid) throw new ApiError(409, "SELF_DELETE_DENIED", "You cannot delete your own administrator account.");
+    await deleteUser(uid);
+    await revokeUserSessions(uid);
+    await writeAuditLogSafely({ action: "USER_DELETED", actor: auditActorFrom(actor), details: { userId: uid }, requestId });
+    return success({ deleted: true }, requestId);
+  }, { route: "users/delete" });
 }

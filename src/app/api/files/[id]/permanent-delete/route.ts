@@ -4,8 +4,8 @@ import { parseJson } from "@/lib/api/body";
 import { toServiceFailure } from "@/lib/api/failures";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
-import { beginPermanentDeletion, completePermanentDeletion, revertPermanentDeletion, serializeFile } from "@/lib/firestore/files";
-import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
+import { beginPermanentDeletion, completePermanentDeletion, revertPermanentDeletion, serializeFile } from "@/lib/db/files";
+import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
 import { getStorageService } from "@/lib/storage";
 import { permanentDeleteSchema } from "@/lib/validation/schemas";
 import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
@@ -23,13 +23,13 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     try {
       await getStorageService().delete(pending.storagePath);
       const deleted = await completePermanentDeletion(id);
-      await writeAuditLogSafely({ action: "PERMANENT_DELETE", actor: auditActorFrom(actor), fileId: deleted.id, fileName: deleted.originalName });
+      await writeAuditLogSafely({ action: "PERMANENT_DELETE", actor: auditActorFrom(actor), fileId: deleted.id, fileName: deleted.originalName, requestId });
       emitWebhookEvent("file.deleted", { fileId: deleted.id, fileName: deleted.originalName });
       return success({ file: serializeFile(deleted) }, requestId);
     } catch (error) {
       try { await revertPermanentDeletion(id, "BLOB_DELETE_FAILED"); } catch { /* pending lifecycle retries safely in cron */ }
-      // Logs the real Blob/Firestore failure and returns it in `error.details`
-      // instead of a bare "could not be finalized".
+      // Log the real Blob/PostgreSQL failure server-side instead of exposing
+      // driver details or storage paths to the caller.
       throw toServiceFailure({
         status: 502,
         code: "DELETE_FAILED",

@@ -4,8 +4,9 @@ import type { z } from "zod";
 import { ApiError, isApiError } from "@/lib/api/errors";
 import { success } from "@/lib/api/response";
 import { getClientIp } from "@/lib/security/request-auth";
-import { enforceRateLimit } from "@/lib/security/rate-limit";
-import { bridgeLogKeyFromHeaders, requireBridgeCredential, type BridgeCredential } from "@/lib/bridge/auth";
+import type { ApiRequestContext } from "@/lib/db/api-metrics";
+import { enforceRateLimit, enforceDatabaseRateLimit } from "@/lib/security/rate-limit";
+import { bridgeLogKeyFromHeaders, hasBridgeCredentialHeaders, requireBridgeCredential, type BridgeCredential } from "@/lib/bridge/auth";
 import { DIRECT_UPLOAD_GUIDANCE_BYTES, getBridgeMaxDocumentBytes, getBridgeSignedUrlExpirySeconds } from "@/lib/bridge/config";
 import {
   bridgeUploader,
@@ -21,8 +22,8 @@ import {
   stripDocumentExtension,
 } from "@/lib/validation/documents";
 import { bridgeUploadCompleteSchema, bridgeUploadInitSchema } from "@/lib/validation/bridge";
-import { getSettings } from "@/lib/firestore/settings";
-import { getStorageStats } from "@/lib/firestore/stats";
+import { getSettings } from "@/lib/db/settings";
+import { getStorageStats } from "@/lib/db/stats";
 import {
   activateUpload,
   clearUploadKey,
@@ -31,20 +32,36 @@ import {
   markUploadFailed,
   requireFileById,
   serializeFile,
-} from "@/lib/firestore/files";
-import { auditActorFrom, writeAuditLogSafely } from "@/lib/firestore/audit";
+} from "@/lib/db/files";
+import { auditActorFrom, writeAuditLogSafely } from "@/lib/db/audit";
 import { defaultRetention } from "@/lib/retention";
 import { createHash } from "node:crypto";
 import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
-import { getApiKeyScopesByKeyId, requireScope, type ApiScope } from "@/lib/security/api-keys";
+import { getApiKeyScopes, requireScope, type ApiScope } from "@/lib/security/api-keys";
 import { bearerTokenFrom, requireBearerScope, verifyBearerKeySafely } from "@/lib/security/bearer-keys";
 import { getStorageService } from "@/lib/storage";
+import { toServiceFailure } from "@/lib/api/failures";
 import type { FileDocument } from "@/types/file";
 
 /** Credential shapes accepted by the direct upload handler. */
 type UploadCredential =
   | BridgeCredential
   | { mode: "bearer"; keyId: string; logKey: string };
+
+async function requireUploadCredential(request: Request, requiredScope: ApiScope, requestId: string): Promise<UploadCredential> {
+  const requestContext: ApiRequestContext = { method: request.method, path: new URL(request.url).pathname, requestId, ip: getClientIp(request) };
+  const bearer = bearerTokenFrom(request);
+  if (bearer) {
+    const verified = await verifyBearerKeySafely(bearer, requestContext);
+    if (!verified) throw new ApiError(401, "INVALID_API_KEY", "Missing or invalid API key. Send Authorization: Bearer ng_live_….");
+    requireBearerScope(verified.scopes, requiredScope);
+    return { mode: "bearer", keyId: verified.keyId, logKey: verified.keyId };
+  }
+  if (!hasBridgeCredentialHeaders(request)) throw new ApiError(401, "INVALID_API_KEY", "Missing or invalid API key.");
+  const credential = await requireBridgeCredential(request, requestContext);
+    requireScope(await getApiKeyScopes(credential.recordId), requiredScope);
+  return credential;
+}
 
 const VALIDATION_CODES = new Set(["INVALID_FILE_TYPE", "UPLOAD_SIZE_MISMATCH", "UPLOAD_OWNERSHIP_MISMATCH", "INVALID_DOCUMENT"]);
 const SNIFF_WINDOW_BYTES = 2048;
@@ -83,14 +100,6 @@ function parseBridgeJson<T extends z.ZodTypeAny>(raw: Uint8Array, schema: T): z.
   return parsed.data;
 }
 
-/** True when HMAC signed headers are the effective credential (raw bytes needed before parsing). */
-function isSignedRequest(request: Request): boolean {
-  if ((request.headers.get("x-am-storage-key") ?? "").trim()) return false;
-  const keyId = (request.headers.get("x-am-storage-key-id") ?? "").trim();
-  if ((request.headers.get("x-am-storage-key-secret") ?? "").trim()) return false;
-  return Boolean(keyId && (request.headers.get("x-am-storage-signature") ?? "").trim() && (request.headers.get("x-am-storage-timestamp") ?? "").trim());
-}
-
 async function signBridgeDocumentUrl(file: Pick<FileDocument, "storagePath" | "originalName" | "mimeType">): Promise<{ url: string; expiresAt: string }> {
   const expiresInSeconds = getBridgeSignedUrlExpirySeconds();
   const url = await getStorageService().getSignedUrl(file.storagePath, {
@@ -119,25 +128,21 @@ export async function handleBridgeDirectUpload(
 ): Promise<Response> {
   // Rate limiting runs before authentication so unauthenticated floods cannot
   // bypass the per-instance budget by omitting credentials.
-  enforceRateLimit(`bridge:upload:${getClientIp(request)}`, 240);
+  const uploadRateKey = `bridge:upload:${getClientIp(request)}`;
+  enforceRateLimit(uploadRateKey, 240);
+  await enforceDatabaseRateLimit(uploadRateKey, 240);
 
+  const requestContext: ApiRequestContext = { method: request.method, path: new URL(request.url).pathname, requestId, ip: getClientIp(request) };
   let credential: UploadCredential | null = null;
   let uploaderLabel = "unknown";
   let filename = "unknown";
   try {
-    const rawBody = isSignedRequest(request) ? new Uint8Array(await request.arrayBuffer()) : undefined;
-    const bearer = options.allowBearer ? bearerTokenFrom(request) : null;
-    if (bearer) {
-      const verified = await verifyBearerKeySafely(bearer);
-      if (!verified) {
-        throw new ApiError(401, "INVALID_API_KEY", "Missing or invalid API key. Send Authorization: Bearer ng_live_….");
-      }
-      if (options.requiredScope) requireBearerScope(verified.scopes, options.requiredScope);
-      credential = { mode: "bearer", keyId: verified.keyId, logKey: verified.keyId };
-      uploaderLabel = `api:${verified.keyId}`;
+    if (options.allowBearer) {
+      credential = await requireUploadCredential(request, options.requiredScope ?? "files:upload", requestId);
+      uploaderLabel = credential.mode === "bearer" ? `api:${credential.keyId}` : bridgeUploader(credential);
     } else {
-      credential = await requireBridgeCredential(request, rawBody);
-      if (options.requiredScope) requireScope(await getApiKeyScopesByKeyId(credential.keyId), options.requiredScope);
+      credential = await requireBridgeCredential(request, requestContext);
+      if (options.requiredScope) requireScope(await getApiKeyScopes(credential.recordId), options.requiredScope);
       uploaderLabel = bridgeUploader(credential);
     }
 
@@ -147,13 +152,7 @@ export async function handleBridgeDirectUpload(
     }
     let form: FormData;
     try {
-      if (rawBody) {
-        const headers = new Headers();
-        headers.set("content-type", contentType);
-        form = await new Request(request.url, { method: "POST", headers, body: rawBody }).formData();
-      } else {
-        form = await request.formData();
-      }
+      form = await request.formData();
     } catch {
       throw new ApiError(400, "VALIDATION_ERROR", "The multipart body could not be parsed.");
     }
@@ -169,7 +168,21 @@ export async function handleBridgeDirectUpload(
 
     filename = cleanBridgeFilename(fileValue.name);
     const size = fileValue.size;
-    const [settings, stats] = await Promise.all([getSettings(), getStorageStats()]);
+    let settings: Awaited<ReturnType<typeof getSettings>>;
+    let stats: Awaited<ReturnType<typeof getStorageStats>>;
+    try {
+      [settings, stats] = await Promise.all([getSettings(), getStorageStats()]);
+    } catch (error) {
+      throw toServiceFailure({
+        status: 503,
+        code: "STORAGE_METADATA_UNAVAILABLE",
+        message: "Upload limits could not be read from PostgreSQL. Please retry shortly.",
+        cause: error,
+        operation: "v1/storage/upload:limits",
+        area: "database",
+        requestId,
+      });
+    }
     const effectiveMax = Math.min(settings.maxPdfSizeBytes, getBridgeMaxDocumentBytes());
     const document = assertDocumentMetadata(filename, size, effectiveMax, fileValue.type || undefined);
     if (stats.totalStorageBytes + size > settings.storageLimitBytes) {
@@ -191,10 +204,8 @@ export async function handleBridgeDirectUpload(
 
     const storage = getStorageService();
     const objectKey = buildBridgeObjectKey(document.extension);
-    let blobUrl: string | null = null;
     try {
-      const uploaded = await storage.upload({ pathname: objectKey, body: bytes, contentType: document.mimeType, contentLength: size });
-      blobUrl = uploaded.url;
+      await storage.upload({ pathname: objectKey, body: bytes, contentType: document.mimeType, contentLength: size });
     } catch (error) {
       try { await storage.delete(objectKey); } catch { /* compensation cleanup is best-effort */ }
       if (isApiError(error)) throw error;
@@ -228,7 +239,6 @@ export async function handleBridgeDirectUpload(
     try {
       file = await createBridgeFile({
         storagePath: objectKey,
-        blobUrl,
         originalName: filename,
         title: textField("title").trim().replace(/\s+/g, " ").slice(0, 160) || stripDocumentExtension(filename),
         description: textField("description").trim().replace(/\s+/g, " ").slice(0, 2000),
@@ -253,6 +263,7 @@ export async function handleBridgeDirectUpload(
       fileId: file.id,
       fileName: file.originalName,
       details: { size: file.size },
+      requestId,
     });
     await logBridgeUploadAttempt({ keyId: credential.logKey, filename, sizeBytes: size, status: "success", failureCode: null, requestId });
     emitWebhookEvent("file.uploaded", { fileId: file.id, fileName: file.originalName, size: file.size, via: "api" });
@@ -278,12 +289,28 @@ export async function handleBridgeDirectUpload(
  * calls .../complete.
  */
 export async function handleBridgeUploadInit(request: Request, requestId: string): Promise<Response> {
-  enforceRateLimit(`bridge:upload-init:${getClientIp(request)}`, 120);
+  const uploadInitRateKey = `bridge:upload-init:${getClientIp(request)}`;
+  enforceRateLimit(uploadInitRateKey, 120);
+  await enforceDatabaseRateLimit(uploadInitRateKey, 120);
   const rawBody = await readBoundedJsonBody(request);
-  const credential = await requireBridgeCredential(request, rawBody);
+  const credential = await requireUploadCredential(request, "files:upload", requestId);
   const input = parseBridgeJson(rawBody, bridgeUploadInitSchema);
 
-  const [settings, stats] = await Promise.all([getSettings(), getStorageStats()]);
+  let settings: Awaited<ReturnType<typeof getSettings>>;
+  let stats: Awaited<ReturnType<typeof getStorageStats>>;
+  try {
+    [settings, stats] = await Promise.all([getSettings(), getStorageStats()]);
+  } catch (error) {
+    throw toServiceFailure({
+      status: 503,
+      code: "STORAGE_METADATA_UNAVAILABLE",
+      message: "Upload limits could not be read from PostgreSQL. Please retry shortly.",
+      cause: error,
+      operation: "v1/storage/upload/init:limits",
+      area: "database",
+      requestId,
+    });
+  }
   const effectiveMax = Math.min(settings.maxPdfSizeBytes, getBridgeMaxDocumentBytes());
   const document = assertDocumentMetadata(input.originalName, input.size, effectiveMax, input.mimeType || undefined);
   if (stats.totalStorageBytes + stats.pendingUploadBytes + input.size > settings.storageLimitBytes) {
@@ -301,7 +328,7 @@ export async function handleBridgeUploadInit(request: Request, requestId: string
     mimeType: document.mimeType,
     extension: document.extension,
     size: input.size,
-    uploadedBy: bridgeUploader(credential),
+    uploadedBy: credential.mode === "bearer" ? `api:${credential.keyId}` : bridgeUploader(credential),
     retention: defaultRetention(settings),
   });
 
@@ -340,11 +367,13 @@ export async function handleBridgeUploadInit(request: Request, requestId: string
  * credential that started the upload may complete it.
  */
 export async function handleBridgeUploadComplete(request: Request, requestId: string): Promise<Response> {
-  enforceRateLimit(`bridge:upload-complete:${getClientIp(request)}`, 120);
+  const uploadCompleteRateKey = `bridge:upload-complete:${getClientIp(request)}`;
+  enforceRateLimit(uploadCompleteRateKey, 120);
+  await enforceDatabaseRateLimit(uploadCompleteRateKey, 120);
   const rawBody = await readBoundedJsonBody(request);
-  const credential = await requireBridgeCredential(request, rawBody);
+  const credential = await requireUploadCredential(request, "files:upload", requestId);
   const input = parseBridgeJson(rawBody, bridgeUploadCompleteSchema);
-  const expectedUploader = bridgeUploader(credential);
+  const expectedUploader = credential.mode === "bearer" ? `api:${credential.keyId}` : bridgeUploader(credential);
 
   let filename = "unknown";
   try {
@@ -384,7 +413,7 @@ export async function handleBridgeUploadComplete(request: Request, requestId: st
       if (isApiError(error) && VALIDATION_CODES.has(error.code)) {
         try { await storage.delete(objectPath); } catch { /* stale upload cleanup will retry if needed */ }
         await markUploadFailed(file.id, error.code);
-        await writeAuditLogSafely({ action: "UPLOAD_FAILED", actor: auditActorFrom(INTEGRATION_AUDIT_ACTOR), fileId: file.id, fileName: file.originalName, details: { reason: error.code } });
+        await writeAuditLogSafely({ action: "UPLOAD_FAILED", actor: auditActorFrom(INTEGRATION_AUDIT_ACTOR), fileId: file.id, fileName: file.originalName, details: { reason: error.code }, requestId });
         throw error;
       }
       if (isApiError(error)) throw error;
@@ -397,7 +426,7 @@ export async function handleBridgeUploadComplete(request: Request, requestId: st
       try { await clearUploadKey(file.id); } catch { /* cleanup retries via cron */ }
     }
     const active = await activateUpload(file.id);
-    await writeAuditLogSafely({ action: "BRIDGE_UPLOAD", actor: auditActorFrom(INTEGRATION_AUDIT_ACTOR), fileId: active.id, fileName: active.originalName, details: { size: active.size } });
+    await writeAuditLogSafely({ action: "BRIDGE_UPLOAD", actor: auditActorFrom(INTEGRATION_AUDIT_ACTOR), fileId: active.id, fileName: active.originalName, details: { size: active.size }, requestId });
 
     const signed = await signBridgeDocumentUrl(active);
     await logBridgeUploadAttempt({ keyId: credential.logKey, filename, sizeBytes: active.size, status: "success", failureCode: null, requestId });

@@ -3,7 +3,8 @@ import { ApiError, isApiError } from "@/lib/api/errors";
 import { logger } from "@/lib/logging/logger";
 
 export function requestIdFrom(request: Request): string {
-  return request.headers.get("x-request-id")?.slice(0, 96) ?? crypto.randomUUID();
+  const supplied = request.headers.get("x-request-id")?.trim() ?? "";
+  return /^[A-Za-z0-9._:-]{1,96}$/.test(supplied) ? supplied : crypto.randomUUID();
 }
 
 export function success<T>(data: T, requestId: string, status = 200): NextResponse {
@@ -22,9 +23,9 @@ export function failure(error: unknown, requestId: string, context?: Record<stri
         message: error.message,
         requestId,
         ...(error.fields ? { fields: error.fields } : {}),
-        // The real dependency cause (Firestore gRPC code/message, retryability,
-        // operator hint) so the dashboard can show *why* it failed.
-        ...(error.details ? { details: error.details } : {}),
+        // Dependency details stay in structured server logs. Never return
+        // driver messages, storage paths, or signed URL material to callers.
+
       },
       requestId,
     }, {

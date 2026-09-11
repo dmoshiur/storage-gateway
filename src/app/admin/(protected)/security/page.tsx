@@ -57,7 +57,7 @@ export default function SecurityPage() {
           <div className="card-pad">
             <h2 className="panel-title">Posture</h2>
             <ul className="mt-3 space-y-2.5 text-[13px]">
-              <li className="flex items-center justify-between gap-3"><span className="text-ink-muted">Authentication</span><span className="badge-success">Firebase Auth · HTTP-only sessions</span></li>
+              <li className="flex items-center justify-between gap-3"><span className="text-ink-muted">Authentication</span><span className="badge-success">First-party password auth · HTTP-only sessions</span></li>
               <li className="flex items-center justify-between gap-3"><span className="text-ink-muted">Object storage</span><span className="badge-success">Private Blob · signed URLs only</span></li>
               <li className="flex items-center justify-between gap-3"><span className="text-ink-muted">API secrets</span><span className="badge-success">Hashed · shown once</span></li>
               <li className="flex items-center justify-between gap-3"><span className="text-ink-muted">Rate limiting</span><span className="badge-success">Enabled on auth, upload & API</span></li>

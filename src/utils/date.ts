@@ -1,4 +1,4 @@
-/** Works with Firestore Timestamp, Date, ISO strings, and null without leaking SDK types into UI code. */
+/** Works with PostgreSQL Timestamp, Date, ISO strings, and null without leaking SDK types into UI code. */
 export function asDate(value: unknown): Date | null {
   if (!value) return null;
   if (value instanceof Date) return value;

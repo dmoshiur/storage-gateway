@@ -5,7 +5,7 @@ import { parseJson } from "@/lib/api/body";
 import { ApiError } from "@/lib/api/errors";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
-import { deleteCategory, updateCategory } from "@/lib/firestore/categories";
+import { deleteCategory, updateCategory } from "@/lib/db/categories";
 
 export const runtime = "nodejs";
 

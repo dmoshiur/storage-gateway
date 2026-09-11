@@ -1,83 +1,35 @@
 import "server-only";
-import { createCipheriv, createDecipheriv, createHmac, createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { getAdminDb } from "@/lib/firebase/admin";
+
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { ApiError } from "@/lib/api/errors";
-import { getMasterKey } from "@/lib/env";
-import { recordApiRequestSafe } from "@/lib/firestore/api-metrics";
-import { toIso } from "@/utils/date";
-
-const collection = () => getAdminDb().collection("apiKeys");
-
-/**
- * Dual-token credential model:
- *
- * - `keyId`   — visible identifier (`am_store_live_…`). Shown in the dashboard
- *               list and sent in the `X-AM-Storage-Key-Id` header.
- * - `keySecret` — high-entropy secret (`am_sec_live_…`). Displayed exactly once
- *               at generation time; only its SHA-256 digest (and, when a master
- *               key is configured, an AES-256-GCM encrypted copy) is persisted.
- *
- * Verification modes:
- * - dual_token : `X-AM-Storage-Key-Id` + `X-AM-Storage-Key-Secret` (digest match)
- * - signature  : `X-AM-Storage-Key-Id` + `X-AM-Storage-Signature` (HMAC-SHA256
- *                over `<timestamp>:<sha256hex(body)>`) + `X-AM-Storage-Timestamp`
- * - legacy     : a single `am_store_live_…` key verified by digest (pre-upgrade keys)
- */
-export const API_KEY_ID_PREFIX = "am_store_live_";
-export const API_SECRET_PREFIX = "am_sec_live_";
-
+import { query, toDate } from "@/lib/db/client";
+import { recordApiRequestSafe, type ApiRequestContext } from "@/lib/db/api-metrics";
 import { API_SCOPES, type ApiScope } from "@/lib/security/scopes";
 
 export { API_SCOPES, type ApiScope };
-/** Legacy and static credentials predate scopes and retain full access. */
+export const API_KEY_ID_PREFIX = "am_store_live_";
+export const API_SECRET_PREFIX = "am_sec_live_";
 export const FULL_API_SCOPES: readonly ApiScope[] = API_SCOPES;
-/** Signed requests outside this clock-skew window are rejected. */
-export const SIGNATURE_MAX_SKEW_MS = 5 * 60 * 1000;
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const b64url = (byteLength: number) => randomBytes(byteLength).toString("base64url");
-
 function constantTimeEquals(expected: string, provided: string): boolean {
   const a = Buffer.from(expected);
   const b = Buffer.from(provided);
   return a.length === b.length && timingSafeEqual(a, b);
 }
-
-/**
- * AES-256-GCM envelope around the raw secret. Only present when
- * AM_STORAGE_MASTER_KEY is configured; it is what makes HMAC signature
- * verification possible without ever storing the plaintext secret.
- */
-function encryptSecret(plain: string): string | null {
-  const key = getMasterKey();
-  if (!key) return null;
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const encrypted = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
-  return Buffer.concat([iv, cipher.getAuthTag(), encrypted]).toString("base64");
+function normalizeScopes(value: unknown): ApiScope[] {
+  if (!Array.isArray(value)) return [...API_SCOPES];
+  const values = value.filter((scope): scope is ApiScope => typeof scope === "string" && (API_SCOPES as readonly string[]).includes(scope));
+  return values.length ? [...new Set(values)] : [...API_SCOPES];
 }
-
-function decryptSecret(payload: string): string {
-  const key = getMasterKey();
-  if (!key) {
-    throw new ApiError(503, "SIGNATURE_VERIFICATION_UNAVAILABLE", "HMAC signature verification is not enabled on this deployment. Set AM_STORAGE_MASTER_KEY to enable it.");
-  }
-  const raw = Buffer.from(payload, "base64");
-  if (raw.length < 12 + 16 + 1) {
-    throw new ApiError(503, "SIGNATURE_VERIFICATION_UNAVAILABLE", "This API key cannot be verified with a signed signature.");
-  }
-  const decipher = createDecipheriv("aes-256-gcm", key, raw.subarray(0, 12));
-  decipher.setAuthTag(raw.subarray(12, 28));
-  try {
-    return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("utf8");
-  } catch {
-    throw new ApiError(503, "SIGNATURE_VERIFICATION_UNAVAILABLE", "This API key cannot be verified with a signed signature.");
-  }
+function expired(value: unknown): boolean {
+  const date = toDate(value);
+  return Boolean(date && date.getTime() <= Date.now());
 }
 
 export interface ApiKeyRecord {
   id: string;
-  /** Visible identifier for dual-token keys; null for pre-upgrade legacy keys. */
   keyId: string | null;
   prefix: string;
   name: string;
@@ -89,205 +41,105 @@ export interface ApiKeyRecord {
   createdBy: string;
 }
 
-function normalizeScopes(value: unknown): ApiScope[] {
-  if (!Array.isArray(value)) return [...API_SCOPES];
-  const allowed = new Set<string>(API_SCOPES);
-  const scopes = value.filter((scope): scope is ApiScope => typeof scope === "string" && allowed.has(scope));
-  return scopes.length > 0 ? [...new Set(scopes)] : [...API_SCOPES];
-}
-
 export async function listApiKeys(): Promise<ApiKeyRecord[]> {
-  const snapshots = await collection().orderBy("createdAt", "desc").get();
-  return snapshots.docs.map((doc) => {
-    const data = doc.data();
-    const keyId = typeof data.keyId === "string" ? data.keyId : null;
-    return {
-      id: doc.id,
-      keyId,
-      prefix: keyId ?? String(data.prefix ?? ""),
-      name: typeof data.name === "string" && data.name ? data.name : "Untitled key",
-      scopes: normalizeScopes(data.scopes),
-      expiresAt: toIso(data.expiresAt),
-      createdAt: toIso(data.createdAt),
-      lastUsedAt: toIso(data.lastUsedAt),
-      revokedAt: toIso(data.revokedAt),
-      createdBy: String(data.createdBy ?? ""),
-    };
-  });
+  const result = await query(`SELECT id, key_id, prefix, name, scopes, expires_at, created_at, last_used_at, revoked_at, created_by FROM api_keys WHERE kind = 'bridge' ORDER BY created_at DESC`);
+  return result.rows.map((row) => ({
+    id: String(row.id),
+    keyId: typeof row.key_id === "string" ? row.key_id : null,
+    prefix: String(row.prefix ?? ""),
+    name: String(row.name ?? "Untitled key"),
+    scopes: normalizeScopes(row.scopes),
+    expiresAt: toDate(row.expires_at)?.toISOString() ?? null,
+    createdAt: toDate(row.created_at)?.toISOString() ?? null,
+    lastUsedAt: toDate(row.last_used_at)?.toISOString() ?? null,
+    revokedAt: toDate(row.revoked_at)?.toISOString() ?? null,
+    createdBy: String(row.created_by ?? ""),
+  }));
 }
 
-/**
- * Generates the dual-token pair. The raw secret is returned exactly once and
- * only the digest (plus the encrypted copy for signature mode) is persisted.
- */
-export async function createApiKey(
-  actorUid: string,
-  options: { name?: string; scopes?: ApiScope[]; expiresAt?: Date | null } = {},
-): Promise<{ id: string; keyId: string; keySecret: string; name: string; scopes: ApiScope[]; expiresAt: string | null }> {
+/** The plaintext secret is returned once and only its SHA-256 digest is persisted. */
+export async function createApiKey(actorUid: string, options: { name?: string; scopes?: ApiScope[]; expiresAt?: Date | null } = {}): Promise<{ id: string; keyId: string; keySecret: string; name: string; scopes: ApiScope[]; expiresAt: string | null }> {
   const keyId = `${API_KEY_ID_PREFIX}${b64url(12)}`;
   const keySecret = `${API_SECRET_PREFIX}${b64url(32)}`;
-  const secretEncrypted = encryptSecret(keySecret);
   const name = options.name?.trim().slice(0, 80) || "Untitled key";
-  const scopes = options.scopes && options.scopes.length > 0 ? [...new Set(options.scopes)] : [...API_SCOPES];
-  const reference = await collection().add({
-    keyId,
-    name,
-    scopes,
-    expiresAt: options.expiresAt ?? null,
-    secretHash: hash(keySecret),
-    ...(secretEncrypted ? { secretEncrypted } : {}),
-    createdAt: new Date(),
-    createdBy: actorUid,
-    revokedAt: null,
-  });
-  return { id: reference.id, keyId, keySecret, name, scopes, expiresAt: toIso(options.expiresAt ?? null) };
+  const scopes = options.scopes?.length ? [...new Set(options.scopes)] : [...API_SCOPES];
+  const result = await query(
+    `INSERT INTO api_keys(kind, key_id, secret_hash, name, scopes, expires_at, created_by, prefix)
+     VALUES ('bridge',$1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+    [keyId, hash(keySecret), name, scopes, options.expiresAt ?? null, actorUid, API_KEY_ID_PREFIX],
+  );
+  return { id: String(result.rows[0].id), keyId, keySecret, name, scopes, expiresAt: options.expiresAt?.toISOString() ?? null };
 }
 
-/** Rotation keeps the same key id but issues a fresh secret (shown once). */
 export async function rotateApiKey(id: string): Promise<{ id: string; keyId: string; keySecret: string }> {
-  const reference = collection().doc(id);
-  const snapshot = await reference.get();
-  if (!snapshot.exists) throw new ApiError(404, "API_KEY_NOT_FOUND", "The API key was not found.");
-  const data = snapshot.data() as Record<string, unknown>;
-  if (data.revokedAt) throw new ApiError(409, "API_KEY_REVOKED", "Revoked keys cannot be rotated. Create a new key instead.");
-  if (typeof data.keyId !== "string") throw new ApiError(409, "API_KEY_NOT_ROTATABLE", "Legacy keys cannot be rotated. Create a new key instead.");
+  const current = await query(`SELECT id, key_id, revoked_at FROM api_keys WHERE id = $1 AND kind = 'bridge'`, [id]);
+  const row = current.rows[0];
+  if (!row) throw new ApiError(404, "API_KEY_NOT_FOUND", "The API key was not found.");
+  if (row.revoked_at) throw new ApiError(409, "API_KEY_REVOKED", "Revoked keys cannot be rotated.");
   const keySecret = `${API_SECRET_PREFIX}${b64url(32)}`;
-  const secretEncrypted = encryptSecret(keySecret);
-  await reference.update({
-    secretHash: hash(keySecret),
-    ...(secretEncrypted ? { secretEncrypted } : { secretEncrypted: null }),
-    rotatedAt: new Date(),
-  });
-  return { id, keyId: data.keyId, keySecret };
+  await query(`UPDATE api_keys SET secret_hash = $2, legacy_hash = NULL WHERE id = $1`, [id, hash(keySecret)]);
+  return { id, keyId: String(row.key_id), keySecret };
 }
 
 export async function updateApiKey(id: string, patch: { name?: string; scopes?: ApiScope[]; expiresAt?: Date | null }): Promise<void> {
-  const updates: Record<string, unknown> = {};
-  if (patch.name !== undefined) updates.name = patch.name.trim().slice(0, 80) || "Untitled key";
-  if (patch.scopes !== undefined) updates.scopes = [...new Set(patch.scopes)];
-  if (patch.expiresAt !== undefined) updates.expiresAt = patch.expiresAt;
-  if (Object.keys(updates).length === 0) return;
-  await collection().doc(id).update(updates);
+  await query(
+    `UPDATE api_keys SET name = COALESCE($2, name), scopes = COALESCE($3, scopes), expires_at = CASE WHEN $4::boolean THEN $5 ELSE expires_at END WHERE id = $1 AND kind = 'bridge'`,
+    [id, patch.name?.trim().slice(0, 80) || null, patch.scopes ?? null, patch.expiresAt !== undefined, patch.expiresAt ?? null],
+  );
 }
 
 export async function revokeApiKey(id: string): Promise<void> {
-  await collection().doc(id).update({ revokedAt: new Date() });
+  const result = await query(`UPDATE api_keys SET revoked_at = now() WHERE id = $1 AND kind = 'bridge'`, [id]);
+  if (!result.rowCount) throw new ApiError(404, "API_KEY_NOT_FOUND", "The API key was not found.");
 }
 
-interface KeyRecordSnapshot {
+interface KeyRecord {
   id: string;
+  keyId: string;
   secretHash: string | null;
-  secretEncrypted: string | null;
-  ref: { update: (fields: Record<string, unknown>) => Promise<unknown> };
+  ref: { update: (fields: Record<string, unknown>) => Promise<void> };
 }
 
-async function findActiveKeyRecord(keyId: string): Promise<KeyRecordSnapshot | null> {
-  const snapshots = await collection().where("keyId", "==", keyId).limit(1).get();
-  const doc = snapshots.docs[0];
-  if (!doc) return null;
-  const data = doc.data() as Record<string, unknown>;
-  if (data.revokedAt) return null;
-  if (isExpired(data.expiresAt)) return null;
+async function findActiveKeyRecord(keyId: string): Promise<KeyRecord | null> {
+  const result = await query(`SELECT id, key_id, secret_hash, expires_at, revoked_at FROM api_keys WHERE kind = 'bridge' AND key_id = $1 LIMIT 1`, [keyId]);
+  const row = result.rows[0];
+  if (!row || row.revoked_at || expired(row.expires_at)) return null;
   return {
-    id: doc.id,
-    secretHash: typeof data.secretHash === "string" ? data.secretHash : null,
-    secretEncrypted: typeof data.secretEncrypted === "string" ? data.secretEncrypted : null,
-    ref: doc.ref,
+    id: String(row.id),
+    keyId: String(row.key_id),
+    secretHash: typeof row.secret_hash === "string" ? row.secret_hash : null,
+    ref: { update: async (fields) => { await query(`UPDATE api_keys SET last_used_at = $2 WHERE id = $1`, [String(row.id), fields.lastUsedAt ?? new Date()]); } },
   };
 }
 
-function isExpired(value: unknown): boolean {
-  if (value === null || value === undefined) return false;
-  const date = value instanceof Date ? value : typeof (value as { toDate?: unknown }).toDate === "function"
-    ? (value as { toDate: () => Date }).toDate()
-    : new Date(String(value));
-  return Number.isFinite(date.getTime()) && date.getTime() <= Date.now();
-}
-
-/** Scopes for a verified registry credential (legacy/static callers pass null → full access). */
 export async function getApiKeyScopes(recordId: string | null): Promise<ApiScope[]> {
   if (!recordId) return [...API_SCOPES];
-  try {
-    const snapshot = await collection().doc(recordId).get();
-    if (!snapshot.exists) return [...API_SCOPES];
-    return normalizeScopes((snapshot.data() as Record<string, unknown>).scopes);
-  } catch {
-    return [...API_SCOPES];
-  }
+  const result = await query(`SELECT scopes FROM api_keys WHERE id = $1`, [recordId]);
+  return result.rows[0] ? normalizeScopes(result.rows[0].scopes) : [...API_SCOPES];
 }
-
-/** Scope lookup for versioned-API enforcement (null keyId = legacy/static → full access). */
 export async function getApiKeyScopesByKeyId(keyId: string | null): Promise<ApiScope[]> {
   if (!keyId) return [...API_SCOPES];
-  try {
-    const snapshots = await collection().where("keyId", "==", keyId).limit(1).get();
-    const doc = snapshots.docs[0];
-    if (!doc) return [...API_SCOPES];
-    return normalizeScopes((doc.data() as Record<string, unknown>).scopes);
-  } catch {
-    return [...API_SCOPES];
-  }
+  const result = await query(`SELECT scopes FROM api_keys WHERE key_id = $1`, [keyId]);
+  return result.rows[0] ? normalizeScopes(result.rows[0].scopes) : [...API_SCOPES];
 }
-
 export function requireScope(granted: readonly string[], scope: ApiScope): void {
-  if (!granted.includes(scope)) {
-    throw new ApiError(403, "INSUFFICIENT_SCOPE", `This API key is missing the required scope: ${scope}.`);
-  }
+  if (!granted.includes(scope)) throw new ApiError(403, "INSUFFICIENT_SCOPE", `This API key is missing the required scope: ${scope}.`);
 }
 
-/**
- * Dual-token verification: constant-time digest comparison for the presented
- * (keyId, secret) pair. Touches lastUsedAt and records a request hit so the
- * dashboard can show live gramunnayan.com traffic.
- */
-export async function verifyApiCredential(keyId: string, secret: string): Promise<string | null> {
-  const trimmedId = keyId.trim();
-  const record = await findActiveKeyRecord(trimmedId);
-  if (!record) return null;
-  if (!record.secretHash || !constantTimeEquals(record.secretHash, hash(secret))) return null;
+export async function verifyApiCredential(keyId: string, secret: string, requestContext: ApiRequestContext = {}): Promise<string | null> {
+  const record = await findActiveKeyRecord(keyId.trim());
+  if (!record || !record.secretHash || !constantTimeEquals(record.secretHash, hash(secret))) return null;
   await record.ref.update({ lastUsedAt: new Date() });
-  await recordApiRequestSafe(trimmedId);
+  await recordApiRequestSafe(record.keyId, requestContext);
   return record.id;
 }
 
-/**
- * HMAC signature verification. The client signs `<timestamp>:<sha256hex(body)>`
- * with the raw secret; the gateway decrypts the stored secret (master key) and
- * recomputes the HMAC in constant time. Rejects stale timestamps (> 5 minute
- * skew) and replayed requests.
- *
- * The timestamp header accepts both unix seconds and unix milliseconds (values
- * below 10^12 are treated as seconds) so documented snippets and millisecond
- * senders interoperate.
- */
-export async function verifyApiSignature(input: { keyId: string; timestamp: number; signature: string; bodyHash: string }): Promise<string | null> {
-  const trimmedId = input.keyId.trim();
-  const record = await findActiveKeyRecord(trimmedId);
-  if (!record) return null;
-  if (!record.secretEncrypted) {
-    throw new ApiError(503, "SIGNATURE_VERIFICATION_UNAVAILABLE", "This API key was created without signature support. Use the dual-token headers instead.");
-  }
-  const timestampMs = input.timestamp < 1_000_000_000_000 ? input.timestamp * 1000 : input.timestamp;
-  if (!Number.isFinite(input.timestamp) || Math.abs(Date.now() - timestampMs) > SIGNATURE_MAX_SKEW_MS) return null;
-  const provided = input.signature.trim().toLowerCase();
-  if (!/^[a-f0-9]{64}$/.test(provided) || !/^[a-f0-9]{64}$/.test(input.bodyHash.trim().toLowerCase())) return null;
-  const secret = decryptSecret(record.secretEncrypted);
-  const expected = createHmac("sha256", secret).update(`${input.timestamp}:${input.bodyHash.trim().toLowerCase()}`).digest("hex");
-  if (!constantTimeEquals(expected, provided)) return null;
-  await record.ref.update({ lastUsedAt: new Date() });
-  await recordApiRequestSafe(trimmedId);
-  return record.id;
-}
-
-/**
- * Legacy single-key verification (pre-upgrade `am_store_live_…` keys). Kept so
- * existing gramunnayan.com integrations keep working until they rotate to the
- * dual-token pair.
- */
-export async function verifyApiKey(key: string): Promise<string | null> {
-  const snapshots = await collection().where("keyHash", "==", hash(key)).limit(1).get();
-  if (snapshots.empty || snapshots.docs[0]!.data().revokedAt || isExpired(snapshots.docs[0]!.data().expiresAt)) return null;
-  await snapshots.docs[0]!.ref.update({ lastUsedAt: new Date() });
-  await recordApiRequestSafe("legacy");
-  return snapshots.docs[0]!.id;
+/** Legacy single-header keys are still verified by digest; the raw value is never persisted. */
+export async function verifyApiKey(key: string, requestContext: ApiRequestContext = {}): Promise<string | null> {
+  const result = await query(`SELECT id, revoked_at, expires_at, secret_hash, legacy_hash FROM api_keys WHERE kind = 'bridge' AND (legacy_hash = $1 OR secret_hash = $1) LIMIT 1`, [hash(key)]);
+  const row = result.rows[0];
+  if (!row || row.revoked_at || expired(row.expires_at)) return null;
+  await query(`UPDATE api_keys SET last_used_at = now() WHERE id = $1`, [row.id]);
+  await recordApiRequestSafe("legacy", requestContext);
+  return String(row.id);
 }

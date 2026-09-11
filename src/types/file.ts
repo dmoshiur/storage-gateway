@@ -1,7 +1,7 @@
 export const FILE_STATUSES = ["uploading", "active", "trash", "deleting", "deleted", "failed"] as const;
 export type FileStatus = (typeof FILE_STATUSES)[number];
 
-export const DOCUMENT_EXTENSIONS = ["pdf", "doc", "docx", "txt", "ppt", "pptx"] as const;
+export const DOCUMENT_EXTENSIONS = ["pdf"] as const;
 export type DocumentExtension = (typeof DOCUMENT_EXTENSIONS)[number];
 
 export const RETENTION_TYPES = [
@@ -16,13 +16,11 @@ export type RetentionType = (typeof RETENTION_TYPES)[number];
 
 export type DeletionReason = "manual" | "auto_retention" | "upload_validation" | "cleanup" | null;
 
-/** This is the server-side Firestore shape. Date values become Timestamps after reads. */
+/** This is the server-side PostgreSQL shape. Date values become Timestamps after reads. */
 export interface FileDocument {
   id: string;
   /** Private Vercel Blob pathname, e.g. `pdfs/2026/09/<uuid>.pdf`. UUID-based, never user input. */
   storagePath: string;
-  /** Canonical private Blob URL. Server-only: stored for head/copy/delete, never serialized. */
-  blobUrl: string | null;
   /** Legacy staging pathname (pre-Blob two-phase uploads). Always null for new uploads. */
   uploadKey: string | null;
   originalName: string;

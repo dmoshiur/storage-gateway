@@ -12,8 +12,8 @@ import {
   rotateBearerKey,
 } from "@/lib/security/bearer-keys";
 import { API_SCOPES } from "@/lib/security/api-keys";
-import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
-import { createNotificationSafe } from "@/lib/firestore/notifications";
+import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
+import { createNotificationSafe } from "@/lib/db/notifications";
 import { ApiError } from "@/lib/api/errors";
 
 export const runtime = "nodejs";
@@ -76,7 +76,7 @@ export async function PATCH(request: Request) {
     const input = await parseJson(request, updateSchema);
     const url = new URL(request.url);
     if (url.searchParams.get("rotate") === "true") {
-      const rotated = await rotateBearerKey(input.id);
+      const rotated = await rotateBearerKey(input.id, actor.uid);
       await writeAuditLogSafely({
         action: "API_KEY_ROTATED",
         actor: auditActorFrom(actor),

@@ -9,8 +9,8 @@ import {
   completePermanentDeletion,
   listFiles,
   revertPermanentDeletion,
-} from "@/lib/firestore/files";
-import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
+} from "@/lib/db/files";
+import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
 import { getStorageService } from "@/lib/storage";
 import { logger } from "@/lib/logging/logger";
 
@@ -67,6 +67,7 @@ export async function DELETE(request: Request) {
       action: "EMPTY_TRASH",
       actor: auditActorFrom(actor),
       details: { deleted, failed },
+      requestId,
     });
     return success({ deleted, failed }, requestId);
   }, { route: "files/empty-trash" });

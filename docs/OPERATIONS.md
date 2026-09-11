@@ -1,89 +1,34 @@
-# Operations and cleanup
+# Operations
 
-## Daily cleanup behavior
+## Database migrations
 
-Vercel Cron invokes `/api/cron/cleanup` at `03:17 UTC` according to `vercel.json`. It must include `Authorization: Bearer $CRON_SECRET`. The endpoint accepts `GET` because Vercel Cron dispatches GET requests; `POST` is also supported for a secure external scheduler.
+Run `npm run db:migrate` during deployment before serving traffic. Migrations are transactional and tracked in `schema_migrations`. Take a PostgreSQL backup before applying a destructive schema change.
 
-The cleanup logic performs the following in one lock-protected run:
+## Cleanup
 
-1. acquires `system/cleanupLock` transactionally; another active lock returns a safe no-op `202`;
-2. locates active records where `autoDeleteEnabled == true` and `deleteAt <= now`;
-3. if Trash safety is enabled (the default), transitions each record to `trash`, calculates `permanentDeleteAt`, and keeps R2 bytes recoverable;
-4. if Trash safety is explicitly disabled, transitions through `deleting`, deletes R2, then marks metadata `deleted`;
-5. finds expired Trash records, transitions through `deleting`, deletes R2, then marks `deleted`;
-6. retries interrupted `deleting` records because R2 `DELETE` is idempotent;
-7. removes abandoned upload staging objects and stale active staging copies; and
-8. releases the lock with a summary.
+The daily Vercel Cron worker authenticates with `CRON_SECRET`, acquires the single-row PostgreSQL cleanup lock, and processes active expiry, Trash expiry, stale uploads, and interrupted deletions independently. Blob deletion is idempotent. A failed item remains retryable and produces an audit entry.
 
-Each file action is isolated. An R2 error for one file does not stop subsequent files. Failures receive a structured server log and `CLEANUP_FAILURE` audit event. Summary fields include `checked`, `movedToTrash`, `permanentlyDeleted`, `staleUploadsRemoved`, `failed`, and `skipped`.
+Administrators can use Storage → Run cleanup now or call `POST /api/cleanup`. Use `?dryRun=true` to inspect eligible records without modifying metadata or Blob objects.
 
-## Manual cleanup
+## Troubleshooting
 
-A logged-in administrator can use **Storage → Run cleanup now**. That calls `POST /api/cleanup` with a Firebase-verified session; the browser never receives the cron secret. It is limited to five requests per administrator per hour.
+| Symptom | Check |
+| --- | --- |
+| `DATABASE_NOT_CONFIGURED` | Set `DATABASE_URL`, redeploy, and run migrations. |
+| `DATABASE_UNAVAILABLE` | Check TLS, pooler limits, database reachability, and PostgreSQL logs. |
+| `BLOB_NOT_CONFIGURED` | Attach a private Blob store or set the server-only Blob variables. |
+| `BLOB_ACCESS_ERROR` | Confirm the token belongs to the store attached to this deployment and the store is private. |
+| `SESSION_EXPIRED` | The session expired, was revoked, or the account was disabled; sign in again. |
+| `ACCOUNT_DISABLED` | An administrator must enable the user in `/admin/users`. |
+| `INVALID_API_KEY` | The key is missing, revoked, expired, or copied incorrectly. Create/rotate it; raw secrets cannot be recovered. |
+| `INSUFFICIENT_SCOPE` | Add the required scope or use a key created for the operation. |
 
-For a controlled dry run via scheduler credentials:
+Every error response includes a request ID. Use it to correlate the structured application log with the PostgreSQL audit/request rows without logging credentials or document URLs.
 
-```bash
-curl -H "Authorization: Bearer $CRON_SECRET" \
-  "https://storage.example.org/api/cron/cleanup?dryRun=true"
-```
+## Account security
 
-Dry runs use the lock but make no metadata or R2 changes.
+Use `/admin/users` to disable a compromised account, reset its password, and revoke all sessions. Resetting a role or password revokes active sessions. Do not edit password hashes directly. Rotate Blob credentials and API keys if a secret may have been exposed.
 
-## Failure recovery
+## Backups
 
-| Situation | Gateway behavior | Operator response |
-| --- | --- | --- |
-| Direct R2 upload succeeds, final Firestore activation fails | `uploading` record remains; completion can be retried | Ask the admin to retry completion/upload; stale staging is eventually cleaned |
-| R2 copy to final key fails | File stays `uploading`, no active metadata | Retry `POST /complete`; check R2 token has CopyObject permission |
-| R2 staging deletion fails after activation | `uploadKey` is retained internally | Daily cleanup removes only the staging copy later |
-| R2 delete fails during permanent deletion | Metadata rolls back to Trash where possible; audit/log records error | Retry permanent delete or wait for cleanup |
-| R2 succeeds but Firestore completion is interrupted | Metadata stays `deleting` | Cleanup safely repeats idempotent DELETE and completes record |
-| A cleanup lock is stranded | Lock becomes stale after 20 minutes | Next run reclaims it; investigate function timeout/logs |
-| `SERVICE_CONFIGURATION_ERROR` | Route is unavailable by design | Check server-only Vercel environment variables; do not paste secrets into tickets |
-
-## Every dashboard module fails at once
-
-When *all* admin screens (`/admin/users`, `/admin/files`, `/admin/recent`,
-`/admin/favorites`, `/admin/retention`) fail together, the cause is almost always
-shared server configuration rather than any one page. Diagnose in this order:
-
-1. **Read the API response body, not just the banner.** The dashboard shows a
-   generic "Something went wrong" container, but every `/api/*` response carries
-   `error.code` and `error.message`. That code is the diagnosis:
-   - `SERVICE_CONFIGURATION_ERROR` (503) — a server-only variable is missing or
-     malformed. The message names it, e.g. `Missing server configuration for
-     firebase: FIREBASE_PRIVATE_KEY`. Re-signing in will never fix this.
-   - `SESSION_EXPIRED` / `UNAUTHENTICATED` (401) — the visitor's session really
-     is gone; sign in again.
-   - `FILES_UNAVAILABLE` (503) — Firestore rejected or timed out the query.
-2. **Confirm it is not storage.** `GET /api/v1/health` is unauthenticated and
-   always answers; `blobConfigured: false` means the Blob store credentials are
-   missing, which breaks uploads but never the users/files listings.
-3. **Confirm it is not authorization.** A single 403 `FORBIDDEN` on one module
-   means the signed-in role lacks that capability, which is policy, not an
-   outage.
-
-Session verification deliberately keeps these apart: an identity-provider or
-configuration failure surfaces as a 503 so the operator sees the real cause,
-while only genuine credential problems are reported as an expired session.
-
-## Monitoring
-
-Review at least monthly:
-
-- Dashboard storage warning/critical indicators;
-- Audit entries for `CLEANUP_FAILURE`, `UPLOAD_FAILED`, and unexpected permanent deletes;
-- Vercel function errors/timeouts and cron invocation history;
-- R2 bucket access logs / token scope where available;
-- Firebase Authentication user and custom-claim changes;
-- Firestore index health and usage.
-
-The included in-memory rate limiter intentionally acts per warm Vercel instance to keep this deployment simple. Configure Vercel WAF/rate limiting for globally coordinated protection if the gateway is Internet-reachable.
-
-## Incident actions
-
-1. **Suspected credential exposure:** immediately revoke/rotate the R2 API token, Firebase service account key if exposed, integration key, and cron secret. Update Vercel environment variables, redeploy, and review logs/audit events.
-2. **Unexpected automatic deletion:** immediately disable Default automatic deletion / verify Trash safety in Settings. Restore from Trash where possible. Review the relevant `AUTO_DELETE` log and retention metadata.
-3. **Storage nearing critical limit:** remove unneeded recoverable Trash documents only after review; avoid changing global limits solely to hide a capacity problem.
-4. **Website integration abuse:** rotate `INTEGRATION_API_KEY`, update only the website server, and use Vercel WAF/rate rules. Do not place the replacement key in a frontend build.
+Back up PostgreSQL with point-in-time recovery and retain private Blob data according to organizational policy. A PostgreSQL backup alone does not contain PDF bytes, and a Blob inventory alone does not contain the metadata/audit relationship. See `docs/BACKUP.md`.

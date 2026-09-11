@@ -21,8 +21,7 @@ interface ListResponse {
   files: SerializedFile[];
   nextCursor: string | null;
   searchLimited: boolean;
-  /** True when the read was served without the composite Firestore index. */
-  degraded?: boolean;
+  /** True when the read was served without the composite PostgreSQL index. */
   pagination?: { count: number; pageSize: number; nextCursor: string | null; hasMore: boolean };
 }
 
@@ -341,9 +340,6 @@ export function FilesView({
             detail={{
               code: errorInfo.code,
               requestId: errorInfo.requestId,
-              cause: errorInfo.cause,
-              causeCode: errorInfo.causeCode,
-              hint: errorInfo.hint,
             }}
           />
         </div>
@@ -363,23 +359,9 @@ export function FilesView({
                   {retrying ? "Retrying…" : "Retry"}
                 </button>
               </div>
-              {/* The real backend cause + request id, never a bare "something went wrong". */}
-              {errorInfo.cause && (
-                <p className="mt-1.5 break-words font-mono text-[12px] leading-5">
-                  {errorInfo.causeCode ? `${errorInfo.causeCode}: ` : ""}
-                  {errorInfo.cause}
-                </p>
-              )}
-              {errorInfo.hint && <p className="mt-1 text-[12px] leading-5">{errorInfo.hint}</p>}
               <p className="mt-1 font-mono text-[11px] opacity-80">
                 {[errorInfo.code, errorInfo.requestId ? `request ${errorInfo.requestId}` : null].filter(Boolean).join(" · ")}
               </p>
-            </div>
-          )}
-          {data.degraded && (
-            <div className="rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2 text-[12px] leading-5 text-amber-800 dark:text-amber-300" role="status">
-              Showing real data from a degraded read: the Firestore composite index for this view is missing, so results are
-              sorted in memory. Deploy it with <span className="font-mono">npx firebase deploy --only firestore:indexes</span>.
             </div>
           )}
           <FileTable

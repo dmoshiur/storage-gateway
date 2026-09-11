@@ -3,9 +3,9 @@ import { success } from "@/lib/api/response";
 import { parseJson } from "@/lib/api/body";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
-import { getSettings, serializeSettings, updateSettings } from "@/lib/firestore/settings";
-import { applyDefaultRetentionToActiveFiles } from "@/lib/firestore/files";
-import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
+import { getSettings, serializeSettings, updateSettings } from "@/lib/db/settings";
+import { applyDefaultRetentionToActiveFiles } from "@/lib/db/files";
+import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
 import { settingsPatchSchema } from "@/lib/validation/schemas";
 
 export const runtime = "nodejs";

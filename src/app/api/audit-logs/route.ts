@@ -4,7 +4,7 @@ import { success } from "@/lib/api/response";
 import { parseQuery } from "@/lib/api/body";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
-import { listAuditLogs } from "@/lib/firestore/audit";
+import { listAuditLogs } from "@/lib/db/audit";
 
 export const runtime = "nodejs";
 

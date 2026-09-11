@@ -22,15 +22,15 @@ interface QueueItem {
   /** SHA-256 of the bytes, kept so a finalize retry sends the same value. */
   contentHash: string | null;
   /**
-   * The bytes are safely in private Blob but the Firestore metadata write
+   * The bytes are safely in private Blob but the PostgreSQL metadata write
    * failed. Retrying must re-run finalization only — re-uploading would create
    * a second orphaned object.
    */
   orphaned: boolean;
 }
 
-const ACCEPT = ".pdf,.doc,.docx,.txt,.ppt,.pptx,application/pdf";
-const SUPPORTED_NAME = /\.(pdf|doc|docx|txt|ppt|pptx)$/i;
+const ACCEPT = ".pdf,application/pdf";
+const SUPPORTED_NAME = /\.pdf$/i;
 
 /**
  * Guard rails that make a wedged upload impossible.
@@ -146,8 +146,8 @@ async function uploadPresignedGuarded(params: GuardedUploadParams): Promise<void
 
 /**
  * OIDC-compatible direct-to-storage upload (fixed flow):
- *  1. POST /api/files/upload/init — creates the Firestore file record and
- *     returns the storage pathname (pdfs/YYYY/MM/<uuid>.ext).
+ *  1. POST /api/files/upload/init — creates the PostgreSQL file record and
+ *     returns the storage pathname (pdfs/YYYY/MM/<uuid>.pdf).
  *  2. uploadPresigned(pathname, file) — POSTs /api/blob/upload, which signs a
  *     put-scoped delegation with `issueSignedToken` (works with OIDC
  *     BLOB_STORE_ID + VERCEL_OIDC_TOKEN or a static read-write token), then
@@ -311,7 +311,7 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
     const emptyFiles = candidates.filter((file) => file.size === 0);
     const unsupported = candidates.filter((file) => !SUPPORTED_NAME.test(file.name));
     if (emptyFiles.length > 0) toast("Empty files cannot be uploaded.", "warning");
-    if (unsupported.length > 0) toast("Only PDF, DOC, DOCX, TXT, PPT, and PPTX files can be uploaded.", "warning");
+    if (unsupported.length > 0) toast("Only PDF files can be uploaded.", "warning");
     const list = candidates.filter((file) => file.size > 0 && SUPPORTED_NAME.test(file.name)).slice(0, 10);
     if (list.length === 0) return;
     setItems((current) => [
@@ -349,7 +349,7 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <Dialog title="Upload documents" description="Files stream directly to private storage. PDF, DOC, DOCX, TXT, PPT, PPTX up to the configured limit." onClose={close} wide>
+    <Dialog title="Upload PDFs" description="Files stream directly to private Vercel Blob storage. PDF files up to the configured limit." onClose={close} wide>
       <div className="space-y-4">
         <div>
           <label className="field-label" htmlFor="upload-category">Category (applies to new uploads)</label>

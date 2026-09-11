@@ -55,6 +55,7 @@ export interface StorageStream {
   stream: ReadableStream<Uint8Array>;
   contentLength: number | null;
   contentType: string | null;
+  contentRange?: string | null;
   statusCode: number;
 }
 

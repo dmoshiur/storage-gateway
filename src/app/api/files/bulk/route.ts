@@ -16,9 +16,9 @@ import {
   revertPermanentDeletion,
   setFileFavorite,
   updateFileDetails,
-} from "@/lib/firestore/files";
-import { getSettings } from "@/lib/firestore/settings";
-import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
+} from "@/lib/db/files";
+import { getSettings } from "@/lib/db/settings";
+import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
 import { getStorageService } from "@/lib/storage";
 import { calculateDeleteAt } from "@/lib/retention";
 import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
@@ -28,7 +28,7 @@ export const runtime = "nodejs";
 
 const bulkSchema = z.object({
   action: z.enum(["trash", "restore", "delete", "favorite", "retention"]),
-  ids: z.array(z.string().min(8).max(200)).min(1).max(100),
+  ids: z.array(z.string().regex(/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i, "The file identifier is invalid.")).min(1).max(100),
   isFavorite: z.boolean().optional(),
   retention: retentionInputSchema.optional(),
 }).superRefine((value, ctx) => {
@@ -44,7 +44,7 @@ interface ItemResult {
   id: string;
   ok: boolean;
   error?: string;
-  /** Underlying dependency code (e.g. `FIRESTORE_UNAVAILABLE`) for failed rows. */
+  /** Underlying dependency code for failed rows. */
   code?: string;
 }
 
@@ -119,16 +119,19 @@ export async function POST(request: Request) {
         succeeded += 1;
         results.push({ id, ok: true });
       } catch (error) {
-        // Never report "Unexpected error." — the underlying Firestore/Blob cause
+        // Never report "Unexpected error." — the underlying PostgreSQL/Blob cause
         // is what the operator needs, both in the row and in the logs.
         const failure = describeFailure(error, "storage");
-        const message = error instanceof ApiError ? error.message : failure.message;
+        // Dependency messages stay in server logs; per-item API responses only
+        // expose a stable public message and machine-readable failure code.
+        const message = error instanceof ApiError ? error.message : "The action could not be completed.";
         results.push({ id, ok: false, error: message, code: failure.code });
         logger.error("Bulk file action item failed", {
           action: input.action,
           fileId: id,
           causeCode: failure.code,
-          error: message,
+          error: failure.message,
+          publicMessage: message,
           requestId,
         });
       }
@@ -141,6 +144,7 @@ export async function POST(request: Request) {
       action: auditAction,
       actor: auditActorFrom(actor),
       details: { count: input.ids.length, succeeded },
+      requestId,
     });
     return success({ succeeded, failed: input.ids.length - succeeded, results }, requestId);
   }, { route: "files/bulk" });

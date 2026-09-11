@@ -42,7 +42,7 @@ export async function apiRoute(request: Request, handler: (requestId: string) =>
 }
 
 export function requireRouteId(value: string): string {
-  if (!/^[A-Za-z0-9_-]{8,200}$/.test(value)) {
+  if (!/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(value)) {
     throw new ApiError(400, "INVALID_FILE_ID", "The file identifier is invalid.");
   }
   return value;

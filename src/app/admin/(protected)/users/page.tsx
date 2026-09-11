@@ -34,8 +34,10 @@ export default function UsersPage() {
   const [inviteOpen, setInviteOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<Role>("viewer");
+  const [initialPassword, setInitialPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [activity, setActivity] = useState<{ user: ManagedUser; logs: { id: string; action: string; createdAt: string; fileName?: string }[] } | null>(null);
 
   if (session && session.role !== "admin") {
     return (
@@ -49,11 +51,12 @@ export default function UsersPage() {
     setBusy(true);
     setFormError(null);
     try {
-      await apiFetch("/api/users", { method: "POST", body: JSON.stringify({ email, role }) });
-      toast("User invited. They can sign in with email and password.");
+      const result = await apiFetch<{ user: ManagedUser & { temporaryPassword?: string } }>("/api/users", { method: "POST", body: JSON.stringify({ email, role, password: initialPassword || undefined }) });
+      toast(result.user.temporaryPassword ? `User created. Temporary password: ${result.user.temporaryPassword}` : "User created. Share the initial password securely.");
       setInviteOpen(false);
       setEmail("");
       setRole("viewer");
+      setInitialPassword("");
       refresh();
     } catch (inviteError) {
       setFormError(inviteError instanceof ClientApiError ? inviteError.message : "Invitation failed.");
@@ -73,6 +76,50 @@ export default function UsersPage() {
       refresh();
     } catch (roleError) {
       toast(roleError instanceof ClientApiError ? roleError.message : "Role change failed.", "error");
+    }
+  };
+
+  const resetPassword = async (user: ManagedUser) => {
+    const ok = await confirm({ title: "Reset this user password?", description: `${user.email ?? user.uid} will be signed out of every active session.`, confirmLabel: "Reset password", tone: "danger" });
+    if (!ok) return;
+    try {
+      const result = await apiFetch<{ reset: boolean; temporaryPassword?: string }>(`/api/users/${user.uid}/reset-password`, { method: "POST", body: JSON.stringify({}) });
+      toast(result.temporaryPassword ? `Password reset. Temporary password: ${result.temporaryPassword}` : "Password reset and all sessions revoked.");
+    } catch (resetError) {
+      toast(resetError instanceof ClientApiError ? resetError.message : "Password reset failed.", "error");
+    }
+  };
+
+  const revokeSessions = async (user: ManagedUser) => {
+    const ok = await confirm({ title: "Sign out all sessions?", description: `${user.email ?? user.uid} will need to sign in again on every device.`, confirmLabel: "Sign out sessions", tone: "danger" });
+    if (!ok) return;
+    try {
+      const result = await apiFetch<{ revoked: number }>(`/api/users/${user.uid}/sessions`, { method: "DELETE" });
+      toast(`${result.revoked} session${result.revoked === 1 ? "" : "s"} revoked.`);
+    } catch (revokeError) {
+      toast(revokeError instanceof ClientApiError ? revokeError.message : "Session revocation failed.", "error");
+    }
+  };
+
+  const deleteUser = async (user: ManagedUser) => {
+    if (user.uid === session?.uid) return;
+    const ok = await confirm({ title: "Delete this user?", description: `${user.email ?? user.uid} will be disabled, soft-deleted, and signed out everywhere.`, confirmLabel: "Delete user", tone: "danger", requireText: "DELETE" });
+    if (!ok) return;
+    try {
+      await apiFetch(`/api/users/${user.uid}`, { method: "DELETE" });
+      toast("User deleted.");
+      refresh();
+    } catch (deleteError) {
+      toast(deleteError instanceof ClientApiError ? deleteError.message : "User deletion failed.", "error");
+    }
+  };
+
+  const viewActivity = async (user: ManagedUser) => {
+    try {
+      const result = await apiFetch<{ activity: { id: string; action: string; createdAt: string; fileName?: string }[] }>(`/api/users/${user.uid}`);
+      setActivity({ user, logs: result.activity });
+    } catch (activityError) {
+      toast(activityError instanceof ClientApiError ? activityError.message : "Activity could not be loaded.", "error");
     }
   };
 
@@ -104,7 +151,7 @@ export default function UsersPage() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="page-title">Users</h1>
-          <p className="page-sub">Invite teammates, assign roles, and manage access.</p>
+          <p className="page-sub">Create local accounts, assign roles, and manage access.</p>
         </div>
         <button type="button" className="btn-primary btn-sm" onClick={() => setInviteOpen(true)}>
           <UserPlus className="h-4 w-4" /> Invite user
@@ -171,9 +218,13 @@ export default function UsersPage() {
                           </button>
                         ))}
                         <div className="menu-sep" />
+                        <button type="button" className="menu-item" onClick={() => viewActivity(user)}>View activity</button>
+                        <button type="button" className="menu-item" onClick={() => revokeSessions(user)}>Sign out sessions</button>
+                        <button type="button" className="menu-item" onClick={() => resetPassword(user)}>Reset password</button>
                         <button type="button" className="menu-item" data-danger={!user.disabled} onClick={() => toggleDisabled(user)}>
                           {user.disabled ? "Re-enable user" : "Disable user"}
                         </button>
+                        {user.uid !== session?.uid && <button type="button" className="menu-item" data-danger="true" onClick={() => deleteUser(user)}>Delete user</button>}
                       </Dropdown>
                     </td>
                   </tr>
@@ -185,11 +236,16 @@ export default function UsersPage() {
       )}
 
       {inviteOpen && (
-        <Dialog title="Invite user" description="They sign in with email and password. Roles can be changed later." onClose={() => setInviteOpen(false)}>
+          <Dialog title="Create user" description="This account signs in directly with email and password. Share the password through a secure channel." onClose={() => setInviteOpen(false)}>
           <div className="space-y-4">
             <div>
               <label className="field-label" htmlFor="invite-email">Email</label>
               <input id="invite-email" type="email" className="field-input" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="teammate@organization.org" />
+            </div>
+            <div>
+              <label className="field-label" htmlFor="invite-password">Initial password</label>
+              <input id="invite-password" type="password" minLength={12} className="field-input" value={initialPassword} onChange={(event) => setInitialPassword(event.target.value)} placeholder="At least 12 characters (optional)" autoComplete="new-password" />
+              <p className="field-hint">Leave blank to generate a one-time temporary password shown after creation.</p>
             </div>
             <div>
               <label className="field-label" htmlFor="invite-role">Role</label>
@@ -207,6 +263,11 @@ export default function UsersPage() {
               </button>
             </div>
           </div>
+        </Dialog>
+      )}
+      {activity && (
+        <Dialog title={`Activity · ${activity.user.email ?? activity.user.uid}`} description="Recent audit events for this account." onClose={() => setActivity(null)}>
+          {activity.logs.length === 0 ? <p className="text-sm text-ink-muted">No activity recorded yet.</p> : <div className="max-h-80 space-y-2 overflow-y-auto">{activity.logs.map((log) => <div key={log.id} className="flex items-start justify-between gap-3 border-b border-line pb-2 text-[13px]"><span className="font-medium text-ink">{log.action}{log.fileName ? ` · ${log.fileName}` : ""}</span><RelativeTime iso={log.createdAt} /></div>)}</div>}
         </Dialog>
       )}
     </div>

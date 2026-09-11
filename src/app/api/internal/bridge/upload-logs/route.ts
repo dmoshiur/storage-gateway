@@ -1,9 +1,10 @@
 import { apiRoute } from "@/lib/api/route";
 import { success } from "@/lib/api/response";
+import { toServiceFailure } from "@/lib/api/failures";
 import { parseJson } from "@/lib/api/body";
 import { requireIntegrationKey } from "@/lib/security/request-auth";
 import { bridgeUploadLogSchema } from "@/lib/validation/bridge";
-import { recordUploadLog } from "@/lib/firestore/api-metrics";
+import { recordUploadLog } from "@/lib/db/api-metrics";
 
 export const runtime = "nodejs";
 
@@ -20,15 +21,27 @@ export async function POST(request: Request) {
   return apiRoute(request, async (requestId) => {
     await requireIntegrationKey(request);
     const entry = await parseJson(request, bridgeUploadLogSchema, 4096);
-    await recordUploadLog({
-      keyId: entry.keyId,
-      filename: entry.filename,
-      sizeBytes: entry.sizeBytes,
-      status: entry.status,
-      failureCode: entry.failureCode,
-      requestId: entry.requestId,
-      timestamp: entry.timestamp,
-    });
+    try {
+      await recordUploadLog({
+        keyId: entry.keyId,
+        filename: entry.filename,
+        sizeBytes: entry.sizeBytes,
+        status: entry.status,
+        failureCode: entry.failureCode,
+        requestId: entry.requestId,
+        timestamp: entry.timestamp,
+      });
+    } catch (error) {
+      throw toServiceFailure({
+        status: 503,
+        code: "API_ACTIVITY_WRITE_FAILED",
+        message: "API upload activity could not be recorded in PostgreSQL. Please retry shortly.",
+        cause: error,
+        operation: "internal/bridge/upload-logs:record",
+        area: "database",
+        requestId,
+      });
+    }
     return success({ recorded: true }, requestId);
   }, { route: "internal/bridge/upload-logs" });
 }

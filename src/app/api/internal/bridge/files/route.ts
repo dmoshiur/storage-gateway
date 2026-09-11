@@ -3,13 +3,15 @@ import { success } from "@/lib/api/response";
 import { parseJson } from "@/lib/api/body";
 import { requireIntegrationKey } from "@/lib/security/request-auth";
 import { bridgeRegisterFileSchema } from "@/lib/validation/bridge";
-import { assertDocumentMetadata, stripDocumentExtension } from "@/lib/validation/documents";
-import { createBridgeFile, serializeFile } from "@/lib/firestore/files";
-import { getSettings } from "@/lib/firestore/settings";
-import { getStorageStats } from "@/lib/firestore/stats";
-import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
+import { assertDocumentMetadata, assertValidatedBlobDocument, stripDocumentExtension } from "@/lib/validation/documents";
+import { createBridgeFile, serializeFile } from "@/lib/db/files";
+import { getSettings } from "@/lib/db/settings";
+import { getStorageStats } from "@/lib/db/stats";
+import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
 import { defaultRetention } from "@/lib/retention";
+import { getStorageService } from "@/lib/storage";
 import { ApiError } from "@/lib/api/errors";
+import { toServiceFailure } from "@/lib/api/failures";
 
 export const runtime = "nodejs";
 
@@ -28,11 +30,39 @@ export async function POST(request: Request) {
   return apiRoute(request, async (requestId) => {
     const actor = await requireIntegrationKey(request);
     const input = await parseJson(request, bridgeRegisterFileSchema, 32 * 1024);
-    const [settings, stats] = await Promise.all([getSettings(), getStorageStats()]);
+    let settings: Awaited<ReturnType<typeof getSettings>>;
+    let stats: Awaited<ReturnType<typeof getStorageStats>>;
+    try {
+      [settings, stats] = await Promise.all([getSettings(), getStorageStats()]);
+    } catch (error) {
+      throw toServiceFailure({
+        status: 503,
+        code: "STORAGE_METADATA_UNAVAILABLE",
+        message: "Upload limits could not be read from PostgreSQL. Please retry shortly.",
+        cause: error,
+        operation: "internal/bridge/files:limits",
+        area: "database",
+        requestId,
+      });
+    }
     const document = assertDocumentMetadata(input.originalName, input.size, settings.maxPdfSizeBytes, input.mimeType);
     if (stats.totalStorageBytes + input.size > settings.storageLimitBytes) {
       throw new ApiError(409, "STORAGE_LIMIT_EXCEEDED", "Uploading this document would exceed the configured storage limit.");
     }
+    const storage = getStorageService();
+    const [metadata, firstBytes, lastBytes] = await Promise.all([
+      storage.getMetadata(input.storagePath),
+      storage.download(input.storagePath, "bytes=0-2047"),
+      storage.download(input.storagePath, "bytes=-2048"),
+    ]);
+    assertValidatedBlobDocument({
+      originalName: input.originalName,
+      expectedSize: input.size,
+      actualSize: metadata.contentLength,
+      contentType: metadata.contentType,
+      firstBytes,
+      lastBytes,
+    });
 
     const file = await createBridgeFile({
       storagePath: input.storagePath,
@@ -54,6 +84,7 @@ export async function POST(request: Request) {
       fileId: file.id,
       fileName: file.originalName,
       details: { size: file.size },
+      requestId,
     });
     return success({ file: serializeFile(file) }, requestId, 201);
   }, { route: "internal/bridge/files" });

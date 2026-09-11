@@ -5,9 +5,9 @@ import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { parseJson } from "@/lib/api/body";
 import { uploadInitSchema } from "@/lib/validation/schemas";
 import { assertDocumentMetadata, stripDocumentExtension } from "@/lib/validation/documents";
-import { getSettings } from "@/lib/firestore/settings";
-import { createUploadingFile, findActiveFileByContentHash, markUploadFailed, serializeFile } from "@/lib/firestore/files";
-import { getStorageStats } from "@/lib/firestore/stats";
+import { getSettings } from "@/lib/db/settings";
+import { createUploadingFile, findActiveFileByContentHash, markUploadFailed, serializeFile } from "@/lib/db/files";
+import { getStorageStats } from "@/lib/db/stats";
 import { defaultRetention } from "@/lib/retention";
 import { getStorageService } from "@/lib/storage";
 import { toServiceFailure } from "@/lib/api/failures";
@@ -30,7 +30,7 @@ export async function POST(request: Request) {
     try {
       [settings, stats] = await Promise.all([getSettings(), getStorageStats()]);
     } catch (error) {
-      // The real Firestore failure is logged and returned; a bare
+      // The real PostgreSQL failure is logged and returned; a bare
       // "temporarily unavailable" left operators with nothing to act on.
       throw toServiceFailure({
         status: 503,
@@ -38,7 +38,7 @@ export async function POST(request: Request) {
         message: "Upload limits could not be read from the metadata store.",
         cause: error,
         operation: "files/upload/init:settings",
-        area: "firestore",
+        area: "database",
         requestId,
       });
     }

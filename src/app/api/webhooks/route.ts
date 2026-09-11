@@ -5,7 +5,7 @@ import { parseJson } from "@/lib/api/body";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { createWebhook, listWebhooks } from "@/lib/webhooks/store";
-import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
+import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
 import { WEBHOOK_EVENTS } from "@/types/webhook";
 
 export const runtime = "nodejs";
@@ -34,6 +34,7 @@ export async function POST(request: Request) {
       action: "WEBHOOK_CREATED",
       actor: auditActorFrom(actor),
       details: { webhookId: webhook.id, url: webhook.url },
+      requestId,
     });
     // The secret is shown exactly once.
     return success({ webhook, secret }, requestId, 201);

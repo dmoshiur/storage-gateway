@@ -1,17 +1,36 @@
 "use client";
 
-import { Moon, Sun, Monitor } from "lucide-react";
-import { useSession, useTheme } from "@/components/providers";
+import { useState } from "react";
+import { Moon, Sun, Monitor, KeyRound } from "lucide-react";
+import { useSession, useTheme, useToast } from "@/components/providers";
+import { apiFetch, ClientApiError } from "@/lib/client/api";
 import { Avatar, RelativeTime } from "@/components/ui/data";
 import { useQuery } from "@/hooks/use-query";
 
 export default function AccountPage() {
   const { session } = useSession();
   const { theme, setTheme } = useTheme();
+  const { toast } = useToast();
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [changingPassword, setChangingPassword] = useState(false);
   const users = useQuery<{ users: { uid: string; email: string | null; createdAt: string | null; lastLoginAt: string | null }[] }>(
     session?.role === "admin" ? "/api/users?limit=100" : null,
   );
   const me = users.data?.users.find((user) => user.uid === session?.uid);
+  const changePassword = async () => {
+    setChangingPassword(true);
+    try {
+      await apiFetch("/api/auth/password/change", { method: "POST", body: JSON.stringify({ currentPassword, newPassword }) });
+      setCurrentPassword("");
+      setNewPassword("");
+      toast("Password changed. Sign in again with the new password.");
+    } catch (error) {
+      toast(error instanceof ClientApiError ? error.message : "Password change failed.", "error");
+    } finally {
+      setChangingPassword(false);
+    }
+  };
 
   return (
     <div className="mx-auto max-w-2xl space-y-4">
@@ -41,6 +60,15 @@ export default function AccountPage() {
             <dd className="font-medium text-ink">{me?.lastLoginAt ? <RelativeTime iso={me.lastLoginAt} /> : "—"}</dd>
           </div>
         </dl>
+      </div>
+      <div className="card-pad">
+        <h2 className="panel-title"><KeyRound className="mr-1.5 inline h-4 w-4" />Change password</h2>
+        <p className="panel-sub">Changing your password revokes every active session for this account.</p>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <div><label className="field-label" htmlFor="current-password">Current password</label><input id="current-password" type="password" className="field-input" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} autoComplete="current-password" /></div>
+          <div><label className="field-label" htmlFor="new-password">New password</label><input id="new-password" type="password" minLength={12} className="field-input" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} autoComplete="new-password" /></div>
+        </div>
+        <div className="mt-3 flex justify-end"><button type="button" className="btn-primary" disabled={changingPassword || !currentPassword || newPassword.length < 12} onClick={() => void changePassword()}>{changingPassword ? "Changing…" : "Change password"}</button></div>
       </div>
       <div className="card-pad">
         <h2 className="panel-title">Appearance</h2>

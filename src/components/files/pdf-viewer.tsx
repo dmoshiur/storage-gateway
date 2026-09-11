@@ -4,16 +4,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Download, ExternalLink, LoaderCircle, Maximize2, Minimize2, RotateCw, X } from "lucide-react";
 import { useToast } from "@/components/providers";
 import { useOverlayBehavior } from "@/components/ui/overlays";
-import { apiErrorOptions, ClientApiError } from "@/lib/client/api";
+import { apiErrorOptions } from "@/lib/client/api";
 import { fetchStreamedFile, saveBlobAsFile } from "@/lib/client/download";
 import type { SerializedFile } from "@/types/file";
 import { displayName } from "@/components/files/file-helpers";
 
-/** Appends the real backend cause when the API reported one. */
 function describeFailure(error: unknown, fallback: string): string {
-  const options = apiErrorOptions(error, fallback);
-  const cause = error instanceof ClientApiError ? error.causeMessage : null;
-  return cause ? `${options.message} (${cause})` : options.message;
+  return apiErrorOptions(error, fallback).message;
 }
 
 export function PdfViewer({ file, onClose }: { file: SerializedFile; onClose: () => void }) {
@@ -48,9 +45,9 @@ export function PdfViewer({ file, onClose }: { file: SerializedFile; onClose: ()
     releaseObjectUrl();
     setUrl(null);
     try {
-      // The PDF is streamed through our own authenticated route: Firebase
+      // The PDF is streamed through our own authenticated route: first-party auth
       // session verified server-side, role authorized, metadata read from
-      // Firestore, bytes fetched from the private Blob store. The browser only
+      // PostgreSQL, bytes fetched from the private Blob store. The browser only
       // ever sees a local blob: URL for rendering.
       const blob = await fetchStreamedFile(`/api/files/${file.id}/preview?stream=true`);
       const objectUrl = URL.createObjectURL(blob);

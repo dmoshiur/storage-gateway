@@ -1,9 +1,8 @@
 import { apiRoute } from "@/lib/api/route";
 import { success } from "@/lib/api/response";
-import { ApiError } from "@/lib/api/errors";
 import { toServiceFailure } from "@/lib/api/failures";
 import { parseQuery } from "@/lib/api/body";
-import { listFiles } from "@/lib/firestore/files";
+import { listFiles } from "@/lib/db/files";
 import { requireReadActor } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { listFilesQuerySchema } from "@/lib/validation/schemas";
@@ -13,11 +12,9 @@ export const runtime = "nodejs";
 /**
  * GET /api/files — the Files page data source.
  *
- * Reads real metadata from the Firestore `files` collection through the Admin
- * SDK. There is no fallback dataset: when Firestore fails, the underlying
- * cause is logged with the requestId and returned to the caller inside
- * `error.details` so the dashboard can show *why* it could not load instead
- * of a bare "something went wrong".
+ * Reads real metadata from the PostgreSQL `files` table. There is no fallback
+ * dataset: when PostgreSQL fails, the underlying cause is logged with the
+ * requestId and the caller receives a structured, retryable error.
  */
 export async function GET(request: Request) {
   return apiRoute(request, async (requestId) => {
@@ -35,14 +32,13 @@ export async function GET(request: Request) {
       });
       return success(result, requestId);
     } catch (error) {
-      if (error instanceof ApiError) throw error;
       throw toServiceFailure({
         status: 503,
         code: "FILES_FETCH_FAILED",
         message: "Unable to load files. The file metadata store did not answer.",
         cause: error,
         operation: "files/list",
-        area: "firestore",
+        area: "database",
         requestId,
         context: { status: query.status, filter: query.filter, sort: query.sort },
       });

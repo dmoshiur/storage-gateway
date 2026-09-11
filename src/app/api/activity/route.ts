@@ -4,7 +4,7 @@ import { success } from "@/lib/api/response";
 import { parseQuery } from "@/lib/api/body";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
-import { listAuditLogs } from "@/lib/firestore/audit";
+import { listAuditLogs } from "@/lib/db/audit";
 import type { AuditAction, SerializedAuditLog } from "@/types/audit";
 
 export const runtime = "nodejs";
@@ -52,6 +52,9 @@ function describe(log: SerializedAuditLog): string {
     USER_ROLE_CHANGED: "changed a user role",
     USER_DISABLED: "disabled a user",
     USER_ENABLED: "re-enabled a user",
+    USER_DELETED: "deleted a user",
+    PASSWORD_RESET: "reset a user password",
+    SESSIONS_REVOKED: "revoked a user's sessions",
     WEBHOOK_CREATED: "created a webhook",
     WEBHOOK_UPDATED: "updated a webhook",
     WEBHOOK_DELETED: "deleted a webhook",

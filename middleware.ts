@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const SESSION_COOKIE_NAME = "ngo_gateway_session";
+const SESSION_COOKIE_NAME = "storage_gateway_session";
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;

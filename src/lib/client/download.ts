@@ -7,10 +7,10 @@ import { ClientApiError } from "@/lib/client/api";
  *
  * `/api/files/:id/preview?stream=true` and `/api/files/:id/download?stream=true`
  * return the private PDF bytes through our own API route (session cookie
- * auth + role authorization + Firestore lookup), so the browser never receives
+ * auth + role authorization + PostgreSQL lookup), so the browser never receives
  * a Vercel Blob URL — not a permanent one and not even a short-lived signed
  * one. These helpers turn that response into a Blob / a saved file while
- * keeping the same structured error shape as `apiFetch`.
+ * keeping the same public error envelope as `apiFetch`.
  */
 
 interface StreamErrorEnvelope {
@@ -19,7 +19,6 @@ interface StreamErrorEnvelope {
     code?: string;
     message?: string;
     requestId?: string;
-    details?: Record<string, string | number | boolean>;
   };
   requestId?: string;
 }
@@ -44,7 +43,6 @@ export async function fetchStreamedFile(path: string): Promise<Blob> {
       {
         status: response.status,
         requestId: payload?.error?.requestId ?? payload?.requestId ?? null,
-        details: payload?.error?.details,
       },
     );
   }

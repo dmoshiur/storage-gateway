@@ -4,7 +4,7 @@ import { ApiError } from "@/lib/api/errors";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { rotateWebhookSecret } from "@/lib/webhooks/store";
-import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
+import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
 
 export const runtime = "nodejs";
 
@@ -19,6 +19,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       action: "WEBHOOK_UPDATED",
       actor: auditActorFrom(actor),
       details: { webhookId: id, rotated: true },
+      requestId,
     });
     return success({ secret }, requestId);
   }, { route: "webhooks/rotate" });

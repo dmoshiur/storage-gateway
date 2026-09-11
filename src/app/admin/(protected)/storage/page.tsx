@@ -8,7 +8,6 @@ import { formatBytes, formatNumber } from "@/utils/format";
 import type { SerializedFile } from "@/types/file";
 
 interface StoragePayload {
-  source: "live" | "fallback";
   stats: {
     totalPdfCount: number;
     activeFileCount: number;
@@ -56,13 +55,6 @@ export default function StoragePage() {
         <h1 className="page-title">Storage</h1>
         <p className="page-sub">Usage, growth, and largest documents across the private Blob store.</p>
       </div>
-      {storage.data.source === "fallback" && (
-        <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2.5 text-sm text-amber-800 dark:text-amber-200" role="status">
-          Live storage metrics are temporarily unavailable. Displayed totals are degraded and not authoritative; retry to reconnect.
-          <button type="button" className="btn-ghost btn-sm ml-2 align-middle" onClick={storage.refresh}>Retry</button>
-        </div>
-      )}
-
       <div className="card-pad">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="panel-title">Storage overview</h2>
