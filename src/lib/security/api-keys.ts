@@ -2,7 +2,7 @@ import "server-only";
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { ApiError } from "@/lib/api/errors";
-import { query, toDate } from "@/lib/db/client";
+import { query, toDate, SQL_NOW } from "@/lib/db/client";
 import { recordApiRequestSafe, type ApiRequestContext } from "@/lib/db/api-metrics";
 import { API_SCOPES, type ApiScope } from "@/lib/security/scopes";
 
@@ -83,13 +83,13 @@ export async function rotateApiKey(id: string): Promise<{ id: string; keyId: str
 
 export async function updateApiKey(id: string, patch: { name?: string; scopes?: ApiScope[]; expiresAt?: Date | null }): Promise<void> {
   await query(
-    `UPDATE api_keys SET name = COALESCE($2, name), scopes = COALESCE($3, scopes), expires_at = CASE WHEN $4::boolean THEN $5 ELSE expires_at END WHERE id = $1 AND kind = 'bridge'`,
+    `UPDATE api_keys SET name = COALESCE($2, name), scopes = COALESCE($3, scopes), expires_at = CASE WHEN $4 THEN $5 ELSE expires_at END WHERE id = $1 AND kind = 'bridge'`,
     [id, patch.name?.trim().slice(0, 80) || null, patch.scopes ?? null, patch.expiresAt !== undefined, patch.expiresAt ?? null],
   );
 }
 
 export async function revokeApiKey(id: string): Promise<void> {
-  const result = await query(`UPDATE api_keys SET revoked_at = now() WHERE id = $1 AND kind = 'bridge'`, [id]);
+  const result = await query(`UPDATE api_keys SET revoked_at = ${SQL_NOW} WHERE id = $1 AND kind = 'bridge'`, [id]);
   if (!result.rowCount) throw new ApiError(404, "API_KEY_NOT_FOUND", "The API key was not found.");
 }
 
@@ -139,7 +139,7 @@ export async function verifyApiKey(key: string, requestContext: ApiRequestContex
   const result = await query(`SELECT id, revoked_at, expires_at, secret_hash, legacy_hash FROM api_keys WHERE kind = 'bridge' AND (legacy_hash = $1 OR secret_hash = $1) LIMIT 1`, [hash(key)]);
   const row = result.rows[0];
   if (!row || row.revoked_at || expired(row.expires_at)) return null;
-  await query(`UPDATE api_keys SET last_used_at = now() WHERE id = $1`, [row.id]);
+  await query(`UPDATE api_keys SET last_used_at = ${SQL_NOW} WHERE id = $1`, [row.id]);
   await recordApiRequestSafe("legacy", requestContext);
   return String(row.id);
 }

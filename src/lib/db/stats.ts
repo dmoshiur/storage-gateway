@@ -18,7 +18,7 @@ export interface StorageStats {
   pendingUploadBytes: number;
 }
 
-/** Compute storage metrics exclusively from PostgreSQL metadata and settings. */
+/** Compute storage metrics exclusively from database metadata and settings. */
 export async function getStorageStats(): Promise<StorageStats> {
   const [files, uploading, settings] = await Promise.all([listFilesForStats(), getUploadingFilesForReservation(), getSettings()]);
   const now = new Date();

@@ -19,22 +19,24 @@ export function enforceRateLimit(key: string, limit: number, windowMs = 60_000):
   if (existing.count > limit) throw new ApiError(429, "RATE_LIMITED", "Too many requests. Please wait a moment and try again.");
 }
 
-/** PostgreSQL-coordinated limiter for public/versioned API traffic across instances. */
+/** Turso-coordinated limiter for public/versioned API traffic across instances. */
 export async function enforceDatabaseRateLimit(key: string, limit: number, windowMs = 60_000): Promise<void> {
+  const nowIso = new Date().toISOString();
+  const windowCutoff = new Date(Date.now() - windowMs).toISOString();
   const result = await query<{ request_count: number }>(
     `INSERT INTO rate_limits(key, window_started_at, request_count, updated_at)
-     VALUES ($1, now(), 1, now())
+     VALUES ($1, $2, 1, $2)
      ON CONFLICT (key) DO UPDATE SET
-       window_started_at = CASE WHEN rate_limits.window_started_at <= now() - ($2::int * interval '1 millisecond') THEN now() ELSE rate_limits.window_started_at END,
-       request_count = CASE WHEN rate_limits.window_started_at <= now() - ($2::int * interval '1 millisecond') THEN 1 ELSE rate_limits.request_count + 1 END,
-       updated_at = now()
+       window_started_at = CASE WHEN rate_limits.window_started_at <= $3 THEN $2 ELSE rate_limits.window_started_at END,
+       request_count = CASE WHEN rate_limits.window_started_at <= $3 THEN 1 ELSE rate_limits.request_count + 1 END,
+       updated_at = $2
      RETURNING request_count`,
-    [key, windowMs],
+    [key, nowIso, windowCutoff],
   );
   if (Number(result.rows[0]?.request_count ?? 0) > limit) throw new ApiError(429, "RATE_LIMITED", "Too many requests. Please wait a moment and try again.");
 }
 
 export async function pruneDatabaseRateLimits(): Promise<number> {
-  const result = await query(`DELETE FROM rate_limits WHERE updated_at < now() - interval '2 hours'`);
+  const result = await query(`DELETE FROM rate_limits WHERE updated_at < $1`, [new Date(Date.now() - 2 * 3_600_000)]);
   return result.rowCount ?? 0;
 }

@@ -7,7 +7,7 @@ import { logger } from "@/lib/logging/logger";
 export async function writeAuditLog(input: Omit<AuditLogDocument, "createdAt"> & { requestId?: string | null }): Promise<void> {
   await query(
     `INSERT INTO audit_logs(action, actor_id, actor_email, actor_type, file_id, file_name, details, request_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
     [
       input.action,
       input.actor.uid,

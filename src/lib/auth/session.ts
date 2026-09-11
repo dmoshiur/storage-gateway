@@ -3,7 +3,7 @@ import "server-only";
 import { cookies } from "next/headers";
 import { createHash, randomBytes } from "node:crypto";
 import { ApiError, isApiError } from "@/lib/api/errors";
-import { query, toDate } from "@/lib/db/client";
+import { query, toDate, SQL_NOW } from "@/lib/db/client";
 import { actorFromUser, getUserForAuth, type AuthUserRow, recordAdminLogin } from "@/lib/db/users";
 import { verifyPassword } from "@/lib/auth/password";
 import { can, type Capability } from "@/lib/auth/authorization";
@@ -39,8 +39,8 @@ export async function createUserSession(
   const token = randomBytes(32).toString("base64url");
   await query(
     `INSERT INTO sessions(user_id, token_hash, ip_address, user_agent, expires_at)
-     VALUES ($1, $2, $3, $4, now() + ($5::int * interval '1 second'))`,
-    [user.id, tokenHash(token), clientIp(metadata.ip), metadata.userAgent?.slice(0, 500) ?? null, SESSION_MAX_AGE_SECONDS],
+     VALUES ($1, $2, $3, $4, $5)`,
+    [user.id, tokenHash(token), clientIp(metadata.ip), metadata.userAgent?.slice(0, 500) ?? null, new Date(Date.now() + SESSION_MAX_AGE_SECONDS * 1000)],
   );
   await recordAdminLogin(actorFromUser(user));
   return { cookie: token, actor: actorFromUser(user) };
@@ -71,13 +71,13 @@ async function verifySessionToken(value: string | undefined): Promise<SessionAct
   }>(
     `SELECT s.id, s.user_id, u.email, u.role, u.disabled, s.expires_at
      FROM sessions s JOIN users u ON u.id = s.user_id
-     WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now() AND u.deleted_at IS NULL
+     WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > ${SQL_NOW} AND u.deleted_at IS NULL
      LIMIT 1`,
     [tokenHash(value)],
   );
   const session = result.rows[0];
   if (!session || session.disabled) throw new ApiError(401, "SESSION_EXPIRED", "Your session has expired. Please sign in again.");
-  await query(`UPDATE sessions SET last_used_at = now() WHERE id = $1`, [session.id]);
+  await query(`UPDATE sessions SET last_used_at = ${SQL_NOW} WHERE id = $1`, [session.id]);
   return { uid: session.user_id, email: session.email, role: session.role === "admin" || session.role === "editor" || session.role === "viewer" ? session.role : "viewer", type: "admin" };
 }
 
@@ -98,11 +98,11 @@ export async function getSessionActorFromCookies(): Promise<SessionActor | null>
 
 export async function revokeSession(value: string | undefined): Promise<void> {
   if (!value) return;
-  await query(`UPDATE sessions SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL`, [tokenHash(value)]);
+  await query(`UPDATE sessions SET revoked_at = ${SQL_NOW} WHERE token_hash = $1 AND revoked_at IS NULL`, [tokenHash(value)]);
 }
 
 export async function revokeAllUserSessions(uid: string): Promise<void> {
-  await query(`UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, [uid]);
+  await query(`UPDATE sessions SET revoked_at = ${SQL_NOW} WHERE user_id = $1 AND revoked_at IS NULL`, [uid]);
 }
 
 export async function requireAdminFromCookies(capability: Capability = "manage_files"): Promise<SessionActor> {

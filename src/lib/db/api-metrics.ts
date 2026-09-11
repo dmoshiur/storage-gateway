@@ -45,9 +45,9 @@ export interface ApiRequestTotals {
 
 export async function getApiRequestTotals(lookbackDays = 366): Promise<ApiRequestTotals> {
   const result = await query<{ total: string; last_request: Date | null }>(
-    `SELECT count(*)::text AS total, max(created_at) AS last_request
-     FROM api_request_logs WHERE created_at >= now() - ($1::int * interval '1 day')`,
-    [lookbackDays],
+    `SELECT count(*) AS total, max(created_at) AS last_request
+     FROM api_request_logs WHERE created_at >= $1`,
+    [new Date(Date.now() - lookbackDays * 86_400_000)],
   );
   return { totalRequests: Number(result.rows[0]?.total ?? 0), lastRequestDate: toDate(result.rows[0]?.last_request)?.toISOString() ?? null };
 }
@@ -58,7 +58,7 @@ export async function recordUploadLog(entry: UploadLogEntry): Promise<void> {
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
     [entry.keyId, entry.filename, entry.sizeBytes, entry.status, entry.failureCode, entry.requestId, new Date(entry.timestamp)],
   );
-  await query(`DELETE FROM api_upload_logs WHERE id IN (SELECT id FROM api_upload_logs ORDER BY created_at DESC OFFSET $1)`, [MAX_UPLOAD_LOGS]);
+  await query(`DELETE FROM api_upload_logs WHERE id IN (SELECT id FROM api_upload_logs ORDER BY created_at DESC LIMIT -1 OFFSET $1)`, [MAX_UPLOAD_LOGS]);
 }
 
 export async function getRecentUploadLogs(limit = 5): Promise<RecentUploadLog[]> {

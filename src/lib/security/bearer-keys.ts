@@ -2,7 +2,7 @@ import "server-only";
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { ApiError } from "@/lib/api/errors";
-import { query, toDate } from "@/lib/db/client";
+import { query, toDate, SQL_NOW } from "@/lib/db/client";
 import { recordApiRequestSafe, type ApiRequestContext } from "@/lib/db/api-metrics";
 import { API_SCOPES, type ApiScope } from "@/lib/security/scopes";
 
@@ -32,13 +32,13 @@ export async function rotateBearerKey(id: string, rotatingActorUid?: string): Pr
   await query(`UPDATE api_keys SET rotated_from_id = $2 WHERE id = $1`, [created.id, id]); await query(`UPDATE api_keys SET rotated_to_id = $2 WHERE id = $1`, [id, created.id]);
   return created;
 }
-export async function revokeBearerKey(id: string): Promise<void> { const result = await query(`UPDATE api_keys SET revoked_at = now() WHERE id = $1 AND kind = 'bearer'`, [id]); if (!result.rowCount) throw new ApiError(404, "API_KEY_NOT_FOUND", "The API key was not found."); }
+export async function revokeBearerKey(id: string): Promise<void> { const result = await query(`UPDATE api_keys SET revoked_at = ${SQL_NOW} WHERE id = $1 AND kind = 'bearer'`, [id]); if (!result.rowCount) throw new ApiError(404, "API_KEY_NOT_FOUND", "The API key was not found."); }
 export interface VerifiedBearerKey { recordId: string; keyId: string; name: string; scopes: ApiScope[]; }
 export async function verifyBearerKey(token: string, requestContext: ApiRequestContext = {}): Promise<VerifiedBearerKey | null> {
   const trimmed = token.trim(); if (!trimmed.startsWith(BEARER_KEY_PREFIX) || trimmed.length < BEARER_KEY_PREFIX.length + 32 || !/^[A-Za-z0-9_-]+$/.test(trimmed)) return null;
   const digest = sha256(trimmed); const result = await query(`SELECT id, key_id, name, scopes, secret_hash, legacy_hash, revoked_at, expires_at FROM api_keys WHERE kind = 'bearer' AND (secret_hash = $1 OR legacy_hash = $1) LIMIT 1`, [digest]); const row = result.rows[0]; if (!row || row.revoked_at || expired(row.expires_at)) return null;
   const stored = String(row.secret_hash ?? row.legacy_hash ?? ""); if (!equal(stored, digest)) return null;
-  await query(`UPDATE api_keys SET last_used_at = now() WHERE id = $1`, [row.id]); await recordApiRequestSafe(String(row.key_id ?? "unknown"), requestContext);
+  await query(`UPDATE api_keys SET last_used_at = ${SQL_NOW} WHERE id = $1`, [row.id]); await recordApiRequestSafe(String(row.key_id ?? "unknown"), requestContext);
   return { recordId: String(row.id), keyId: String(row.key_id ?? ""), name: String(row.name ?? "Untitled key"), scopes: scopes(row.scopes) };
 }
 export function bearerTokenFrom(request: Request): string | null { const match = /^Bearer\s+(\S+)$/i.exec((request.headers.get("authorization") ?? "").trim()); return match?.[1] ?? null; }

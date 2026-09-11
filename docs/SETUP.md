@@ -1,15 +1,15 @@
 # Production setup
 
-## 1. PostgreSQL
+## 1. Turso (libSQL)
 
-Create a PostgreSQL 14 or newer database with TLS enabled for hosted deployments. Set `DATABASE_URL` and run:
+Create a Turso database (`turso db create`) and a database token (`turso db tokens create <db-name>`). Set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` and run:
 
 ```bash
 npm ci
 npm run db:migrate
 ```
 
-The migration runner takes a PostgreSQL advisory lock, records applied versions in `schema_migrations`, and is safe to run on every deployment. Set `INITIAL_ADMIN_EMAIL` and `INITIAL_ADMIN_PASSWORD` only for the first migration; the bootstrap password must be at least 12 characters.
+The migration runner uses a libSQL write transaction (SQLite serializes writers), records applied versions in `schema_migrations`, and is safe to run on every deployment. Set `INITIAL_ADMIN_EMAIL` and `INITIAL_ADMIN_PASSWORD` only for the first migration; the bootstrap password must be at least 12 characters.
 
 For Vercel, use a connection pooler or a provider connection string with a small pool. `src/lib/db/client.ts` caps the application pool and converts unavailable database failures into structured `503` errors.
 
@@ -40,6 +40,6 @@ Required variables are documented in `.env.example`. Generate secrets with a cry
 2. Create an editor and viewer under `/admin/users` with unique passwords.
 3. Verify editor upload/edit/Trash permissions and viewer read-only behavior.
 4. Upload a known-safe PDF, preview it, download it, edit metadata, move it to Trash, restore it, and permanently delete it.
-5. Confirm the file row exists in PostgreSQL and the object exists only in the private Blob store.
+5. Confirm the file row exists in Turso and the object exists only in the private Blob store.
 6. Create an API key, call `/api/v1/health` and `/api/v1/files`, then revoke the key and confirm `401`.
 7. Run a cleanup dry run and inspect the audit log.

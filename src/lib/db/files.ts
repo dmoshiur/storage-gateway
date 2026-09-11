@@ -1,7 +1,7 @@
 import "server-only";
 
 import { ApiError } from "@/lib/api/errors";
-import { query, withTransaction, toDate, nullableIso } from "@/lib/db/client";
+import { query, withTransaction, toDate, nullableIso, SQL_NOW } from "@/lib/db/client";
 import { calculateDeleteAt, type RetentionInput } from "@/lib/retention";
 import type { FileDocument, FileFilter, FileSort, FileStatus, RetentionType, SerializedFile } from "@/types/file";
 import { DOCUMENT_EXTENSION_BY_MIME, getDocumentExtension } from "@/lib/validation/documents";
@@ -108,7 +108,7 @@ async function syncTags(fileId: string, tags: string[], run: RunQuery = query as
   if (!clean.length) return;
   for (const tag of clean) await run(`INSERT INTO tags(name) VALUES ($1) ON CONFLICT (name) DO NOTHING`, [tag]);
   await run(`DELETE FROM file_tags WHERE file_id = $1`, [fileId]);
-  await run(`INSERT INTO file_tags(file_id, tag_id) SELECT $1, id FROM tags WHERE name = ANY($2::text[]) ON CONFLICT DO NOTHING`, [fileId, clean]);
+  await run(`INSERT INTO file_tags(file_id, tag_id) SELECT $1, id FROM tags WHERE name IN (SELECT value FROM json_each($2)) ON CONFLICT DO NOTHING`, [fileId, clean]);
 }
 
 function retentionValues(input: RetentionInput, now: Date): { autoDeleteEnabled: boolean; retentionType: RetentionType; customDeleteAt: Date | null; deleteAt: Date | null } {
@@ -139,9 +139,9 @@ export async function createUploadingFile(input: {
       `INSERT INTO files(storage_path, upload_key, original_name, title, description, category, tags, mime_type, extension,
          size_bytes, content_hash, uploaded_by, auto_delete_enabled, retention_type, custom_delete_at, delete_at,
          status, upload_expires_at, version)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'uploading',now() + interval '20 minutes',1)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'uploading',$17,1)
        RETURNING ${FILE_COLUMNS}`,
-      [input.storagePath, input.uploadKey, cleanFilename(input.originalName), input.title, input.description, input.category, tags, input.mimeType, input.extension, input.size, input.contentHash ?? null, input.uploadedBy, retention.autoDeleteEnabled, retention.retentionType, retention.customDeleteAt, retention.deleteAt],
+      [input.storagePath, input.uploadKey, cleanFilename(input.originalName), input.title, input.description, input.category, tags, input.mimeType, input.extension, input.size, input.contentHash ?? null, input.uploadedBy, retention.autoDeleteEnabled, retention.retentionType, retention.customDeleteAt, retention.deleteAt, new Date(now.getTime() + 20 * 60 * 1000)],
     );
     const file = rowToFile(result.rows[0]!);
     await syncTags(file.id, file.tags, (text, values) => client.query(text, values));
@@ -198,7 +198,7 @@ export async function requireFileById(id: string): Promise<FileDocument> {
 }
 
 export async function activateUpload(id: string): Promise<FileDocument> {
-  const result = await query(`UPDATE files SET status = 'active', validated_at = now(), updated_at = now(), failure_code = NULL, version = version + 1 WHERE id = $1 AND status = 'uploading' RETURNING ${FILE_COLUMNS}`, [id]);
+  const result = await query(`UPDATE files SET status = 'active', validated_at = ${SQL_NOW}, updated_at = ${SQL_NOW}, failure_code = NULL, version = version + 1 WHERE id = $1 AND status = 'uploading' RETURNING ${FILE_COLUMNS}`, [id]);
   if (result.rows[0]) return rowToFile(result.rows[0]);
   const existing = await requireFileById(id);
   if (existing.status === "active") return existing;
@@ -206,20 +206,21 @@ export async function activateUpload(id: string): Promise<FileDocument> {
 }
 
 export async function markUploadFailed(id: string, failureCode: string): Promise<void> {
-  await query(`UPDATE files SET status = 'failed', failure_code = $2, updated_at = now(), version = version + 1 WHERE id = $1`, [id, failureCode]);
+  await query(`UPDATE files SET status = 'failed', failure_code = $2, updated_at = ${SQL_NOW}, version = version + 1 WHERE id = $1`, [id, failureCode]);
 }
 
 export async function markUploadOrphaned(id: string, failureCode: string, retryWindowMs = 30 * 60 * 1000): Promise<void> {
-  await query(`UPDATE files SET failure_code = $2, upload_expires_at = now() + ($3::int * interval '1 millisecond'), updated_at = now() WHERE id = $1`, [id, failureCode, retryWindowMs]);
+  await query(`UPDATE files SET failure_code = $2, upload_expires_at = $3, updated_at = ${SQL_NOW} WHERE id = $1`, [id, failureCode, new Date(Date.now() + retryWindowMs)]);
 }
 
 export async function clearUploadKey(id: string): Promise<void> {
-  await query(`UPDATE files SET upload_key = NULL, updated_at = now() WHERE id = $1`, [id]);
+  await query(`UPDATE files SET upload_key = NULL, updated_at = ${SQL_NOW} WHERE id = $1`, [id]);
 }
 
 export async function updateFileDetails(id: string, patch: { title?: string; description?: string; category?: string; tags?: string[]; retention?: RetentionInput }): Promise<{ file: FileDocument; changedRetention: boolean }> {
   return withTransaction(async (client) => {
-    const currentResult = await client.query(`SELECT ${FILE_COLUMNS} FROM files WHERE id = $1 FOR UPDATE`, [id]);
+    // The write transaction serializes access, replacing PostgreSQL's FOR UPDATE.
+    const currentResult = await client.query(`SELECT ${FILE_COLUMNS} FROM files WHERE id = $1`, [id]);
     if (!currentResult.rows[0]) throw new ApiError(404, "FILE_NOT_FOUND", "The requested document was not found.");
     const file = rowToFile(currentResult.rows[0]);
     if (file.status !== "active") throw new ApiError(409, "FILE_NOT_ACTIVE", "Only active documents can be edited.");
@@ -239,13 +240,14 @@ export async function updateFileDetails(id: string, patch: { title?: string; des
       await client.query(`INSERT INTO tags(name) VALUES ($1) ON CONFLICT (name) DO NOTHING`, [tag]);
     }
     await client.query(`DELETE FROM file_tags WHERE file_id = $1`, [id]);
-    await client.query(`INSERT INTO file_tags(file_id, tag_id) SELECT $1, id FROM tags WHERE name = ANY($2::text[]) ON CONFLICT DO NOTHING`, [id, next.tags]);
+    await client.query(`INSERT INTO file_tags(file_id, tag_id) SELECT $1, id FROM tags WHERE name IN (SELECT value FROM json_each($2)) ON CONFLICT DO NOTHING`, [id, next.tags]);
     return { file: next, changedRetention: Boolean(patch.retention) };
   });
 }
 
 export async function moveFileToTrash(id: string, trashRetentionDays: number, reason: "manual" | "auto_retention", deletedBy: string | null = null): Promise<FileDocument> {
-  const result = await query(`UPDATE files SET status = 'trash', deleted_at = now(), deleted_by = $2, permanent_delete_at = now() + ($3::int * interval '1 day'), deletion_reason = $4, updated_at = now(), version = version + 1 WHERE id = $1 AND status = 'active' RETURNING ${FILE_COLUMNS}`, [id, deletedBy, trashRetentionDays, reason]);
+  const permanentDeleteAt = new Date(Date.now() + trashRetentionDays * 86_400_000);
+  const result = await query(`UPDATE files SET status = 'trash', deleted_at = ${SQL_NOW}, deleted_by = $2, permanent_delete_at = $3, deletion_reason = $4, updated_at = ${SQL_NOW}, version = version + 1 WHERE id = $1 AND status = 'active' RETURNING ${FILE_COLUMNS}`, [id, deletedBy, permanentDeleteAt, reason]);
   if (result.rows[0]) return rowToFile(result.rows[0]);
   const existing = await requireFileById(id);
   if (existing.status === "trash") return existing;
@@ -258,7 +260,7 @@ export async function restoreFileFromTrash(id: string, options: { nextDeleteAt: 
        delete_at = $2, auto_delete_enabled = CASE WHEN $3 THEN false ELSE auto_delete_enabled END,
        retention_type = CASE WHEN $3 THEN 'never' ELSE retention_type END,
        custom_delete_at = CASE WHEN $3 THEN NULL ELSE custom_delete_at END,
-       updated_at = now(), version = version + 1
+       updated_at = ${SQL_NOW}, version = version + 1
      WHERE id = $1 AND status = 'trash' RETURNING ${FILE_COLUMNS}`,
     [id, options.nextDeleteAt, Boolean(options.resetElapsedCustomRetention)],
   );
@@ -269,7 +271,7 @@ export async function restoreFileFromTrash(id: string, options: { nextDeleteAt: 
 }
 
 async function beginDeletion(id: string, expectedStatus: "trash" | "active"): Promise<FileDocument> {
-  const result = await query(`UPDATE files SET status = 'deleting', deletion_started_at = now(), deletion_previous_status = $2, updated_at = now(), version = version + 1 WHERE id = $1 AND status = $2 RETURNING ${FILE_COLUMNS}`, [id, expectedStatus]);
+  const result = await query(`UPDATE files SET status = 'deleting', deletion_started_at = ${SQL_NOW}, deletion_previous_status = $2, updated_at = ${SQL_NOW}, version = version + 1 WHERE id = $1 AND status = $2 RETURNING ${FILE_COLUMNS}`, [id, expectedStatus]);
   if (result.rows[0]) return rowToFile(result.rows[0]);
   const existing = await requireFileById(id);
   if (existing.status === "deleting" || existing.status === "deleted") return existing;
@@ -280,7 +282,7 @@ export async function beginPermanentDeletion(id: string): Promise<FileDocument> 
 export async function beginActivePermanentDeletion(id: string): Promise<FileDocument> { return beginDeletion(id, "active"); }
 
 export async function completePermanentDeletion(id: string): Promise<FileDocument> {
-  const result = await query(`UPDATE files SET status = 'deleted', permanently_deleted_at = now(), permanent_delete_at = NULL, deletion_started_at = NULL, deletion_previous_status = NULL, updated_at = now(), version = version + 1 WHERE id = $1 AND status = 'deleting' RETURNING ${FILE_COLUMNS}`, [id]);
+  const result = await query(`UPDATE files SET status = 'deleted', permanently_deleted_at = ${SQL_NOW}, permanent_delete_at = NULL, deletion_started_at = NULL, deletion_previous_status = NULL, updated_at = ${SQL_NOW}, version = version + 1 WHERE id = $1 AND status = 'deleting' RETURNING ${FILE_COLUMNS}`, [id]);
   if (result.rows[0]) return rowToFile(result.rows[0]);
   const existing = await requireFileById(id);
   if (existing.status === "deleted") return existing;
@@ -288,19 +290,19 @@ export async function completePermanentDeletion(id: string): Promise<FileDocumen
 }
 
 async function revertDeletion(id: string, failureCode: string, fallbackStatus: "active" | "trash"): Promise<void> {
-  await query(`UPDATE files SET status = COALESCE(deletion_previous_status, $2), deletion_started_at = NULL, deletion_previous_status = NULL, failure_code = $3, updated_at = now() WHERE id = $1 AND status = 'deleting'`, [id, fallbackStatus, failureCode]);
+  await query(`UPDATE files SET status = COALESCE(deletion_previous_status, $2), deletion_started_at = NULL, deletion_previous_status = NULL, failure_code = $3, updated_at = ${SQL_NOW} WHERE id = $1 AND status = 'deleting'`, [id, fallbackStatus, failureCode]);
 }
 export async function revertActivePermanentDeletion(id: string, failureCode: string): Promise<void> { return revertDeletion(id, failureCode, "active"); }
 export async function revertPermanentDeletion(id: string, failureCode: string): Promise<void> { return revertDeletion(id, failureCode, "trash"); }
 
 export async function markActivePermanentlyDeleted(id: string): Promise<FileDocument> {
-  const result = await query(`UPDATE files SET status = 'deleted', permanently_deleted_at = now(), permanent_delete_at = NULL, deletion_started_at = NULL, deletion_previous_status = NULL, updated_at = now(), version = version + 1 WHERE id = $1 AND status IN ('active','deleting') RETURNING ${FILE_COLUMNS}`, [id]);
+  const result = await query(`UPDATE files SET status = 'deleted', permanently_deleted_at = ${SQL_NOW}, permanent_delete_at = NULL, deletion_started_at = NULL, deletion_previous_status = NULL, updated_at = ${SQL_NOW}, version = version + 1 WHERE id = $1 AND status IN ('active','deleting') RETURNING ${FILE_COLUMNS}`, [id]);
   if (result.rows[0]) return rowToFile(result.rows[0]);
   return requireFileById(id);
 }
 
 export async function markDeletedAfterFailedUpload(id: string): Promise<void> {
-  await query(`UPDATE files SET status = 'deleted', permanently_deleted_at = now(), deletion_started_at = NULL, deletion_previous_status = NULL, updated_at = now(), version = version + 1 WHERE id = $1`, [id]);
+  await query(`UPDATE files SET status = 'deleted', permanently_deleted_at = ${SQL_NOW}, deletion_started_at = NULL, deletion_previous_status = NULL, updated_at = ${SQL_NOW}, version = version + 1 WHERE id = $1`, [id]);
 }
 
 function sortDefinition(sort: FileSort, status: "all" | FileStatus): { field: keyof FileDocument; direction: "asc" | "desc" } {
@@ -389,15 +391,15 @@ export async function listFilesForStats(): Promise<FileDocument[]> { return sele
 export async function applyDefaultRetentionToActiveFiles(input: { autoDeleteEnabled: boolean; retentionType: Exclude<RetentionType, "custom_date"> }): Promise<number> {
   const now = new Date();
   const deleteAt = calculateDeleteAt({ ...input, customDeleteAt: null }, now);
-  const result = await query(`UPDATE files SET auto_delete_enabled = $1, retention_type = $2, custom_delete_at = NULL, delete_at = $3, updated_at = now(), version = version + 1 WHERE status = 'active'`, [input.autoDeleteEnabled, input.retentionType, deleteAt]);
+  const result = await query(`UPDATE files SET auto_delete_enabled = $1, retention_type = $2, custom_delete_at = NULL, delete_at = $3, updated_at = ${SQL_NOW}, version = version + 1 WHERE status = 'active'`, [input.autoDeleteEnabled, input.retentionType, deleteAt]);
   return result.rowCount ?? 0;
 }
 
 export async function attachBlobIdentity(id: string, identity: { size?: number; contentHash?: string | null }): Promise<void> {
-  await query(`UPDATE files SET size_bytes = COALESCE($2, size_bytes), content_hash = CASE WHEN $3::text IS NULL THEN content_hash ELSE $3 END, updated_at = now() WHERE id = $1`, [id, identity.size ?? null, identity.contentHash ?? null]);
+  await query(`UPDATE files SET size_bytes = COALESCE($2, size_bytes), content_hash = CASE WHEN $3 IS NULL THEN content_hash ELSE $3 END, updated_at = ${SQL_NOW} WHERE id = $1`, [id, identity.size ?? null, identity.contentHash ?? null]);
 }
-export async function setFileFavorite(id: string, isFavorite: boolean): Promise<FileDocument> { const result = await query(`UPDATE files SET is_favorite = $2, updated_at = now(), version = version + 1 WHERE id = $1 RETURNING ${FILE_COLUMNS}`, [id, isFavorite]); if (!result.rows[0]) throw new ApiError(404, "FILE_NOT_FOUND", "The requested document was not found."); return rowToFile(result.rows[0]); }
-export async function recordFileAccess(id: string, kind: "preview" | "download"): Promise<void> { try { await query(`UPDATE files SET last_accessed_at = now(), last_downloaded_at = CASE WHEN $2 = 'download' THEN now() ELSE last_downloaded_at END WHERE id = $1`, [id, kind]); } catch { /* analytics never break access */ } }
+export async function setFileFavorite(id: string, isFavorite: boolean): Promise<FileDocument> { const result = await query(`UPDATE files SET is_favorite = $2, updated_at = ${SQL_NOW}, version = version + 1 WHERE id = $1 RETURNING ${FILE_COLUMNS}`, [id, isFavorite]); if (!result.rows[0]) throw new ApiError(404, "FILE_NOT_FOUND", "The requested document was not found."); return rowToFile(result.rows[0]); }
+export async function recordFileAccess(id: string, kind: "preview" | "download"): Promise<void> { try { await query(`UPDATE files SET last_accessed_at = ${SQL_NOW}, last_downloaded_at = CASE WHEN $2 = 'download' THEN ${SQL_NOW} ELSE last_downloaded_at END WHERE id = $1`, [id, kind]); } catch { /* analytics never break access */ } }
 export async function findActiveFileByContentHash(contentHash: string): Promise<FileDocument | null> { const result = await query(`SELECT ${FILE_COLUMNS} FROM files WHERE status = 'active' AND content_hash = $1 LIMIT 1`, [contentHash]); return result.rows[0] ? rowToFile(result.rows[0]) : null; }
 export async function getFilesExpiringBetween(from: Date, to: Date, limit = 200): Promise<FileDocument[]> { return selectFiles(`status = 'active' AND auto_delete_enabled = true AND delete_at >= $1 AND delete_at <= $2 ORDER BY delete_at ASC`, [from, to], limit); }
 export async function getFavoriteFiles(limit = 200): Promise<FileDocument[]> { return selectFiles(`status = 'active' AND is_favorite = true ORDER BY updated_at DESC`, [], limit); }
