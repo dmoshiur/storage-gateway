@@ -19,7 +19,7 @@ export const runtime = "nodejs";
  */
 export async function POST(request: Request) {
   return apiRoute(request, async (requestId) => {
-    await requireIntegrationKey(request);
+    await requireIntegrationKey(request, "metadata:write");
     const entry = await parseJson(request, bridgeUploadLogSchema, 4096);
     try {
       await recordUploadLog({

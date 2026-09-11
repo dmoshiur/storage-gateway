@@ -10,7 +10,7 @@ export const runtime = "nodejs";
 /** Internal server-to-server verification against one-way PostgreSQL key digests. */
 export async function POST(request: Request) {
   return apiRoute(request, async (requestId) => {
-    await requireIntegrationKey(request);
+    await requireIntegrationKey(request, "metadata:read");
     const input = await parseJson(request, bridgeVerifyKeySchema, 2048);
     const context = { method: request.method, path: new URL(request.url).pathname, requestId, ip: getClientIp(request) };
     const keyId = "mode" in input

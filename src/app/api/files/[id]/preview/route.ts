@@ -25,7 +25,7 @@ const previewQuerySchema = z.object({
 
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
   return apiRoute(request, async (requestId) => {
-    const actor = await requireReadActor(request);
+    const actor = await requireReadActor(request, "files:download");
     enforceRateLimit(`files:preview:${actor.type}:${actor.uid}`, actor.type === "integration" ? 120 : 240);
     const query = parseQuery(Object.fromEntries(new URL(request.url).searchParams.entries()), previewQuerySchema);
     const file = await requireFileById(requireRouteId((await context.params).id));

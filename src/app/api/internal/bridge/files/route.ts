@@ -28,7 +28,7 @@ export const runtime = "nodejs";
  */
 export async function POST(request: Request) {
   return apiRoute(request, async (requestId) => {
-    const actor = await requireIntegrationKey(request);
+    const actor = await requireIntegrationKey(request, "files:upload");
     const input = await parseJson(request, bridgeRegisterFileSchema, 32 * 1024);
     let settings: Awaited<ReturnType<typeof getSettings>>;
     let stats: Awaited<ReturnType<typeof getStorageStats>>;
