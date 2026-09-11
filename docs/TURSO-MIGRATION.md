@@ -183,7 +183,8 @@ Set these in **Vercel Dashboard → Project → Settings → Environment Variabl
 | --- | --- | --- |
 | `TURSO_DATABASE_URL` | `libsql://am-cloud-api-am-moshiur.aws-us-east-1.turso.io` | The Turso database URL. |
 | `TURSO_AUTH_TOKEN` | token from `turso db tokens create am-cloud-api-am-moshiur` | Server-only secret. Scope it to the database; rotate periodically. |
-| `BLOB_READ_WRITE_TOKEN` | Vercel Blob token | Unchanged from before. |
+| `BLOB_STORE_ID` / `BLOB_WEBHOOK_PUBLIC_KEY` | *(injected by Vercel)* | Added automatically when the private Blob store is connected to the project. OIDC authentication needs no stored credential; never create `VERCEL_OIDC_TOKEN` manually. |
+| `BLOB_READ_WRITE_TOKEN` | Vercel Blob token | Optional static fallback for stores that still issue long-lived credentials. |
 | `CRON_SECRET` | long random secret | Unchanged — authenticates `/api/cron/cleanup`. |
 | `NEXT_PUBLIC_APP_URL` | `https://your-production-domain` | Unchanged — origin checks + reset links. |
 | `INITIAL_ADMIN_EMAIL` / `INITIAL_ADMIN_PASSWORD` | *(optional, remove after first deploy)* | Only used by `npm run db:migrate` to bootstrap the first admin. |

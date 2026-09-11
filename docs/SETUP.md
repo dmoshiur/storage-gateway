@@ -17,8 +17,9 @@ For Vercel, use a connection pooler or a provider connection string with a small
 
 1. Attach a Vercel Blob store to the same Vercel project.
 2. Keep the store private; do not configure a public custom domain for documents.
-3. Add the server-only `BLOB_READ_WRITE_TOKEN`, or configure Vercel OIDC with `BLOB_STORE_ID` and `VERCEL_OIDC_TOKEN`.
-4. Confirm `/api/v1/health` reports the Blob store as ready after authentication.
+3. Connecting the store to the project is the configuration: Vercel injects `BLOB_STORE_ID` and `BLOB_WEBHOOK_PUBLIC_KEY`, and the runtime issues a short-lived OIDC token per request (`x-vercel-oidc-token`) that the Blob SDK reads automatically. Do **not** create `VERCEL_OIDC_TOKEN` by hand.
+4. Optional: set the server-only `BLOB_READ_WRITE_TOKEN` to use a static credential instead (it takes precedence over OIDC). For local development against a real store, run `vercel env pull`.
+5. Confirm `GET /api/blob/health` reports a healthy store (`?deep=true` for a put/head/get/delete round trip) and `/api/v1/health` reports the Blob store as ready after authentication. Both return the exact missing variable and the real Blob error when something is wrong; [VERCEL-BLOB.md](VERCEL-BLOB.md) lists every diagnostic code and how to verify a real PDF on production.
 
 Only `src/lib/storage/vercel-blob.ts` talks to Blob. The database stores the private pathname and metadata, never document bytes. Preview and download are authorized server streams.
 

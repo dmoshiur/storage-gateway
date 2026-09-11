@@ -8,7 +8,7 @@ import {
 import { ApiError } from "@/lib/api/errors";
 import { parseJson } from "@/lib/api/body";
 import { apiRoute } from "@/lib/api/route";
-import { getBlobStoreConfig } from "@/lib/env";
+import { blobSdkAuthOptions, readBlobStoreConfig } from "@/lib/env";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { getUploadingFileByStoragePath } from "@/lib/db/files";
@@ -25,8 +25,8 @@ export const maxDuration = 30;
  *   1. Client POSTs `{ type: "blob.generate-presigned-url", payload: { pathname, … } }`.
  *   2. We authenticate the session, validate the pathname, and mint a signed
  *      delegation via `issueSignedToken` — this works with BOTH auth modes:
- *      static `BLOB_READ_WRITE_TOKEN` and OIDC (`BLOB_STORE_ID` +
- *      `VERCEL_OIDC_TOKEN`).
+ *      static `BLOB_READ_WRITE_TOKEN` and OIDC (`BLOB_STORE_ID`, with the
+ *      OIDC token resolved per request by `@vercel/oidc`).
  *   3. We return `{ type, presignedUrlPayload }`; the client then PUTs the
  *      bytes directly to https://vercel.com/api/blob (must be allowed by the
  *      CSP connect-src — see next.config.ts).
@@ -125,7 +125,15 @@ function assertUploadPathname(pathname: string): void {
  * a stalled Vercel API exchange fails fast instead of hanging the route.
  */
 async function signPutDelegationToken(pathname: string) {
-  const { token, storeId, oidcToken } = getBlobStoreConfig(); // throws 503 when unconfigured
+  const config = readBlobStoreConfig();
+  if (!config.ok) {
+    // Surface the EXACT missing configuration instead of a generic failure.
+    throw new ApiError(503, "BLOB_NOT_CONFIGURED", config.error ?? "Vercel Private Blob is not configured.", undefined, {
+      missingConfiguration: config.missing.join(", "),
+      authMode: "none",
+      operation: "blob/upload:sign",
+    });
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SIGNING_TIMEOUT_MS);
   try {
@@ -135,12 +143,11 @@ async function signPutDelegationToken(pathname: string) {
       validUntil: Date.now() + DELEGATION_VALIDITY_MS,
       allowedContentTypes: ALLOWED_CONTENT_TYPES,
       maximumSizeInBytes: MAX_UPLOAD_BYTES,
-      ...(token ? { token } : {}),
-      ...(storeId ? { storeId } : {}),
-      ...(oidcToken && !token ? { oidcToken } : {}),
+      ...blobSdkAuthOptions(config),
       abortSignal: controller.signal,
     });
   } catch (error) {
+    if (error instanceof ApiError) throw error;
     if (controller.signal.aborted) {
       throw new ApiError(
         504,
@@ -148,13 +155,28 @@ async function signPutDelegationToken(pathname: string) {
         "Signing the upload token timed out. The Vercel Blob API (/signed-token) did not respond — please retry.",
       );
     }
+    // The real SDK error is preserved (name + message) — never collapsed into
+    // an anonymous "unavailable" response.
+    const name = error instanceof Error && error.name ? error.name : "Error";
+    const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").trim().slice(0, 400);
     logger.error("Vercel Blob upload-token signing failed", {
-      error: error instanceof Error ? error.message : "unknown",
+      errorName: name,
+      error: message,
+      authMode: config.authMode,
+      storeId: config.storeId,
+      onVercel: config.onVercel,
     });
     throw new ApiError(
       502,
       "BLOB_SIGNING_FAILED",
-      "The private Blob upload token could not be generated. Please retry shortly.",
+      `The private Blob upload token could not be generated. Vercel Blob responded: ${name}: ${message}`,
+      undefined,
+      {
+        errorName: name,
+        error: message,
+        authMode: config.authMode,
+        storeId: config.storeId ?? "unknown",
+      },
     );
   } finally {
     clearTimeout(timer);
@@ -203,13 +225,8 @@ async function logUploadCompleted(payload: {
 }
 
 function resolveWebhookPublicKey(): string | null {
-  try {
-    const config = getBlobStoreConfig();
-    if (config.webhookPublicKey) return config.webhookPublicKey;
-  } catch {
-    // Blob not configured yet - fall back to direct env var for webhook key.
-  }
-  return process.env.BLOB_WEBHOOK_PUBLIC_KEY ?? process.env.BLOB_WEBHOOK_KEY ?? null;
+  const config = readBlobStoreConfig();
+  return config.webhookPublicKey;
 }
 
 export async function POST(request: Request) {
@@ -297,6 +314,12 @@ export async function POST(request: Request) {
           // directly. The dashboard flow does not need the webhook — completion
           // is validated by /api/files/[id]/complete — so refusing to mint
           // tokens without a webhook key would needlessly break uploads.
+          // This is logged, not silent: the missing variable is reported by
+          // /api/blob/health and in the storage dashboard.
+          logger.warn("BLOB_WEBHOOK_PUBLIC_KEY is not configured; signing presigned upload URLs without the completion callback", {
+            storeId: readBlobStoreConfig().storeId,
+            authMode: readBlobStoreConfig().authMode,
+          });
           const signed = await signPutDelegationToken(pathname);
           const { presignedUrl } = await presignUrl(signed, {
             operation: "put",

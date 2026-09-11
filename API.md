@@ -91,8 +91,15 @@ Cookie-authenticated endpoints:
 - `GET /api/files/trash` — Trash listing.
 - `POST /api/files/bulk` — authorized bulk operations.
 - `GET /api/files/export` — metadata export for administrators.
+- `POST /api/blob/upload` — issue a presigned PUT for a pending upload (SDK upload callback endpoints).
 
 The server checks the file row and caller role before every object operation. The response never includes `storage_path`, upload keys, or permanent public URLs.
+
+## Blob diagnostics
+
+`GET /api/blob/health` (administrator session, 60 requests/minute) reports the real state of the private Blob store: provider, `status` (`ok`/`degraded`), `configuration` (auth mode, store id, missing variables, no secret values), a non-destructive list probe, and the exact `errorCode`, `errorName`, `error`, and `hint` when the store cannot be reached. `GET /api/blob/health?deep=true` (6 requests/minute) additionally performs a put → head → get → delete round trip against `health/doctor-<uuid>.pdf` and removes the probe object.
+
+Configuration problems are never masked: `503 BLOB_NOT_CONFIGURED` carries the exact missing variables (`BLOB_STORE_ID` or `BLOB_READ_WRITE_TOKEN`), and signing failures return `502 BLOB_SIGNING_FAILED` with the real SDK error name and message. `/api/health`, `/api/system/health`, and `/api/storage` expose the same diagnostics, and `GET /api/v1/health` returns `blobConfigured`, `blobAuthMode`, and `missingBlobConfig`.
 
 ## API keys and `/api/v1`
 
