@@ -10,6 +10,7 @@ This guide assumes a separate set of cloud resources for **development**, **prev
 4. In **Project settings → Service accounts**, generate a service-account credential for the gateway server. Store only its project ID, client email, and private key in Vercel environment variables; do not commit downloaded JSON files.
 5. In **Project settings → General**, register the Web app and copy its public config values to the `NEXT_PUBLIC_FIREBASE_*` variables.
 6. Add local and deployed gateway domains in Firebase Authentication’s authorized domains list.
+7. After the first deploy, an admin can rotate or correct the Web App config at runtime in **Settings → Firebase Configuration** (paste → Test → Save & apply → Verify login) without a rebuild. The saved override takes effect immediately; Settings then shows a “redeploy required” snippet so the `NEXT_PUBLIC_FIREBASE_*` baseline is updated for the next build. See [FIREBASE_CONFIG.md](FIREBASE_CONFIG.md) for the complete flow. Service-account private keys are never pasted there — they stay in Vercel env vars only.
 
 ### Assign production roles
 
