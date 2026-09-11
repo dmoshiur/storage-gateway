@@ -5,6 +5,7 @@ import {
   firebaseConfigToEnvVars,
   firebaseConfigsEqual,
   maskFirebaseValue,
+  parseFirebaseWebConfig,
   parseFirebaseWebConfigJson,
   validateFirebaseWebConfig,
 } from "@/lib/firebase/web-config";
@@ -49,10 +50,10 @@ describe("Firebase web config parsing", () => {
     expect(parsed.config?.projectId).toBe("demo-project");
   });
 
-  it("rejects invalid JSON with guidance", () => {
+  it("rejects unparseable text with guidance", () => {
     const parsed = parseFirebaseWebConfigJson("{ apiKey: oops");
     expect(parsed.ok).toBe(false);
-    expect(parsed.errors[0]?.message).toMatch(/not valid JSON/i);
+    expect(parsed.errors[0]?.message).toMatch(/could not parse/i);
   });
 
   it("reports every missing required field", () => {
@@ -115,6 +116,152 @@ describe("Firebase web config parsing", () => {
     const parsed = validateFirebaseWebConfig({ ...FULL_CONFIG, apiKey: "   " });
     expect(parsed.ok).toBe(false);
     expect(parsed.errors.some((issue) => issue.field === "apiKey")).toBe(true);
+  });
+});
+
+describe("Firebase web config: standard JS-object format", () => {
+  const JS_CONFIG = `{
+  apiKey: "AIzaSyD-EXAMPLE-KEY-1234567890abcdefgh",
+  authDomain: "demo-project.firebaseapp.com",
+  projectId: "demo-project",
+  storageBucket: "demo-project.appspot.com",
+  messagingSenderId: "123456789012",
+  appId: "1:123456789012:web:abcdef1234567890",
+  measurementId: "G-ABCDEF1234"
+}`;
+
+  it("accepts the exact Firebase Console format (unquoted keys, double quotes)", () => {
+    const parsed = parseFirebaseWebConfig(JS_CONFIG);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.config).toEqual(FULL_CONFIG);
+    expect(parsed.errors).toEqual([]);
+    expect(Object.values(parsed.detected).every(Boolean)).toBe(true);
+  });
+
+  it("normalizes JSON and JS syntax to the identical canonical object", () => {
+    const fromJson = parseFirebaseWebConfig(JSON.stringify(FULL_CONFIG));
+    const fromJs = parseFirebaseWebConfig(JS_CONFIG);
+    expect(fromJson.ok).toBe(true);
+    expect(fromJs.ok).toBe(true);
+    expect(fromJs.config).toEqual(fromJson.config);
+  });
+
+  it("accepts single-quoted string values", () => {
+    const parsed = parseFirebaseWebConfig(`{
+  apiKey: 'AIzaSyD-EXAMPLE-KEY-1234567890abcdefgh',
+  authDomain: 'demo-project.firebaseapp.com',
+  projectId: 'demo-project',
+  appId: '1:123456789012:web:abcdef1234567890'
+}`);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.config?.projectId).toBe("demo-project");
+    expect(parsed.errors).toEqual([]);
+  });
+
+  it("accepts quoted keys mixed with unquoted keys", () => {
+    const parsed = parseFirebaseWebConfig(`{
+  "apiKey": "AIzaSyD-EXAMPLE-KEY-1234567890abcdefgh",
+  'authDomain': 'demo-project.firebaseapp.com',
+  projectId: "demo-project",
+  appId: "1:123456789012:web:abcdef1234567890",
+}`);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.config).toMatchObject({ projectId: "demo-project" });
+  });
+
+  it("accepts trailing commas and comments", () => {
+    const parsed = parseFirebaseWebConfig(`{
+  // Your web app's Firebase configuration
+  apiKey: "AIzaSyD-EXAMPLE-KEY-1234567890abcdefgh", // public web key
+  /* multi-line
+     comment */
+  authDomain: "demo-project.firebaseapp.com",
+  projectId: "demo-project",
+  appId: "1:123456789012:web:abcdef1234567890", // trailing comma below
+}`);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.config?.appId).toBe("1:123456789012:web:abcdef1234567890");
+  });
+
+  it("accepts a const firebaseConfig snippet with surrounding code", () => {
+    const parsed = parseFirebaseWebConfig(
+      `const firebaseConfig = ${JS_CONFIG};\nconst app = initializeApp(firebaseConfig);`,
+    );
+    expect(parsed.ok).toBe(true);
+    expect(parsed.config?.projectId).toBe("demo-project");
+  });
+
+  it("accepts a complete Firebase console snippet including imports", () => {
+    const parsed = parseFirebaseWebConfig(
+      `// Import the functions you need from the SDKs you need\n` +
+        `import { initializeApp } from "firebase/app";\n` +
+        `// Your web app's Firebase configuration\n` +
+        `const firebaseConfig = {\n` +
+        `  apiKey: 'AIzaSyD-EXAMPLE-KEY-1234567890abcdefgh',\n` +
+        `  authDomain: 'demo-project.firebaseapp.com',\n` +
+        `  projectId: 'demo-project',\n` +
+        `  storageBucket: 'demo-project.appspot.com',\n` +
+        `  messagingSenderId: '123456789012',\n` +
+        `  appId: '1:123456789012:web:abcdef1234567890',\n` +
+        `  measurementId: 'G-ABCDEF1234',\n` +
+        `};\n\n// Initialize Firebase\nconst app = initializeApp(firebaseConfig);`,
+    );
+    expect(parsed.ok).toBe(true);
+    expect(parsed.config).toEqual(FULL_CONFIG);
+    expect(parsed.errors).toEqual([]);
+  });
+
+  it("never reports required-field errors when the fields exist", () => {
+    const parsed = parseFirebaseWebConfig(JS_CONFIG);
+    expect(parsed.ok).toBe(true);
+    const requiredErrors = parsed.errors.filter((issue) =>
+      ["apiKey", "authDomain", "projectId", "appId"].includes(issue.field),
+    );
+    expect(requiredErrors).toEqual([]);
+  });
+
+  it("still reports genuinely missing required fields in JS syntax", () => {
+    const parsed = parseFirebaseWebConfig(`{ projectId: "demo-project" }`);
+    expect(parsed.ok).toBe(false);
+    const fields = parsed.errors.map((issue) => issue.field).sort();
+    expect(fields).toEqual(["apiKey", "appId", "authDomain"]);
+  });
+
+  it("rejects service-account keys pasted in JS syntax", () => {
+    const parsed = parseFirebaseWebConfig(`{
+  type: "service_account",
+  project_id: "demo-project",
+  private_key: "-----BEGIN PRIVATE KEY-----\\nsecret\\n-----END PRIVATE KEY-----\\n",
+  client_email: "x@demo-project.iam.gserviceaccount.com"
+}`);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.errors[0]?.message).toMatch(/service-account/i);
+  });
+
+  it("rejects unquoted string values with an actionable message", () => {
+    const parsed = parseFirebaseWebConfig("{ apiKey: AIzaNotQuoted, projectId: \"demo-project\" }");
+    expect(parsed.ok).toBe(false);
+    expect(parsed.errors[0]?.message).toMatch(/could not parse/i);
+  });
+
+  it("rejects unterminated configs with an actionable message", () => {
+    const parsed = parseFirebaseWebConfig('{ apiKey: "abc", projectId: "demo-project"');
+    expect(parsed.ok).toBe(false);
+    expect(parsed.errors[0]?.message).toMatch(/closing|unterminated/i);
+  });
+
+  it("rejects nested objects and code execution attempts", () => {
+    expect(parseFirebaseWebConfig("{ apiKey: { nested: true } }").ok).toBe(false);
+    // Function calls / expressions must never be executed or accepted.
+    expect(parseFirebaseWebConfig("{ apiKey: process.env.KEY }").ok).toBe(false);
+    expect(parseFirebaseWebConfig("while(true){}").ok).toBe(false);
+  });
+
+  it("keeps the legacy parseFirebaseWebConfigJson alias working", () => {
+    const parsed = parseFirebaseWebConfigJson(JS_CONFIG);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.config?.projectId).toBe("demo-project");
   });
 });
 

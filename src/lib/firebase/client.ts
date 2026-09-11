@@ -114,10 +114,20 @@ export function fetchFirebaseRuntimeStatus(signal?: AbortSignal): Promise<Fireba
   return runtimePromise;
 }
 
+function ensurePersistence(auth: Auth, app: FirebaseApp): void {
+  if (persistenceConfiguredFor === app || typeof window === "undefined") return;
+  persistenceConfiguredFor = app;
+  setPersistence(auth, browserLocalPersistence).catch((error) => {
+    console.warn("Firebase Auth persistence setup failed:", error);
+  });
+}
+
 /**
- * Applies a Web config to the default Firebase app, reinitializing
- * Auth/Firestore bindings when the identity changed. No-op when the default
- * app already runs this exact config. Temporary probe apps are never touched.
+ * Applies a Web config to the default Firebase app, reinitializing the
+ * Auth and Firestore SDK bindings when the identity changed. No-op when the
+ * default app already runs this exact config. Temporary probe apps are
+ * never touched. Every subsequent getAuth()/Firestore lookup on the default
+ * app — login, sign-out, probes — uses the new project immediately.
  */
 export async function applyFirebaseWebConfig(config: FirebaseWebConfig): Promise<FirebaseApp> {
   const existing = getApps().find((app) => app.name === DEFAULT_APP_NAME) ?? null;
@@ -125,8 +135,22 @@ export async function applyFirebaseWebConfig(config: FirebaseWebConfig): Promise
     const current = optionsFromApp(existing);
     if (current && firebaseConfigsEqual(current, config)) return existing;
     await deleteApp(existing).catch(() => undefined);
+    if (persistenceConfiguredFor === existing) persistenceConfiguredFor = null;
   }
   const app = initializeApp(toFirebaseOptions(config));
+  // Bind Auth to the new project immediately (persistence included) so the
+  // next sign-in attempt cannot run against a stale project.
+  ensurePersistence(getAuth(app), app);
+  // Bind Firestore to the new project as well. Firestore is loaded on
+  // demand so this never grows the initial bundle; a bind failure here is
+  // non-fatal because the post-save connection probe is the source of
+  // truth for Firestore reachability and reports the exact reason.
+  try {
+    const { getFirestore } = await import("firebase/firestore");
+    getFirestore(app);
+  } catch (error) {
+    console.warn("Firebase Firestore binding for the new config needs verification:", error);
+  }
   return app;
 }
 
@@ -168,14 +192,6 @@ export async function getFirebaseClientAppAsync(signal?: AbortSignal): Promise<F
   const { config, missing } = readEnvConfig();
   if (!config) throw missingConfigError(status?.missing?.length ? status.missing : missing);
   return initializeApp(toFirebaseOptions(config));
-}
-
-function ensurePersistence(auth: Auth, app: FirebaseApp): void {
-  if (persistenceConfiguredFor === app || typeof window === "undefined") return;
-  persistenceConfiguredFor = app;
-  setPersistence(auth, browserLocalPersistence).catch((error) => {
-    console.warn("Firebase Auth persistence setup failed:", error);
-  });
 }
 
 export function getFirebaseClientAuth(): Auth {
