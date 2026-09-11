@@ -10,12 +10,22 @@ import {
   validateFirebaseWebConfig,
 } from "@/lib/firebase/web-config";
 import {
+  FIRESTORE_PROBE_COLLECTION,
+  FIRESTORE_PROBE_DOCUMENT,
+  firestoreProbePath,
+  mapAuthorizedDomainStep,
+  mapConfigConsistencyStep,
   mapFirestoreProbe,
   mapPasswordProviderProbe,
   mapProjectConfigProbe,
   networkFailureStep,
+  parseProjectConfigBody,
   summarizeProbe,
 } from "@/lib/firebase/probe-shared";
+import {
+  inspectConfigConsistency,
+  projectNumberFromAppId,
+} from "@/lib/firebase/web-config";
 
 const FULL_CONFIG = {
   apiKey: "AIzaSyD-EXAMPLE-KEY-1234567890abcdefgh",
@@ -307,23 +317,150 @@ describe("masking and env mapping", () => {
   });
 });
 
-describe("probe error mapping", () => {
-  it("passes when the API key's project matches the candidate", () => {
-    const step = mapProjectConfigProbe(200, JSON.stringify({ projectId: "demo-project" }), "demo-project", 12);
-    expect(step.status).toBe("passed");
+describe("project-number extraction and local consistency", () => {
+  it("extracts the project number from a web/iOS/Android appId", () => {
+    expect(projectNumberFromAppId("1:123456789012:web:abcdef")).toBe("123456789012");
+    expect(projectNumberFromAppId("1:561595434199:ios:abcdef")).toBe("561595434199");
+    expect(projectNumberFromAppId("not-an-app-id")).toBeNull();
+    expect(projectNumberFromAppId(null)).toBeNull();
   });
 
-  it("detects a wrong-project paste precisely", () => {
-    const step = mapProjectConfigProbe(200, JSON.stringify({ projectId: "other-project" }), "demo-project", 12);
+  it("accepts matching appId number and messagingSenderId", () => {
+    const result = inspectConfigConsistency({
+      appId: "1:123456789012:web:abc",
+      messagingSenderId: "123456789012",
+      authDomain: "demo-project.firebaseapp.com",
+      projectId: "demo-project",
+    });
+    expect(result.projectNumbersAgree).toBe(true);
+    expect(result.authDomainMatchesProject).toBe(true);
+  });
+
+  it("flags a messagingSenderId from a different project", () => {
+    const parsed = validateFirebaseWebConfig({
+      ...FULL_CONFIG,
+      messagingSenderId: "999999999999",
+    });
+    expect(parsed.ok).toBe(false);
+    expect(parsed.errors.some((issue) => issue.field === "messagingSenderId")).toBe(true);
+    expect(parsed.errors[0]?.message).toMatch(/different Firebase projects/);
+  });
+
+  it("flags a default authDomain that belongs to another project", () => {
+    const parsed = validateFirebaseWebConfig({
+      ...FULL_CONFIG,
+      authDomain: "other-project.firebaseapp.com",
+    });
+    expect(parsed.ok).toBe(false);
+    expect(parsed.errors.some((issue) => issue.field === "authDomain")).toBe(true);
+    expect(parsed.errors[0]?.message).toContain("demo-project.firebaseapp.com");
+  });
+
+  it("accepts custom (non-default) auth domains without a local verdict", () => {
+    const result = inspectConfigConsistency({
+      appId: "1:123456789012:web:abc",
+      messagingSenderId: "123456789012",
+      authDomain: "login.example.org",
+      projectId: "demo-project",
+    });
+    expect(result.authDomainMatchesProject).toBeNull();
+  });
+
+  it("maps an inconsistent config to a failed preflight step", () => {
+    const step = mapConfigConsistencyStep(
+      { ...FULL_CONFIG, messagingSenderId: "999999999999" },
+      2,
+      "config-consistency",
+      "Config identity",
+    );
+    expect(step.status).toBe("failed");
+    expect(step.code).toBe("CONFIG_INCONSISTENT");
+  });
+});
+
+describe("probe error mapping", () => {
+  // getProjectConfig returns the project NUMBER, so the mapper compares it
+  // against the number embedded in appId — not against the string projectId.
+  const candidate = {
+    apiKey: "AIzaSyD-EXAMPLE-KEY-1234567890abcdefgh",
+    authDomain: "demo-project.firebaseapp.com",
+    projectId: "demo-project",
+    messagingSenderId: "123456789012",
+    appId: "1:123456789012:web:abcdef1234567890",
+  } satisfies import("@/lib/firebase/web-config").FirebaseWebConfig;
+
+  it("passes when the API key's project NUMBER matches the appId number and default domains", () => {
+    const body = JSON.stringify({
+      projectId: "123456789012",
+      authorizedDomains: ["localhost", "demo-project.firebaseapp.com", "demo-project.web.app"],
+    });
+    const step = mapProjectConfigProbe(200, body, candidate, 12);
+    expect(step.status).toBe("passed");
+    expect(step.message).toContain("demo-project");
+    expect(step.message).toContain("123456789012");
+  });
+
+  it("does NOT flag a valid config when getProjectConfig returns the project number", () => {
+    // Regression for the production false-positive: number 561595434199 for
+    // project am-st-b507f was wrongly compared to the string projectId.
+    const production = {
+      apiKey: "AIza...",
+      authDomain: "am-st-b507f.firebaseapp.com",
+      projectId: "am-st-b507f",
+      messagingSenderId: "561595434199",
+      appId: "1:561595434199:web:aabbccdd11223344",
+    };
+    const body = JSON.stringify({
+      projectId: "561595434199",
+      authorizedDomains: ["localhost", "am-st-b507f.firebaseapp.com", "am-st-b507f.web.app"],
+    });
+    const step = mapProjectConfigProbe(200, body, production, 9);
+    expect(step.status).toBe("passed");
+    expect(step.code).toBeUndefined();
+  });
+
+  it("detects a genuine wrong-project paste via mismatched project numbers", () => {
+    // API key belongs to number 424229778181 (notes-27f22), appId claims 123456789012.
+    const body = JSON.stringify({
+      projectId: "424229778181",
+      authorizedDomains: ["localhost", "notes-27f22.firebaseapp.com", "notes-27f22.web.app"],
+    });
+    const step = mapProjectConfigProbe(200, body, candidate, 12);
     expect(step.status).toBe("failed");
     expect(step.code).toBe("WRONG_PROJECT");
-    expect(step.message).toContain("other-project");
-    expect(step.message).toContain("demo-project");
+    expect(step.message).toContain("424229778181");
+    expect(step.message).toContain("123456789012");
   });
 
-  it("maps an invalid API key", () => {
-    const body = JSON.stringify({ error: { code: 400, message: "API key not valid. Please pass a valid API key." } });
-    const step = mapProjectConfigProbe(400, body, "demo-project", 5);
+  it("still supports legacy projects whose endpoint returns the string project id", () => {
+    const match = mapProjectConfigProbe(200, JSON.stringify({ projectId: "demo-project" }), candidate, 4);
+    expect(match.status).toBe("passed");
+    const mismatch = mapProjectConfigProbe(200, JSON.stringify({ projectId: "other-project" }), candidate, 4);
+    expect(mismatch.status).toBe("failed");
+    expect(mismatch.code).toBe("WRONG_PROJECT");
+    expect(mismatch.message).toContain("other-project");
+  });
+
+  it("parses the real getProjectConfig shape (project number + authorized domains)", () => {
+    const info = parseProjectConfigBody(JSON.stringify({
+      projectId: "424229778181",
+      authorizedDomains: ["localhost", "Notes-27f22.firebaseapp.com", "notes-27f22.web.app"],
+    }));
+    expect(info.isProjectNumber).toBe(true);
+    expect(info.identity).toBe("424229778181");
+    expect(info.authorizedDomains).toContain("notes-27f22.firebaseapp.com");
+  });
+
+  it("maps an invalid API key from status and ErrorInfo reason", () => {
+    const body = JSON.stringify({
+      error: {
+        code: 400,
+        message: "API key not valid. Please pass a valid API key.",
+        status: "INVALID_ARGUMENT",
+        details: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "API_KEY_INVALID" }],
+      },
+    });
+    const step = mapProjectConfigProbe(400, body, candidate, 5);
     expect(step.status).toBe("failed");
     expect(step.code).toBe("INVALID_API_KEY");
   });
@@ -334,6 +471,11 @@ describe("probe error mapping", () => {
     expect(step.status).toBe("passed");
   });
 
+  it("accepts INVALID_LOGIN_CREDENTIALS (newer projects) as proof the provider is enabled", () => {
+    const body = JSON.stringify({ error: { message: "INVALID_LOGIN_CREDENTIALS" } });
+    expect(mapPasswordProviderProbe(400, body, 7).status).toBe("passed");
+  });
+
   it("reports a disabled Email/Password provider with the fix", () => {
     const body = JSON.stringify({ error: { message: "OPERATION_NOT_ALLOWED" } });
     const step = mapPasswordProviderProbe(400, body, 7);
@@ -342,11 +484,23 @@ describe("probe error mapping", () => {
     expect(step.message).toMatch(/Enable it in Firebase Console/);
   });
 
-  it("treats NOT_FOUND and PERMISSION_DENIED as Firestore reachable", () => {
+  it("uses a non-reserved Firestore probe path", () => {
+    const path = firestoreProbePath();
+    expect(path).toBe(`${FIRESTORE_PROBE_COLLECTION}/${FIRESTORE_PROBE_DOCUMENT}`);
+    // Firestore reserves ids matching __.*__ and the names "." / "..".
+    for (const segment of path.split("/")) {
+      expect(segment).not.toMatch(/__/);
+      expect(segment).not.toBe(".");
+      expect(segment).not.toBe("..");
+      expect(segment.length).toBeLessThanOrEqual(1536);
+    }
+  });
+
+  it("treats NOT_FOUND and security-rules PERMISSION_DENIED as Firestore reachable", () => {
     const notFound = mapFirestoreProbe(
       404,
       JSON.stringify({ error: { status: "NOT_FOUND", message: "Requested entity was not found." } }),
-      "demo-project",
+      candidate,
       9,
     );
     expect(notFound.status).toBe("passed");
@@ -354,19 +508,71 @@ describe("probe error mapping", () => {
     const denied = mapFirestoreProbe(
       403,
       JSON.stringify({ error: { status: "PERMISSION_DENIED", message: "Missing or insufficient permissions." } }),
-      "demo-project",
+      candidate,
       9,
     );
     expect(denied.status).toBe("passed");
   });
 
+  it("maps the REAL reserved-collection response as a probe defect (regression guard)", () => {
+    // Captured live: GET .../documents/__gateway_probe__/__ping__
+    const body = JSON.stringify({
+      error: { code: 400, message: 'Collection id "__gateway_probe__" is invalid because it is reserved.', status: "INVALID_ARGUMENT" },
+    });
+    const step = mapFirestoreProbe(400, body, candidate, 6);
+    expect(step.status).toBe("failed");
+    expect(step.code).toBe("FIRESTORE_RESERVED_ID");
+    expect(step.message).toContain(firestoreProbePath());
+  });
+
+  it("maps the REAL cross-project CONSUMER_INVALID response as WRONG_PROJECT", () => {
+    // Captured live: valid key from one project used against a different projectId path.
+    const body = JSON.stringify({
+      error: {
+        code: 403,
+        message: "Permission denied on resource project some-other-project-xyz.",
+        status: "PERMISSION_DENIED",
+        details: [
+          {
+            "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+            reason: "CONSUMER_INVALID",
+            domain: "googleapis.com",
+            metadata: { consumer: "projects/some-other-project-xyz", service: "firestore.googleapis.com" },
+          },
+        ],
+      },
+    });
+    const step = mapFirestoreProbe(403, body, candidate, 8);
+    expect(step.status).toBe("failed");
+    expect(step.code).toBe("WRONG_PROJECT");
+  });
+
   it("reports Firestore not enabled as a distinct failure", () => {
     const body = JSON.stringify({
-      error: { status: "PERMISSION_DENIED", message: "Cloud Firestore API has not been used in project demo-project before or it is disabled." },
+      error: { status: "PERMISSION_DENIED", message: "Cloud Firestore API has not been used in project 123456789012 before or it is disabled." },
     });
-    const step = mapFirestoreProbe(403, body, "demo-project", 9);
+    const step = mapFirestoreProbe(403, body, candidate, 9);
     expect(step.status).toBe("failed");
     expect(step.code).toBe("FIRESTORE_DISABLED");
+  });
+
+  it("treats a 'not used in project N' message naming a different number as WRONG_PROJECT", () => {
+    const body = JSON.stringify({
+      error: { status: "PERMISSION_DENIED", message: "Cloud Firestore API has not been used in project 424229778181 before or it is disabled." },
+    });
+    const step = mapFirestoreProbe(403, body, candidate, 9);
+    expect(step.status).toBe("failed");
+    expect(step.code).toBe("WRONG_PROJECT");
+  });
+
+  it("checks the browser hostname against authorized domains", () => {
+    const domains = ["localhost", "demo-project.firebaseapp.com", "demo-project.web.app", "app.example.org"];
+    const allowed = mapAuthorizedDomainStep(candidate, domains, "app.example.org", 1, "domain", "Domain");
+    expect(allowed?.status).toBe("passed");
+    const denied = mapAuthorizedDomainStep(candidate, domains, "evil.example.net", 1, "domain", "Domain");
+    expect(denied?.status).toBe("warning");
+    expect(denied?.code).toBe("AUTH_DOMAIN_UNAUTHORIZED");
+    expect(mapAuthorizedDomainStep(candidate, domains, null, 1, "domain", "Domain")).toBeNull();
   });
 
   it("maps aborts to timeouts and failures to network errors", () => {
@@ -376,7 +582,7 @@ describe("probe error mapping", () => {
     expect(networkFailureStep("auth", "Auth", new TypeError("Failed to fetch"), 3).code).toBe("NETWORK_ERROR");
   });
 
-  it("summarizes reports with Connected/Failed semantics", () => {
+  it("summarizes reports with Connected/Failed semantics and warns without failing", () => {
     const ok = summarizeProbe(
       [{ id: "a", label: "A", status: "passed", message: "fine", latencyMs: 1 }],
       "demo-project",
@@ -384,6 +590,17 @@ describe("probe error mapping", () => {
     );
     expect(ok.ok).toBe(true);
     expect(ok.status).toBe("connected");
+
+    const warned = summarizeProbe(
+      [
+        { id: "a", label: "A", status: "passed", message: "fine", latencyMs: 1 },
+        { id: "b", label: "B", status: "warning", message: "add this domain", latencyMs: 1 },
+      ],
+      "demo-project",
+      Date.now(),
+    );
+    expect(warned.ok).toBe(true);
+    expect(warned.summary).toContain("warning");
 
     const bad = summarizeProbe(
       [{ id: "a", label: "A", status: "failed", message: "exact reason here", latencyMs: 1 }],

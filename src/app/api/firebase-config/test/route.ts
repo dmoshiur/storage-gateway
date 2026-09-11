@@ -7,7 +7,7 @@ import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { getEffectiveFirebaseWebConfig } from "@/lib/firebase/runtime-store";
 import { probeFirebaseWebConfigServer } from "@/lib/firebase/probe";
-import { firebaseWebConfigSchema } from "@/lib/firebase/web-config";
+import { firebaseWebConfigSchema, validateFirebaseWebConfig } from "@/lib/firebase/web-config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,6 +32,19 @@ export async function POST(request: Request) {
         "FIREBASE_NOT_CONFIGURED",
         "No Firebase configuration is available to test. Paste a Web App config first.",
       );
+    }
+    if (candidate) {
+      // Full cross-field validation (project numbers, default auth domain)
+      // before running the live probe, so a franken-config reports the exact
+      // offending fields instead of a misleading upstream error.
+      const crossField = validateFirebaseWebConfig(candidate);
+      if (!crossField.ok) {
+        throw new ApiError(
+          400,
+          "VALIDATION_ERROR",
+          `The pasted config is internally inconsistent: ${crossField.errors.map((issue) => issue.message).join(" ")}`,
+        );
+      }
     }
     const report = await probeFirebaseWebConfigServer(config);
     return success(report, requestId);

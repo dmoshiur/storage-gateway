@@ -160,8 +160,17 @@ export function FirebaseConfigManager() {
     setVerifyError(null);
     try {
       const { server, client } = await runTests(candidate, candidateLabel);
-      if (server?.ok && client?.ok) toast("Connected: Firebase initialization, Auth, and Firestore all passed.");
-      else if (server && !server.ok) toast("Connection failed — see the exact reason below.", "error");
+      const warningCount = [server, client]
+        .filter((report): report is ProbeReport => report !== null)
+        .reduce((count, report) => count + report.steps.filter((step) => step.status === "warning").length, 0);
+      if (server?.ok && client?.ok) {
+        toast(
+          warningCount > 0
+            ? `Connected with ${warningCount} warning${warningCount === 1 ? "" : "s"} — review the details below.`
+            : "Connected: Firebase initialization, Auth, and Firestore all passed.",
+          warningCount > 0 ? "warning" : "success",
+        );
+      } else if (server && !server.ok) toast("Connection failed — see the exact reason below.", "error");
       else if (client && !client.ok) toast("This browser cannot reach Firebase — see details below.", "warning");
     } finally {
       setTesting(false);
@@ -177,7 +186,11 @@ export function FirebaseConfigManager() {
     setVerifyResult(null);
     setVerifyError(null);
     try {
-      const result = await apiFetch<{ status: FirebaseRuntimeStatus; devEnvSync: { updated: boolean; reason: string } }>(
+      const result = await apiFetch<{
+        status: FirebaseRuntimeStatus;
+        devEnvSync: { updated: boolean; reason: string };
+        verification?: { verified: boolean; warnings: string[] };
+      }>(
         "/api/firebase-config",
         { method: "PUT", body: JSON.stringify({ config: parsed.config }) },
       );
@@ -189,13 +202,15 @@ export function FirebaseConfigManager() {
       refresh();
       const label = `saved config (project “${parsed.config.projectId}”)`;
       const { server, client } = await runTests(parsed.config, label);
+      const saveWarnings = result.verification?.verified === false ? result.verification.warnings : [];
       if (server?.ok && client?.ok) {
-        toast(
-          result.status.redeployRequired
-            ? "Saved, applied, and connected. Production builds still need the env update + redeploy below."
-            : "Saved, applied, and connected. Existing Firebase users can sign in.",
-          result.status.redeployRequired ? "warning" : "success",
-        );
+        if (saveWarnings.length > 0) {
+          toast(`Saved and applied, but live verification was incomplete: ${saveWarnings[0]}`, "warning");
+        } else if (result.status.redeployRequired) {
+          toast("Saved, applied, and connected. Production builds still need the env update + redeploy below.", "warning");
+        } else {
+          toast("Saved, applied, and connected. Existing Firebase users can sign in.");
+        }
       } else {
         toast("Saved and applied, but the connection test failed — see the exact reason below.", "error");
       }

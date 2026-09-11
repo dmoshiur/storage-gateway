@@ -148,6 +148,22 @@ The NGO main website talks to gateway routes only. It never needs R2 credentials
 
 The Firebase Web SDK configuration is intentionally `NEXT_PUBLIC_*`: it identifies the Firebase project, but does **not** grant database or R2 administrative access. Firestore Rules and server-side authorization still protect data.
 
+#### One Firebase project, end to end
+
+Every Firebase identifier must come from the **same Web App inside the same Firebase project** as the server Admin SDK (`FIREBASE_PROJECT_ID`). In Settings → Firebase Configuration the paste box, the `.env.local` baseline, and the Vercel variables must all agree:
+
+- `NEXT_PUBLIC_FIREBASE_PROJECT_ID` equals `FIREBASE_PROJECT_ID` (e.g. `am-st-b507f`);
+- `apiKey`, `authDomain`, `projectId`, `messagingSenderId`, and `appId` are copied together from Firebase Console → Project settings → General → Your apps → **Web app** — never mixed between projects;
+- the project number in `appId` (`1:<projectNumber>:web:<hash>`) is identical to `messagingSenderId` — the dashboard validates this before saving and rejects a config whose fields disagree.
+
+**Test connection** proves identity three independent ways, with no mock data:
+
+1. Identity Toolkit `getProjectConfig` is called with the API key. That endpoint returns the key's GCP project **number** in its `projectId` field (not the string id); it must equal the number embedded in `appId`/`messagingSenderId`, and the project's default `<projectId>.firebaseapp.com` / `.web.app` domains must appear in `authorizedDomains`. A mismatch reports `WRONG_PROJECT` with both numbers.
+2. A Firestore REST read of the non-existent, **non-reserved** probe document `systemHealth/gatewayProbe` proves the key is accepted for that project. Firestore rejects cross-project keys with `PERMISSION_DENIED` / `CONSUMER_INVALID` ("Permission denied on resource project …"), and reserves ids matching `__.*__` — the probe never uses such ids.
+3. The server Admin SDK project id must equal the web config project id, otherwise browser ID tokens could never verify and existing users could never sign in.
+
+The browser test additionally initializes the real Web SDK (Auth **and** Firestore), checks the Email/Password provider with a deliberately unknown user, and verifies the current hostname is in Firebase's Authorized domains (the exact list that gates `auth/unauthorized-domain`). Saving a config runs these identity checks server-side first; definitive mismatches (invalid key, wrong project, Admin mismatch, Firestore disabled) block the save. A network outage never fakes success — the config is saved but returned as unverified with the reason, and Test connection must be re-run.
+
 ### Authentication and roles
 
 The login page offers two independent sign-in methods:
