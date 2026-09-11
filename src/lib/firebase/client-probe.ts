@@ -4,11 +4,16 @@ import { deleteApp, initializeApp } from "firebase/app";
 import { getAuth, signInWithEmailAndPassword } from "firebase/auth";
 import type { FirebaseWebConfig } from "@/lib/firebase/web-config";
 import {
-  fetchWithTimeout,
+  fetchFirestoreProbe,
+  fetchPasswordProviderProbe,
+  fetchProjectConfig,
+  mapAuthorizedDomainStep,
+  mapConfigConsistencyStep,
   mapFirestoreProbe,
   mapPasswordProviderProbe,
   mapProjectConfigProbe,
   networkFailureStep,
+  parseProjectConfigBody,
   summarizeProbe,
   type ProbeReport,
   type ProbeStep,
@@ -22,37 +27,39 @@ import {
  * initialization and the same REST endpoints the SDK itself calls.
  */
 
-const PROBE_TIMEOUT_MS = 9000;
-
 function tempAppName(): string {
   return `gateway-probe-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function candidateOptions(config: FirebaseWebConfig) {
+  return {
+    apiKey: config.apiKey,
+    authDomain: config.authDomain,
+    projectId: config.projectId,
+    appId: config.appId,
+    ...(config.storageBucket ? { storageBucket: config.storageBucket } : {}),
+    ...(config.messagingSenderId ? { messagingSenderId: config.messagingSenderId } : {}),
+    ...(config.measurementId ? { measurementId: config.measurementId } : {}),
+  };
 }
 
 async function probeSdkInitialization(config: FirebaseWebConfig): Promise<ProbeStep> {
   const startedAt = Date.now();
   const name = tempAppName();
   try {
-    const app = initializeApp(
-      {
-        apiKey: config.apiKey,
-        authDomain: config.authDomain,
-        projectId: config.projectId,
-        appId: config.appId,
-        ...(config.storageBucket ? { storageBucket: config.storageBucket } : {}),
-        ...(config.messagingSenderId ? { messagingSenderId: config.messagingSenderId } : {}),
-        ...(config.measurementId ? { measurementId: config.measurementId } : {}),
-      },
-      name,
-    );
-    // Touching Auth proves the Auth SDK binds to this project.
+    const app = initializeApp(candidateOptions(config), name);
+    // Touching Auth proves the Auth SDK binds to this project; binding
+    // Firestore proves the same options resolve a Firestore database.
     getAuth(app);
+    const { getFirestore } = await import("firebase/firestore");
+    getFirestore(app);
     await deleteApp(app).catch(() => undefined);
     return {
       id: "initialization",
       label: "SDK initialization",
       status: "passed",
       latencyMs: Date.now() - startedAt,
-      message: `Firebase Web SDK initialized in this browser for project “${config.projectId}”.`,
+      message: `Firebase Web SDK initialized in this browser for project “${config.projectId}” (Auth and Firestore bound).`,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "initialization failed";
@@ -72,36 +79,31 @@ async function probeSdkInitialization(config: FirebaseWebConfig): Promise<ProbeS
   }
 }
 
-async function probeProjectConfig(config: FirebaseWebConfig): Promise<ProbeStep> {
+async function probeProjectConfig(config: FirebaseWebConfig): Promise<{ step: ProbeStep; authorizedDomains: string[] }> {
   const startedAt = Date.now();
-  const url = `https://www.googleapis.com/identitytoolkit/v3/relyingparty/getProjectConfig?key=${encodeURIComponent(config.apiKey)}`;
   try {
-    const { status, bodyText } = await fetchWithTimeout(url, { method: "GET", cache: "no-store" }, PROBE_TIMEOUT_MS);
-    const step = mapProjectConfigProbe(status, bodyText, config.projectId, Date.now() - startedAt);
-    return { ...step, id: "auth-browser", label: "Auth (this browser)" };
+    const { status, bodyText } = await fetchProjectConfig(config);
+    const step = mapProjectConfigProbe(
+      status,
+      bodyText,
+      config,
+      Date.now() - startedAt,
+      "auth-browser",
+      "Auth (this browser)",
+    );
+    return { step, authorizedDomains: status === 200 ? parseProjectConfigBody(bodyText).authorizedDomains : [] };
   } catch (error) {
-    return networkFailureStep("auth-browser", "Auth (this browser)", error, Date.now() - startedAt);
+    return {
+      step: networkFailureStep("auth-browser", "Auth (this browser)", error, Date.now() - startedAt),
+      authorizedDomains: [],
+    };
   }
 }
 
 async function probePasswordProvider(config: FirebaseWebConfig): Promise<ProbeStep> {
   const startedAt = Date.now();
-  const url = `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(config.apiKey)}`;
   try {
-    const { status, bodyText } = await fetchWithTimeout(
-      url,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email: "gateway-config-probe@example.invalid",
-          password: "GatewayProbePassword-0-invalid!",
-          returnSecureToken: true,
-        }),
-        cache: "no-store",
-      },
-      PROBE_TIMEOUT_MS,
-    );
+    const { status, bodyText } = await fetchPasswordProviderProbe(config);
     const step = mapPasswordProviderProbe(status, bodyText, Date.now() - startedAt);
     return { ...step, id: "auth-password-browser", label: "Email/Password (this browser)" };
   } catch (error) {
@@ -109,15 +111,31 @@ async function probePasswordProvider(config: FirebaseWebConfig): Promise<ProbeSt
   }
 }
 
+async function probeAuthorizedDomain(config: FirebaseWebConfig, authorizedDomains: string[]): Promise<ProbeStep | null> {
+  const hostname = typeof window !== "undefined" ? window.location.hostname : null;
+  return mapAuthorizedDomainStep(
+    config,
+    authorizedDomains,
+    hostname,
+    0,
+    "auth-domain-browser",
+    "Authorized domain (this browser)",
+  );
+}
+
 async function probeFirestore(config: FirebaseWebConfig): Promise<ProbeStep> {
   const startedAt = Date.now();
-  const url =
-    `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(config.projectId)}` +
-    `/databases/(default)/documents/__gateway_probe__/__ping__?key=${encodeURIComponent(config.apiKey)}`;
   try {
-    const { status, bodyText } = await fetchWithTimeout(url, { method: "GET", cache: "no-store" }, PROBE_TIMEOUT_MS);
-    const step = mapFirestoreProbe(status, bodyText, config.projectId, Date.now() - startedAt);
-    return { ...step, id: "firestore-browser", label: "Firestore (this browser)" };
+    const { status, bodyText } = await fetchFirestoreProbe(config);
+    const step = mapFirestoreProbe(
+      status,
+      bodyText,
+      config,
+      Date.now() - startedAt,
+      "firestore-browser",
+      "Firestore (this browser)",
+    );
+    return step;
   } catch (error) {
     return networkFailureStep("firestore-browser", "Firestore (this browser)", error, Date.now() - startedAt);
   }
@@ -126,15 +144,26 @@ async function probeFirestore(config: FirebaseWebConfig): Promise<ProbeStep> {
 export async function probeFirebaseWebConfigClient(config: FirebaseWebConfig): Promise<ProbeReport> {
   const startedAt = Date.now();
   const initialization = await probeSdkInitialization(config);
-  const [auth, password, firestore] = await Promise.all([
+  const consistency = mapConfigConsistencyStep(
+    config,
+    0,
+    "config-consistency-browser",
+    "Config identity (this browser)",
+  );
+  const [{ step: auth, authorizedDomains }, password, firestore] = await Promise.all([
     probeProjectConfig(config),
     probePasswordProvider(config),
     probeFirestore(config),
   ]);
+  const domainStep = await probeAuthorizedDomain(config, authorizedDomains);
   const steps: ProbeStep[] = [
     initialization,
+    consistency,
     auth,
-    auth.status === "failed" ? { ...password, status: "skipped" as const, message: "Skipped: Authentication service check failed first." } : password,
+    auth.status === "failed"
+      ? { ...password, status: "skipped" as const, message: "Skipped: Authentication service check failed first." }
+      : password,
+    ...(domainStep ? [domainStep] : []),
     firestore,
   ];
   return summarizeProbe(steps, config.projectId, startedAt);
@@ -183,18 +212,7 @@ export async function signInToCandidateProject(
   password: string,
 ): Promise<ClientLoginVerification> {
   const name = tempAppName();
-  const app = initializeApp(
-    {
-      apiKey: config.apiKey,
-      authDomain: config.authDomain,
-      projectId: config.projectId,
-      appId: config.appId,
-      ...(config.storageBucket ? { storageBucket: config.storageBucket } : {}),
-      ...(config.messagingSenderId ? { messagingSenderId: config.messagingSenderId } : {}),
-      ...(config.measurementId ? { measurementId: config.measurementId } : {}),
-    },
-    name,
-  );
+  const app = initializeApp(candidateOptions(config), name);
   try {
     const credential = await signInWithEmailAndPassword(getAuth(app), email.trim(), password);
     const idToken = await credential.user.getIdToken(true);

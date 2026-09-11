@@ -43,10 +43,50 @@ export type KnownFirebaseField = (typeof KNOWN_FIREBASE_FIELDS)[number];
 
 const HOSTNAME_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
 const PROJECT_ID_PATTERN = /^[a-z][a-z0-9-]*[a-z0-9]$/;
-const APP_ID_PATTERN = /^1:\d+:web:[0-9a-f]+$/i;
+// Web App ids look like 1:<projectNumber>:web:<appHash>. The middle segment is
+// the GCP project NUMBER (identical to messagingSenderId), NOT the project id.
+const APP_ID_PATTERN = /^1:(\d+):web:[0-9a-f]+$/i;
+const APP_ID_ANY_PLATFORM_PATTERN = /^1:(\d+):(web|ios|android):[0-9a-f]+$/i;
 const SENDER_ID_PATTERN = /^\d{6,20}$/;
 const MEASUREMENT_ID_PATTERN = /^G-[A-Z0-9]{4,}$/;
 const API_KEY_PATTERN = /^AIza[0-9A-Za-z_-]{20,}$/;
+// Default Hosting domains issued for every project id.
+const DEFAULT_AUTH_DOMAIN_PATTERN = /^([a-z0-9][a-z0-9-]*[a-z0-9])\.(firebaseapp\.com|web\.app)$/i;
+// Default Cloud Storage buckets are named after the project id.
+const DEFAULT_BUCKET_PATTERN = /^([a-z0-9][a-z0-9-]*[a-z0-9])\.appspot\.com$/i;
+
+/**
+ * Extracts the numeric GCP project number embedded in a Firebase appId
+ * (`1:<projectNumber>:web:<hash>`), or null when the appId is malformed.
+ * This number equals the project's messagingSenderId and is the value
+ * Firebase's Identity Toolkit `getProjectConfig` endpoint returns in its
+ * (misleadingly named) `projectId` field.
+ */
+export function projectNumberFromAppId(appId: string | null | undefined): string | null {
+  if (typeof appId !== "string") return null;
+  const match = APP_ID_ANY_PLATFORM_PATTERN.exec(appId.trim());
+  return match?.[1] ?? null;
+}
+
+/** The two default Hosting/Auth domains Firebase issues for a project id. */
+export function defaultAuthDomainsForProject(projectId: string): string[] {
+  return [`${projectId}.firebaseapp.com`, `${projectId}.web.app`];
+}
+
+export interface ConfigConsistency {
+  /** Project number parsed from appId (`1:<number>:web:<hash>`). */
+  appIdProjectNumber: string | null;
+  /** Project number parsed from messagingSenderId. */
+  senderProjectNumber: string | null;
+  /** Every project-number-bearing field that is present agrees. */
+  projectNumbersAgree: boolean;
+  /**
+   * Whether the auth domain belongs to the stated project id:
+   * true/false for the default *.firebaseapp.com / *.web.app domains,
+   * null for a custom (non-default) auth domain, which cannot be checked locally.
+   */
+  authDomainMatchesProject: boolean | null;
+}
 
 const trimmedString = (max: number) => z.string().trim().min(1).max(max);
 
@@ -93,6 +133,35 @@ const emptyDetected = (): Record<KnownFirebaseField, boolean> => ({
 
 function failure(errors: FirebaseFieldIssue[], warnings: FirebaseFieldIssue[] = []): ParsedFirebaseWebConfig {
   return { ok: false, config: null, errors, warnings, detected: emptyDetected() };
+}
+
+/**
+ * Local (network-free) cross-field identity check. Proves whether every
+ * project-number-bearing field in a pasted config comes from the SAME Firebase
+ * project, before any network probe runs. The network probe then proves the
+ * API key itself belongs to that project number.
+ */
+export function inspectConfigConsistency(config: {
+  appId?: string | null;
+  messagingSenderId?: string | null;
+  authDomain?: string | null;
+  projectId?: string | null;
+}): ConfigConsistency {
+  const appIdProjectNumber = projectNumberFromAppId(config.appId);
+  const senderRaw = typeof config.messagingSenderId === "string" ? config.messagingSenderId.trim() : "";
+  const senderProjectNumber = SENDER_ID_PATTERN.test(senderRaw) ? senderRaw : null;
+  const projectNumbersAgree =
+    appIdProjectNumber === null || senderProjectNumber === null || appIdProjectNumber === senderProjectNumber;
+
+  let authDomainMatchesProject: boolean | null = null;
+  if (typeof config.authDomain === "string" && config.authDomain.trim()) {
+    const match = DEFAULT_AUTH_DOMAIN_PATTERN.exec(config.authDomain.trim());
+    if (match) {
+      authDomainMatchesProject =
+        typeof config.projectId === "string" && match[1]!.toLowerCase() === config.projectId.trim().toLowerCase();
+    }
+  }
+  return { appIdProjectNumber, senderProjectNumber, projectNumbersAgree, authDomainMatchesProject };
 }
 
 /** Detects a service-account / Admin SDK key pasted into the Web config box. */
@@ -203,6 +272,45 @@ export function validateFirebaseWebConfig(value: unknown): ParsedFirebaseWebConf
   }
   if (measurementId && !MEASUREMENT_ID_PATTERN.test(measurementId)) {
     warnings.push({ field: "measurementId", message: "“measurementId” usually looks like G-XXXXXXXX. It will still be saved as-is." });
+  }
+
+  // ---- Cross-field identity checks: every field must come from the SAME Web App ----
+  // The appId embeds the project number and messagingSenderId IS the project
+  // number, so a paste assembled from two projects is detectable locally.
+  // A malformed appId already filed a format error in the individual checks above.
+  const consistency = inspectConfigConsistency({ appId, messagingSenderId, authDomain, projectId });
+  if (
+    consistency.appIdProjectNumber &&
+    consistency.senderProjectNumber &&
+    consistency.appIdProjectNumber !== consistency.senderProjectNumber
+  ) {
+    errors.push({
+      field: "messagingSenderId",
+      message:
+        `messagingSenderId “${messagingSenderId}” is project number ${consistency.senderProjectNumber}, but appId ` +
+        `“${appId}” belongs to project number ${consistency.appIdProjectNumber}. These values came from two different ` +
+        `Firebase projects — paste the complete config object from one Web App (do not mix fields).`,
+    });
+  }
+  if (consistency.authDomainMatchesProject === false && projectId) {
+    const domainMatch = DEFAULT_AUTH_DOMAIN_PATTERN.exec(authDomain!)!;
+    errors.push({
+      field: "authDomain",
+      message:
+        `authDomain “${authDomain}” is the default domain of project “${domainMatch[1]}”, but projectId is “${projectId}”. ` +
+        `The authDomain for that project must be “${projectId}.firebaseapp.com” or “${projectId}.web.app”.`,
+    });
+  }
+  if (storageBucket) {
+    const bucketMatch = DEFAULT_BUCKET_PATTERN.exec(storageBucket);
+    if (bucketMatch && projectId && bucketMatch[1]!.toLowerCase() !== projectId.toLowerCase()) {
+      warnings.push({
+        field: "storageBucket",
+        message:
+          `storageBucket “${storageBucket}” belongs to project “${bucketMatch[1]}”, not “${projectId}”. ` +
+          `It will still be saved as-is, but the connection test may fail if it came from another project.`,
+      });
+    }
   }
 
   for (const key of Object.keys(record)) {

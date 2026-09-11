@@ -16,9 +16,11 @@ import {
 import {
   firebaseConfigEnvSnippet,
   firebaseWebConfigSchema,
+  validateFirebaseWebConfig,
   type FirebaseRuntimeStatus,
   type FirebaseWebConfig,
 } from "@/lib/firebase/web-config";
+import { verifyConfigForSave, assertConfigSaveable, type SaveVerification } from "@/lib/firebase/probe";
 import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
 
 export const runtime = "nodejs";
@@ -81,6 +83,25 @@ export async function PUT(request: Request) {
     if (!config.apiKey.trim() || !config.authDomain.trim() || !config.projectId.trim() || !config.appId.trim()) {
       throw new ApiError(400, "VALIDATION_ERROR", "apiKey, authDomain, projectId, and appId are required.");
     }
+    // Cross-field validation zod cannot express: appId number ↔
+    // messagingSenderId number and default authDomain ↔ projectId.
+    const crossField = validateFirebaseWebConfig(config);
+    if (!crossField.ok) {
+      throw new ApiError(
+        400,
+        "VALIDATION_ERROR",
+        `The pasted config is internally inconsistent — all fields must come from the same Web App: ${crossField.errors
+          .map((issue) => issue.message)
+          .join(" ")}`,
+      );
+    }
+    // LIVE identity verification before anything is persisted: the API key
+    // must actually belong to the same Firebase project as appId/projectId,
+    // Firestore must accept the key for that project, and the server Admin
+    // SDK must verify that same project. Definitive mismatches block the
+    // save; network outages allow it but return verified:false honestly.
+    const verification: SaveVerification = await verifyConfigForSave(config);
+    assertConfigSaveable(verification);
     const { devEnvSync } = await saveStoredFirebaseWebConfig(config, actor.uid);
     const effective = await getEffectiveFirebaseWebConfig();
     await writeAuditLogSafely({
@@ -94,11 +115,17 @@ export async function PUT(request: Request) {
         source: "stored",
         redeployRequired: effective.redeployRequired,
         devEnvUpdated: devEnvSync.updated,
+        liveVerified: verification.verified,
+        verificationWarningCount: verification.warnings.length,
       },
     });
     return success({
       status: toRuntimeStatus(effective, true),
       devEnvSync: { updated: devEnvSync.updated, reason: devEnvSync.reason },
+      verification: {
+        verified: verification.verified,
+        warnings: verification.warnings,
+      },
     }, requestId);
   }, { route: "firebase-config/save" });
 }

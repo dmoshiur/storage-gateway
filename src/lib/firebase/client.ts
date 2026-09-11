@@ -123,6 +123,21 @@ function ensurePersistence(auth: Auth, app: FirebaseApp): void {
 }
 
 /**
+ * Binds Firestore to the given app, so every Firestore client call runs
+ * against the SAME project the app was initialized for. Firestore is
+ * imported on demand to keep it out of the initial bundle; a bind failure
+ * surfaces through the connection probe rather than crashing boot.
+ */
+async function bindFirestore(app: FirebaseApp): Promise<void> {
+  try {
+    const { getFirestore } = await import("firebase/firestore");
+    getFirestore(app);
+  } catch (error) {
+    console.warn("Firebase Firestore binding needs verification:", error);
+  }
+}
+
+/**
  * Applies a Web config to the default Firebase app, reinitializing the
  * Auth and Firestore SDK bindings when the identity changed. No-op when the
  * default app already runs this exact config. Temporary probe apps are
@@ -145,12 +160,7 @@ export async function applyFirebaseWebConfig(config: FirebaseWebConfig): Promise
   // demand so this never grows the initial bundle; a bind failure here is
   // non-fatal because the post-save connection probe is the source of
   // truth for Firestore reachability and reports the exact reason.
-  try {
-    const { getFirestore } = await import("firebase/firestore");
-    getFirestore(app);
-  } catch (error) {
-    console.warn("Firebase Firestore binding for the new config needs verification:", error);
-  }
+  await bindFirestore(app);
   return app;
 }
 
@@ -166,14 +176,24 @@ function defaultAppFromEnv(): FirebaseApp {
   if (existing) return existing;
   const { config, missing } = readEnvConfig();
   if (!config) throw missingConfigError(missing);
-  return initializeApp(toFirebaseOptions(config));
+  const app = initializeApp(toFirebaseOptions(config));
+  ensurePersistence(getAuth(app), app);
+  // Fire-and-forget: Auth must be available synchronously, but Firestore
+  // must also be bound to this exact project for any client that uses it.
+  void bindFirestore(app);
+  return app;
 }
 
 export function getFirebaseClientApp(): FirebaseApp {
   const existing = getApps().find((app) => app.name === DEFAULT_APP_NAME) ?? null;
   if (existing) return existing;
   // A stored override may already be cached from an earlier async load.
-  if (runtimeStatus?.config) return initializeApp(toFirebaseOptions(runtimeStatus.config));
+  if (runtimeStatus?.config) {
+    const app = initializeApp(toFirebaseOptions(runtimeStatus.config));
+    ensurePersistence(getAuth(app), app);
+    void bindFirestore(app);
+    return app;
+  }
   return defaultAppFromEnv();
 }
 
@@ -191,7 +211,10 @@ export async function getFirebaseClientAppAsync(signal?: AbortSignal): Promise<F
   if (existing) return existing;
   const { config, missing } = readEnvConfig();
   if (!config) throw missingConfigError(status?.missing?.length ? status.missing : missing);
-  return initializeApp(toFirebaseOptions(config));
+  const app = initializeApp(toFirebaseOptions(config));
+  ensurePersistence(getAuth(app), app);
+  await bindFirestore(app);
+  return app;
 }
 
 export function getFirebaseClientAuth(): Auth {
