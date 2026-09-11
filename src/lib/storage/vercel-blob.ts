@@ -21,6 +21,7 @@ import type {
   SignedUploadOptions,
   StorageHealth,
   StorageService,
+  StorageStream,
   UploadObjectInput,
 } from "@/lib/storage/storage-service";
 
@@ -105,6 +106,16 @@ export class VercelBlobStorageService implements StorageService {
   }
 
   async download(pathname: string, range?: string): Promise<Uint8Array> {
+    const streamed = await this.downloadStream(pathname, range);
+    return new Uint8Array(await new Response(streamed.stream).arrayBuffer());
+  }
+
+  /**
+   * Reads the private object through the SDK's authenticated read path and
+   * hands the raw stream back untouched, so the caller can serve it without
+   * buffering the whole PDF in memory and without ever exposing a Blob URL.
+   */
+  async downloadStream(pathname: string, range?: string): Promise<StorageStream> {
     try {
       const url = await this.requireUrl(pathname);
       // Use the SDK's private read path rather than fetching the canonical URL
@@ -120,7 +131,14 @@ export class VercelBlobStorageService implements StorageService {
       if (result.statusCode === 304 || !result.stream) {
         throw new ApiError(502, "BLOB_REQUEST_FAILED", "The download from Blob storage returned no content.");
       }
-      return new Uint8Array(await new Response(result.stream).arrayBuffer());
+      return {
+        stream: result.stream,
+        // `blob` metadata is always present on a 200 response; the optional
+        // access keeps a stripped-down response from turning into a crash.
+        contentLength: result.blob?.size ?? null,
+        contentType: result.blob?.contentType ?? null,
+        statusCode: result.statusCode,
+      };
     } catch (error) {
       throw toApiError(error, "The download from Blob storage failed.");
     }

@@ -35,7 +35,29 @@ export function EmptyState({
   );
 }
 
-export function ErrorState({ message, onRetry }: { message: string; onRetry?: () => void }) {
+export interface ErrorDetail {
+  /** API error code, e.g. `FILES_FETCH_FAILED`. */
+  code?: string | null;
+  /** Server-side request id to quote in the logs. */
+  requestId?: string | null;
+  /** The real underlying dependency error, reported by the API. */
+  cause?: string | null;
+  causeCode?: string | null;
+  /** Operator guidance returned with the failure. */
+  hint?: string | null;
+}
+
+export function ErrorState({
+  message,
+  onRetry,
+  detail,
+  busy,
+}: {
+  message: string;
+  onRetry?: () => void;
+  detail?: ErrorDetail | null;
+  busy?: boolean;
+}) {
   return (
     <div className="flex flex-col items-center justify-center px-6 py-14 text-center">
       <div className="grid h-12 w-12 place-items-center rounded-xl bg-red-500/10 text-red-500">
@@ -43,9 +65,21 @@ export function ErrorState({ message, onRetry }: { message: string; onRetry?: ()
       </div>
       <h3 className="mt-4 text-[15px] font-semibold text-ink">Something went wrong</h3>
       <p className="mt-1 max-w-sm text-sm leading-6 text-ink-muted">{message}</p>
+      {detail?.cause && (
+        <p className="mt-3 max-w-xl break-words rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2 text-left font-mono text-[12px] leading-5 text-red-700 dark:text-red-300">
+          {detail.causeCode ? `${detail.causeCode}: ` : ""}
+          {detail.cause}
+        </p>
+      )}
+      {detail?.hint && <p className="mt-2 max-w-xl text-xs leading-5 text-ink-muted">{detail.hint}</p>}
+      {(detail?.code || detail?.requestId) && (
+        <p className="mt-2 font-mono text-[11px] text-ink-faint">
+          {[detail.code, detail.requestId ? `request ${detail.requestId}` : null].filter(Boolean).join(" · ")}
+        </p>
+      )}
       {onRetry && (
-        <button type="button" onClick={onRetry} className="btn-secondary mt-5">
-          Try again
+        <button type="button" onClick={onRetry} disabled={busy} className="btn-secondary mt-5">
+          {busy ? "Retrying…" : "Try again"}
         </button>
       )}
     </div>

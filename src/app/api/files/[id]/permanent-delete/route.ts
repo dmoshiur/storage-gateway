@@ -1,14 +1,13 @@
 import { apiRoute, requireRouteId } from "@/lib/api/route";
 import { success } from "@/lib/api/response";
 import { parseJson } from "@/lib/api/body";
-import { ApiError } from "@/lib/api/errors";
+import { toServiceFailure } from "@/lib/api/failures";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { beginPermanentDeletion, completePermanentDeletion, revertPermanentDeletion, serializeFile } from "@/lib/firestore/files";
 import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
 import { getStorageService } from "@/lib/storage";
 import { permanentDeleteSchema } from "@/lib/validation/schemas";
-import { logger } from "@/lib/logging/logger";
 import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
 
 export const runtime = "nodejs";
@@ -29,8 +28,18 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       return success({ file: serializeFile(deleted) }, requestId);
     } catch (error) {
       try { await revertPermanentDeletion(id, "BLOB_DELETE_FAILED"); } catch { /* pending lifecycle retries safely in cron */ }
-      logger.error("Manual permanent delete failed", { fileId: id, error: error instanceof Error ? error.message : "unknown" });
-      throw new ApiError(502, "DELETE_FAILED", "The document deletion could not be finalized. Its safe deletion state will be retried; refresh Trash or contact an administrator.");
+      // Logs the real Blob/Firestore failure and returns it in `error.details`
+      // instead of a bare "could not be finalized".
+      throw toServiceFailure({
+        status: 502,
+        code: "DELETE_FAILED",
+        message: "The document deletion could not be finalized. Its safe deletion state will be retried; refresh Trash or contact an administrator.",
+        cause: error,
+        operation: "files/permanent-delete",
+        area: "blob",
+        requestId,
+        context: { fileId: id, storagePath: pending.storagePath },
+      });
     }
   }, { route: "files/permanent-delete" });
 }

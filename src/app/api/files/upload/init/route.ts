@@ -10,6 +10,7 @@ import { createUploadingFile, findActiveFileByContentHash, markUploadFailed, ser
 import { getStorageStats } from "@/lib/firestore/stats";
 import { defaultRetention } from "@/lib/retention";
 import { getStorageService } from "@/lib/storage";
+import { toServiceFailure } from "@/lib/api/failures";
 import { ApiError } from "@/lib/api/errors";
 
 export const runtime = "nodejs";
@@ -28,8 +29,18 @@ export async function POST(request: Request) {
     let stats;
     try {
       [settings, stats] = await Promise.all([getSettings(), getStorageStats()]);
-    } catch {
-      throw new ApiError(503, "STORAGE_UNAVAILABLE", "Storage service is temporarily unavailable. Please retry shortly.");
+    } catch (error) {
+      // The real Firestore failure is logged and returned; a bare
+      // "temporarily unavailable" left operators with nothing to act on.
+      throw toServiceFailure({
+        status: 503,
+        code: "STORAGE_UNAVAILABLE",
+        message: "Upload limits could not be read from the metadata store.",
+        cause: error,
+        operation: "files/upload/init:settings",
+        area: "firestore",
+        requestId,
+      });
     }
     const document = assertDocumentMetadata(input.originalName, input.size, settings.maxPdfSizeBytes, input.mimeType);
     if (stats.totalStorageBytes + stats.pendingUploadBytes + input.size > settings.storageLimitBytes) {

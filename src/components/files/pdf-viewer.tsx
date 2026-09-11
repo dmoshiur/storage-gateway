@@ -4,14 +4,21 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Download, ExternalLink, LoaderCircle, Maximize2, Minimize2, RotateCw, X } from "lucide-react";
 import { useToast } from "@/components/providers";
 import { useOverlayBehavior } from "@/components/ui/overlays";
-import { apiErrorOptions, apiFetch } from "@/lib/client/api";
+import { apiErrorOptions, ClientApiError } from "@/lib/client/api";
+import { fetchStreamedFile, saveBlobAsFile } from "@/lib/client/download";
 import type { SerializedFile } from "@/types/file";
 import { displayName } from "@/components/files/file-helpers";
+
+/** Appends the real backend cause when the API reported one. */
+function describeFailure(error: unknown, fallback: string): string {
+  const options = apiErrorOptions(error, fallback);
+  const cause = error instanceof ClientApiError ? error.causeMessage : null;
+  return cause ? `${options.message} (${cause})` : options.message;
+}
 
 export function PdfViewer({ file, onClose }: { file: SerializedFile; onClose: () => void }) {
   const { toast } = useToast();
   const [url, setUrl] = useState<string | null>(null);
-  const [expiresAt, setExpiresAt] = useState<string | null>(null);
   const [tokenLoading, setTokenLoading] = useState(true);
   const [frameLoading, setFrameLoading] = useState(false);
   const [downloadBusy, setDownloadBusy] = useState(false);
@@ -20,30 +27,47 @@ export function PdfViewer({ file, onClose }: { file: SerializedFile; onClose: ()
   const [frameKey, setFrameKey] = useState(0);
   const loadBusyRef = useRef(false);
   const downloadBusyRef = useRef(false);
+  const objectUrlRef = useRef<string | null>(null);
+
+  const releaseObjectUrl = useCallback(() => {
+    if (objectUrlRef.current) {
+      URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = null;
+    }
+  }, []);
 
   const load = useCallback(async () => {
     // The reload control, expiry timer, and retry button can all race. Keep
-    // one signed-URL request per viewer and let the iframe remain local to the
+    // one preview request per viewer and let the iframe remain local to the
     // viewer rather than blocking the Files page.
     if (loadBusyRef.current) return;
     loadBusyRef.current = true;
     setTokenLoading(true);
     setFrameLoading(true);
     setError(null);
+    releaseObjectUrl();
     setUrl(null);
     try {
-      const data = await apiFetch<{ url: string; expiresAt: string }>(`/api/files/${file.id}/preview`);
-      setUrl(data.url);
-      setExpiresAt(data.expiresAt);
+      // The PDF is streamed through our own authenticated route: Firebase
+      // session verified server-side, role authorized, metadata read from
+      // Firestore, bytes fetched from the private Blob store. The browser only
+      // ever sees a local blob: URL for rendering.
+      const blob = await fetchStreamedFile(`/api/files/${file.id}/preview?stream=true`);
+      const objectUrl = URL.createObjectURL(blob);
+      objectUrlRef.current = objectUrl;
+      // Streamed previews carry no link lifetime, so there is nothing to renew.
+      setUrl(objectUrl);
     } catch (fetchError) {
-      const options = apiErrorOptions(fetchError, "Preview could not be loaded. Try again.");
-      setError(options.message);
+      setError(describeFailure(fetchError, "Preview could not be loaded. Try again."));
       setFrameLoading(false);
     } finally {
       loadBusyRef.current = false;
       setTokenLoading(false);
     }
-  }, [file.id]);
+  }, [file.id, releaseObjectUrl]);
+
+  // Never leak the object URL when the viewer closes.
+  useEffect(() => releaseObjectUrl, [releaseObjectUrl]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), 0);
@@ -52,37 +76,14 @@ export function PdfViewer({ file, onClose }: { file: SerializedFile; onClose: ()
 
   const panelRef = useOverlayBehavior({ onClose });
 
-  // Refresh the signed URL before it expires so long reads never break. A
-  // minimum delay also handles settings configured with a very short lifetime.
-  useEffect(() => {
-    if (!expiresAt) return;
-    const expiresIn = new Date(expiresAt).getTime() - Date.now();
-    if (!Number.isFinite(expiresIn)) return;
-    if (expiresIn <= 0) {
-      const timer = window.setTimeout(() => void load(), 0);
-      return () => window.clearTimeout(timer);
-    }
-    // Refresh 20 percent before expiry, capped at one minute. Using a fixed
-    // one-minute lead would create a one-second request loop for the valid
-    // 60-second minimum setting.
-    const refreshLead = Math.min(60_000, Math.max(5_000, expiresIn * 0.2));
-    const timer = setTimeout(() => void load(), Math.max(1_000, expiresIn - refreshLead));
-    return () => clearTimeout(timer);
-  }, [expiresAt, load]);
-
   const download = async () => {
     if (downloadBusyRef.current) return;
     downloadBusyRef.current = true;
     setDownloadBusy(true);
     try {
-      const data = await apiFetch<{ url: string }>(`/api/files/${file.id}/download`);
-      const link = document.createElement("a");
-      link.href = data.url;
-      link.download = file.originalName;
-      link.rel = "noopener";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
+      // Served through the authenticated route, so no Blob URL is exposed.
+      const blob = await fetchStreamedFile(`/api/files/${file.id}/download?stream=true`);
+      saveBlobAsFile(blob, file.originalName);
       toast("Download started.");
     } catch (downloadError) {
       const options = apiErrorOptions(downloadError, "Download failed. Try again.");

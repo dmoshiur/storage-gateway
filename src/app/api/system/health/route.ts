@@ -2,52 +2,123 @@ import { apiRoute } from "@/lib/api/route";
 import { success } from "@/lib/api/response";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
-import { getAdminDb } from "@/lib/firebase/admin";
+import { describeFailure } from "@/lib/api/failures";
+import { describeAdminCredentialIdentity, getAdminDb } from "@/lib/firebase/admin";
 import { getEffectiveFirebaseWebConfig } from "@/lib/firebase/runtime-store";
 import { getStorageService } from "@/lib/storage";
 import { getCleanupStatus } from "@/lib/firestore/cleanup-lock";
+import { withTimeout } from "@/lib/firestore/with-timeout";
 import { version as appVersion } from "../../../../../package.json";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-async function probeDatabase(): Promise<{ connected: boolean; latencyMs: number }> {
+/** Ceiling for the diagnostics Firestore read; the page must still render. */
+const DATABASE_PROBE_TIMEOUT_MS = 8_000;
+/** Same ceiling for the auxiliary cleanup-lock / runtime-store reads. */
+const AUX_PROBE_TIMEOUT_MS = 8_000;
+
+interface DatabaseProbe {
+  connected: boolean;
+  latencyMs: number;
+  /** Real Firestore collection the Files page reads. */
+  collection: string;
+  documentsRead: number | null;
+  /** Underlying error code/message when the probe failed — never hidden. */
+  error?: string;
+  errorCode?: string;
+  hint?: string;
+}
+
+/**
+ * Reads one document from the real `files` collection with the Admin SDK.
+ *
+ * A failed probe reports the actual Firestore error instead of a bare
+ * `connected: false`: a missing composite index, a service account from the
+ * wrong project, and a network outage all need different fixes, and none of
+ * them can be diagnosed from a boolean.
+ */
+async function probeDatabase(): Promise<DatabaseProbe> {
   const startedAt = Date.now();
   try {
-    await getAdminDb().collection("system").doc("health").get();
-    return { connected: true, latencyMs: Date.now() - startedAt };
-  } catch {
-    return { connected: false, latencyMs: Date.now() - startedAt };
+    // Bounded: the Admin SDK retries an unreachable endpoint for minutes, and a
+    // hung probe would leave the whole diagnostics page unrendered.
+    const snapshot = await withTimeout(
+      getAdminDb().collection("files").limit(1).get(),
+      DATABASE_PROBE_TIMEOUT_MS,
+      "system/health:files-probe",
+    );
+    return { connected: true, latencyMs: Date.now() - startedAt, collection: "files", documentsRead: snapshot.size };
+  } catch (error) {
+    const failure = describeFailure(error, "firestore");
+    return {
+      connected: false,
+      latencyMs: Date.now() - startedAt,
+      collection: "files",
+      documentsRead: null,
+      error: failure.message,
+      errorCode: failure.code,
+      ...(failure.hint ? { hint: failure.hint } : {}),
+    };
   }
+}
+
+/** Which Firebase project the Admin SDK is actually talking to. */
+function adminProjectId(): string | null {
+  return process.env.FIREBASE_PROJECT_ID?.trim() || null;
 }
 
 export async function GET(request: Request) {
   return apiRoute(request, async (requestId) => {
     const actor = await requireAdminRequest(request, "read_files");
     enforceRateLimit(`system:health:${actor.uid}`, 30);
+    // Every probe is bounded: an unreachable Firestore makes the Admin SDK retry
+    // for minutes, and an unbounded read here would leave the diagnostics page
+    // itself hanging — exactly when an operator needs it.
     const [database, blob, cleanup, firebaseWeb] = await Promise.all([
       probeDatabase(),
       getStorageService().healthCheck(),
-      getCleanupStatus().catch(() => null),
-      getEffectiveFirebaseWebConfig().catch(() => null),
+      withTimeout(getCleanupStatus(), AUX_PROBE_TIMEOUT_MS, "system/health:cleanup-lock").catch(() => null),
+      withTimeout(getEffectiveFirebaseWebConfig(), AUX_PROBE_TIMEOUT_MS, "system/health:runtime-store").catch(() => null),
     ]);
     const firebaseWebStatus = !firebaseWeb || !firebaseWeb.configured
       ? "degraded"
       : firebaseWeb.adminProjectMatch === false
         ? "degraded"
         : "healthy";
-    const degraded = !database.connected || !blob.reachable || firebaseWebStatus !== "healthy";
+    // A service account from a different project than FIREBASE_PROJECT_ID makes
+    // every Firestore read fail with PERMISSION_DENIED — report it explicitly.
+    const credential = describeAdminCredentialIdentity();
+    const credentialMismatch = credential.projectMatch === false;
+    const degraded = !database.connected || !blob.reachable || firebaseWebStatus !== "healthy" || credentialMismatch;
     return success({
       status: degraded ? "degraded" : "healthy",
       version: appVersion,
       checkedAt: new Date().toISOString(),
       services: {
         application: { status: "healthy" },
-        database: { status: database.connected ? "healthy" : "degraded", latencyMs: database.latencyMs },
+        database: {
+          status: database.connected ? "healthy" : "degraded",
+          latencyMs: database.latencyMs,
+          provider: "cloud-firestore",
+          collection: database.collection,
+          documentsRead: database.documentsRead,
+          // The project the Admin SDK queries — this is the value that must
+          // match the Firebase project holding the `files` collection.
+          adminProjectId: adminProjectId(),
+          // …and the project the service account actually belongs to. A
+          // mismatch means every read fails with PERMISSION_DENIED.
+          credentialProjectId: credential.credentialProjectId,
+          credentialProjectMatch: credential.projectMatch,
+          ...(database.error ? { error: database.error } : {}),
+          ...(database.errorCode ? { errorCode: database.errorCode } : {}),
+          ...(database.hint ? { hint: database.hint } : {}),
+        },
         blobStorage: {
           status: blob.reachable ? "healthy" : "degraded",
           latencyMs: blob.latencyMs,
           checkedAt: blob.checkedAt,
+          authMode: blob.authMode ?? null,
           ...(blob.error ? { error: blob.error } : {}),
         },
         authentication: { status: "healthy", provider: "firebase-auth" },

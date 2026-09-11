@@ -19,6 +19,14 @@ interface QueueItem {
   error: string | null;
   duplicateOf: { id: string; originalName: string } | null;
   fileId: string | null;
+  /** SHA-256 of the bytes, kept so a finalize retry sends the same value. */
+  contentHash: string | null;
+  /**
+   * The bytes are safely in private Blob but the Firestore metadata write
+   * failed. Retrying must re-run finalization only — re-uploading would create
+   * a second orphaned object.
+   */
+  orphaned: boolean;
 }
 
 const ACCEPT = ".pdf,.doc,.docx,.txt,.ppt,.pptx,application/pdf";
@@ -163,7 +171,48 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
     setItems((current) => current.map((item) => (item.key === key ? { ...item, ...update } : item)));
   }, []);
 
+  /**
+   * Re-runs only the metadata finalization for an orphaned upload: the PDF is
+   * already in the private Blob store, so re-uploading would create a second
+   * copy while the first one waits for cleanup.
+   */
+  const finalizeOrphan = useCallback(async (item: QueueItem): Promise<void> => {
+    const fileId = item.fileId;
+    if (!fileId) return;
+    const controller = new AbortController();
+    aborters.current.set(item.key, controller);
+    try {
+      patch(item.key, { status: "finalizing", progress: 100, error: null });
+      const completed = await apiFetch<{ file: SerializedFile; duplicateOf: { id: string; originalName: string } | null }>(
+        `/api/files/${fileId}/complete`,
+        {
+          method: "POST",
+          body: JSON.stringify(item.contentHash ? { contentHash: item.contentHash } : {}),
+          signal: controller.signal,
+        },
+      );
+      patch(item.key, {
+        status: "done",
+        progress: 100,
+        orphaned: false,
+        duplicateOf: completed.duplicateOf ?? item.duplicateOf,
+      });
+      // A finalized document must show up in the list immediately.
+      window.dispatchEvent(new Event("nfc:files-changed"));
+    } catch (error) {
+      if (isAbortError(error) || controller.signal.aborted) {
+        patch(item.key, { status: "error", error: "Finalize cancelled. The stored document is kept for retry." });
+        return;
+      }
+      patch(item.key, { status: "error", error: uploadErrorMessage(error), orphaned: true });
+    } finally {
+      aborters.current.delete(item.key);
+    }
+  }, [patch]);
+
   const processItem = useCallback(async (item: QueueItem) => {
+    // A retry of an orphaned upload finishes the metadata only.
+    if (item.orphaned && item.fileId) return finalizeOrphan(item);
     const controller = new AbortController();
     aborters.current.set(item.key, controller);
     try {
@@ -204,12 +253,25 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
       });
 
       if (controller.signal.aborted) return;
-      patch(item.key, { status: "finalizing", progress: 100 });
-      const completed = await apiFetch<{ file: SerializedFile; duplicateOf: { id: string; originalName: string } | null }>(
-        `/api/files/${init.file.id}/complete`,
-        { method: "POST", body: JSON.stringify(contentHash ? { contentHash } : {}), signal: controller.signal },
-      );
-      patch(item.key, { status: "done", progress: 100, duplicateOf: completed.duplicateOf ?? init.duplicateOf });
+      patch(item.key, { status: "finalizing", progress: 100, contentHash });
+      let completed;
+      try {
+        completed = await apiFetch<{ file: SerializedFile; duplicateOf: { id: string; originalName: string } | null }>(
+          `/api/files/${init.file.id}/complete`,
+          { method: "POST", body: JSON.stringify(contentHash ? { contentHash } : {}), signal: controller.signal },
+        );
+      } catch (finalizeError) {
+        // The bytes are already in private Blob; only the metadata write failed.
+        // Mark the row orphaned so retry re-runs finalization instead of
+        // uploading a second copy of the same document.
+        patch(item.key, { orphaned: true });
+        throw finalizeError;
+      }
+      patch(item.key, { status: "done", progress: 100, orphaned: false, duplicateOf: completed.duplicateOf ?? init.duplicateOf });
+      // Requirement: a finished upload appears in the list straight away, not
+      // only after the modal is closed. The list refetch is stale-while-
+      // revalidate, so the table stays interactive behind the dialog.
+      window.dispatchEvent(new Event("nfc:files-changed"));
     } catch (error) {
       if (isAbortError(error) || controller.signal.aborted) {
         // Aborts come from the user (cancel) or a guard tripping; guards embed
@@ -222,7 +284,7 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
     } finally {
       aborters.current.delete(item.key);
     }
-  }, [patch, category]);
+  }, [patch, category, finalizeOrphan]);
 
   useEffect(() => {
     if (activeKey || activeStartRef.current) return;
@@ -262,6 +324,8 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
         error: null,
         duplicateOf: null,
         fileId: null,
+        contentHash: null,
+        orphaned: false,
       })),
     ]);
   };
@@ -347,10 +411,20 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
                   <button
                     type="button"
                     className="btn-secondary btn-sm mt-1.5"
-                    onClick={() => patch(item.key, { status: "queued", progress: 0, error: null })}
+                    onClick={() => patch(item.key, { status: "queued", progress: item.orphaned ? 100 : 0, error: null })}
                   >
-                    Retry upload
+                    {/* An orphaned row already has its bytes in private storage: retry finishes the metadata only. */}
+                    {item.orphaned ? "Finish upload (metadata only)" : "Retry upload"}
                   </button>
+                )}
+                {item.orphaned && item.status === "error" && (
+                  <p className="mt-1.5 flex items-start gap-1.5 rounded-md bg-amber-500/10 px-2 py-1.5 text-xs text-amber-700 dark:text-amber-300">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>
+                      The document reached private storage, but its details could not be saved. It will appear in the list once
+                      finalization succeeds; otherwise scheduled cleanup removes the orphan automatically.
+                    </span>
+                  </p>
                 )}
                 {item.duplicateOf && item.status === "done" && (
                   <p className="mt-1.5 flex items-start gap-1.5 rounded-md bg-amber-500/10 px-2 py-1.5 text-xs text-amber-700 dark:text-amber-300">

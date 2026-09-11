@@ -51,9 +51,22 @@ export interface StorageHealth {
  * Provider boundary for all object-store access.
  * Vercel Private Blob is the only implementation (`vercel-blob.ts`).
  */
+export interface StorageStream {
+  stream: ReadableStream<Uint8Array>;
+  contentLength: number | null;
+  contentType: string | null;
+  statusCode: number;
+}
+
 export interface StorageService {
   upload(input: UploadObjectInput): Promise<UploadObjectResult>;
   download(pathname: string, range?: string): Promise<Uint8Array>;
+  /**
+   * Streams the private object straight through the caller without buffering
+   * the whole document in the function. Used by the authenticated
+   * preview/download routes so browsers never receive a Blob URL at all.
+   */
+  downloadStream(pathname: string, range?: string): Promise<StorageStream>;
   delete(pathname: string): Promise<void>;
   copy(sourcePathname: string, destinationPathname: string): Promise<UploadObjectResult>;
   exists(pathname: string): Promise<boolean>;

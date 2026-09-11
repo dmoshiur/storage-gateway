@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { ArchiveRestore, Download, Eye, Heart, Link2, Pencil, Trash2 } from "lucide-react";
 import { useConfirm, useSession, useToast } from "@/components/providers";
 import { apiErrorOptions, apiFetch } from "@/lib/client/api";
+import { fetchStreamedFile, saveBlobAsFile } from "@/lib/client/download";
 import type { SerializedFile } from "@/types/file";
 import { formatRetention } from "@/utils/format";
 
@@ -87,14 +88,10 @@ export function useFileActions(refresh: () => void) {
   const download = useCallback(async (file: SerializedFile): Promise<boolean> => {
     if (!begin(file, "download")) return false;
     try {
-      const data = await apiFetch<{ url: string }>(`/api/files/${file.id}/download`);
-      const link = document.createElement("a");
-      link.href = data.url;
-      link.download = file.originalName;
-      link.rel = "noopener";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
+      // Bytes are streamed through the authenticated route, so the browser
+      // never receives a Blob URL for the stored PDF.
+      const blob = await fetchStreamedFile(`/api/files/${file.id}/download?stream=true`);
+      saveBlobAsFile(blob, file.originalName);
       toast("Download started.");
       return true;
     } catch (error) {

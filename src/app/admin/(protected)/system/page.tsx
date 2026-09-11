@@ -12,8 +12,22 @@ interface Health {
   checkedAt: string;
   services: {
     application: { status: string };
-    database: { status: string; latencyMs: number };
-    blobStorage: { status: string; latencyMs: number; checkedAt: string };
+    database: {
+      status: string;
+      latencyMs: number;
+      provider?: string;
+      collection?: string;
+      documentsRead?: number | null;
+      adminProjectId?: string | null;
+      /** Project the service account belongs to; `false` match = every read 403s. */
+      credentialProjectId?: string | null;
+      credentialProjectMatch?: boolean | null;
+      /** Real Firestore error when the probe failed — surfaced, never hidden. */
+      error?: string;
+      errorCode?: string;
+      hint?: string;
+    };
+    blobStorage: { status: string; latencyMs: number; checkedAt: string; authMode?: string | null; error?: string };
     authentication: { status: string; provider: string };
     firebaseWeb?: {
       status: string;
@@ -81,8 +95,22 @@ export default function SystemPage() {
             </div>
             <ul className="mt-2 divide-y divide-line">
               <StatusRow label="Application" status={data.services.application.status} detail={`v${data.version}`} />
-              <StatusRow label="Database (Firestore)" status={data.services.database.status} detail={`${data.services.database.latencyMs} ms`} />
-              <StatusRow label="Blob Storage (Private)" status={data.services.blobStorage.status} detail={`${data.services.blobStorage.latencyMs} ms`} />
+              <StatusRow
+                label="Database (Firestore)"
+                status={data.services.database.status}
+                detail={`${data.services.database.latencyMs} ms${
+                  data.services.database.adminProjectId ? ` · project ${data.services.database.adminProjectId}` : ""
+                }${data.services.database.collection ? ` · collection \`${data.services.database.collection}\`` : ""}${
+                  data.services.database.credentialProjectId ? ` · credential ${data.services.database.credentialProjectId}` : ""
+                }`}
+              />
+              <StatusRow
+                label="Blob Storage (Private)"
+                status={data.services.blobStorage.status}
+                detail={`${data.services.blobStorage.latencyMs} ms${
+                  data.services.blobStorage.authMode ? ` · auth ${data.services.blobStorage.authMode}` : ""
+                }`}
+              />
               <StatusRow label="Authentication" status={data.services.authentication.status} detail={data.services.authentication.provider} />
               {data.services.firebaseWeb && (
                 <StatusRow
@@ -96,6 +124,44 @@ export default function SystemPage() {
                 />
               )}
             </ul>
+            {(data.services.database.error || data.services.blobStorage.error || data.services.database.credentialProjectMatch === false) && (
+              <div className="mt-4 space-y-2">
+                {data.services.database.credentialProjectMatch === false && (
+                  <div className="rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2.5">
+                    <p className="text-[13px] font-medium text-red-700 dark:text-red-300">
+                      Admin credential belongs to a different Firebase project
+                    </p>
+                    <p className="mt-1 break-words text-[12px] leading-5 text-red-700 dark:text-red-300">
+                      FIREBASE_PROJECT_ID is <span className="font-mono">{data.services.database.adminProjectId ?? "unset"}</span> but
+                      FIREBASE_CLIENT_EMAIL belongs to <span className="font-mono">{data.services.database.credentialProjectId ?? "unknown"}</span>.
+                      Every Firestore read will fail with PERMISSION_DENIED until both point at the project that owns the
+                      <span className="font-mono"> files</span> collection.
+                    </p>
+                  </div>
+                )}
+                {data.services.database.error && (
+                  <div className="rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2.5">
+                    <p className="text-[13px] font-medium text-red-700 dark:text-red-300">
+                      Firestore read failed{data.services.database.errorCode ? ` (${data.services.database.errorCode})` : ""}
+                    </p>
+                    <p className="mt-1 break-words font-mono text-[12px] leading-5 text-red-700 dark:text-red-300">
+                      {data.services.database.error}
+                    </p>
+                    {data.services.database.hint && (
+                      <p className="mt-1 text-[12px] leading-5 text-ink-muted">{data.services.database.hint}</p>
+                    )}
+                  </div>
+                )}
+                {data.services.blobStorage.error && (
+                  <div className="rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2.5">
+                    <p className="text-[13px] font-medium text-red-700 dark:text-red-300">Blob store probe failed</p>
+                    <p className="mt-1 break-words font-mono text-[12px] leading-5 text-red-700 dark:text-red-300">
+                      {data.services.blobStorage.error}
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           <div className="card-pad">
             <div className="flex items-center justify-between gap-3">

@@ -3,6 +3,7 @@ import { apiRoute } from "@/lib/api/route";
 import { success } from "@/lib/api/response";
 import { parseJson } from "@/lib/api/body";
 import { ApiError } from "@/lib/api/errors";
+import { describeFailure } from "@/lib/api/failures";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { retentionInputSchema } from "@/lib/validation/schemas";
@@ -43,6 +44,8 @@ interface ItemResult {
   id: string;
   ok: boolean;
   error?: string;
+  /** Underlying dependency code (e.g. `FIRESTORE_UNAVAILABLE`) for failed rows. */
+  code?: string;
 }
 
 export async function POST(request: Request) {
@@ -116,9 +119,18 @@ export async function POST(request: Request) {
         succeeded += 1;
         results.push({ id, ok: true });
       } catch (error) {
-        const message = error instanceof ApiError ? error.message : "Unexpected error.";
-        results.push({ id, ok: false, error: message });
-        logger.error("Bulk file action item failed", { action: input.action, fileId: id, error: message });
+        // Never report "Unexpected error." — the underlying Firestore/Blob cause
+        // is what the operator needs, both in the row and in the logs.
+        const failure = describeFailure(error, "storage");
+        const message = error instanceof ApiError ? error.message : failure.message;
+        results.push({ id, ok: false, error: message, code: failure.code });
+        logger.error("Bulk file action item failed", {
+          action: input.action,
+          fileId: id,
+          causeCode: failure.code,
+          error: message,
+          requestId,
+        });
       }
     }
 
