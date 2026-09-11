@@ -39,6 +39,18 @@ export function getFirebaseAdminEnv() {
  * with a custom prefix or store name (e.g., `TBLOB_STORE_ID`, `T_BLOB_STORE_ID`,
  * `T_STORE_ID`, `TBLOB_WEBHOOK_PUBLIC_KEY`, `TBLOB_READ_WRITE_TOKEN`, etc.).
  */
+/**
+ * Which environment variable each credential was resolved from. Names only —
+ * never values — so operators can see which variable won without leaking
+ * secrets into logs or health payloads.
+ */
+export type BlobEnvSources = {
+  token?: string;
+  storeId?: string;
+  oidcToken?: string;
+  webhookPublicKey?: string;
+};
+
 export type BlobStoreConfig =
   | {
       ok: true;
@@ -47,6 +59,7 @@ export type BlobStoreConfig =
       oidcToken: string | null;
       authMode: "token" | "oidc";
       webhookPublicKey?: string | null;
+      sources?: BlobEnvSources;
     }
   | {
       ok: false;
@@ -56,6 +69,7 @@ export type BlobStoreConfig =
       authMode: "none";
       error: string;
       webhookPublicKey?: string | null;
+      sources?: BlobEnvSources;
     };
 
 const BLOB_TOKEN_MISSING =
@@ -65,69 +79,120 @@ const BLOB_STORE_ID_MISSING =
   "Vercel OIDC is present but BLOB_STORE_ID is missing. Set BLOB_STORE_ID to the private Blob store id, or attach the Blob store so BLOB_READ_WRITE_TOKEN is injected.";
 
 /**
- * Searches environment variables for a key matching exact names or pattern,
- * with an optional fallback based on value heuristics.
+ * Resolving Blob credentials from `process.env`.
+ *
+ * Resolution is driven by an explicit allowlist of variable names, never by a
+ * loose "anything that looks similar" scan. A previous implementation matched
+ * `^(?:.*_)?STORE_ID$` / `^(?:.*_)?OIDC_TOKEN$` across the whole environment,
+ * which silently adopted unrelated variables (an `S3_STORE_ID`, or the
+ * `GITHUB_OIDC_TOKEN` GitHub Actions injects) and reported the Blob store as
+ * configured with somebody else's credentials. It also picked whichever
+ * duplicate came first in `Object.entries` order, so the winner depended on
+ * process start-up order and could differ between deploys.
+ *
+ * Invariants this module must keep:
+ *  - Only names below are ever read for Blob configuration.
+ *  - Selection is deterministic: canonical name first, then a fixed prefix
+ *    order, then remaining `*_BLOB_*` names in sorted key order.
+ *  - Nothing outside `BLOB_*` is ever written, overwritten, or deleted.
  */
-function findEnvValue(
-  exactNames: string[],
-  pattern: RegExp,
-  valuePredicate?: (val: string) => boolean,
-): string | null {
-  for (const name of exactNames) {
-    const val = process.env[name];
-    if (typeof val === "string" && val.trim() !== "") {
-      return val.trim();
+
+/** Prefixes accepted on the Blob variable stems, in priority order. */
+const BLOB_ENV_PREFIXES = ["", "TBLOB_", "T_BLOB_", "T_"] as const;
+
+/** Canonical stems, in priority order. */
+const BLOB_ENV_STEMS = {
+  token: ["BLOB_READ_WRITE_TOKEN", "READ_WRITE_TOKEN", "BLOB_TOKEN"],
+  storeId: ["BLOB_STORE_ID", "STORE_ID", "BLOB_ID"],
+  webhookPublicKey: ["BLOB_WEBHOOK_PUBLIC_KEY", "WEBHOOK_PUBLIC_KEY", "BLOB_WEBHOOK_KEY"],
+} as const;
+
+/**
+ * Any other name carrying a literal `BLOB` segment and one of this concept's own
+ * stems (`VERCEL_BLOB_STORE_ID`, `MYAPP_BLOB_READ_WRITE_TOKEN`). The `BLOB`
+ * segment is required, so `S3_STORE_ID` and `AWS_READ_WRITE_TOKEN` are never
+ * adopted.
+ *
+ * The pattern is per concept on purpose: one shared pattern let the token lookup
+ * match `BLOB_STORE_ID`, so a store id was handed to the SDK as a credential.
+ */
+const GENERIC_BLOB_NAMES = {
+  token: /^(?:[A-Z0-9][A-Z0-9_]{0,23}_)?BLOB_(READ_WRITE_TOKEN|TOKEN)$/,
+  storeId: /^(?:[A-Z0-9][A-Z0-9_]{0,23}_)?BLOB_(STORE_ID|ID)$/,
+  webhookPublicKey: /^(?:[A-Z0-9][A-Z0-9_]{0,23}_)?BLOB_(WEBHOOK_PUBLIC_KEY|WEBHOOK_KEY)$/,
+} as const;
+
+/** Vercel injects exactly these; no fuzzy variants are accepted for OIDC. */
+const OIDC_TOKEN_NAMES = ["VERCEL_OIDC_TOKEN", "OIDC_TOKEN"] as const;
+
+/** Unmistakable shape of a Vercel Blob read-write token. */
+const BLOB_TOKEN_VALUE_PREFIX = "vercel_blob_rw_";
+
+interface EnvHit {
+  value: string;
+  source: string;
+}
+
+/** Builds the ordered candidate names for a stem list, de-duplicated. */
+function candidateNames(stems: readonly string[]): string[] {
+  const names: string[] = [];
+  for (const stem of stems) {
+    for (const prefix of BLOB_ENV_PREFIXES) {
+      const name = `${prefix}${stem}`;
+      if (!names.includes(name)) names.push(name);
     }
   }
+  return names;
+}
 
-  for (const [key, val] of Object.entries(process.env)) {
-    if (typeof val !== "string" || !val.trim()) continue;
-    if (pattern.test(key)) {
-      return val.trim();
+function nonEmpty(name: string): string | null {
+  const value = process.env[name];
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+/** Sorted so a generic match always resolves to the same variable. */
+function sortedEnvKeys(): string[] {
+  return Object.keys(process.env).sort();
+}
+
+function findEnvValue(names: readonly string[], generic?: RegExp): EnvHit | null {
+  for (const name of names) {
+    const value = nonEmpty(name);
+    if (value) return { value, source: name };
+  }
+  if (generic) {
+    for (const name of sortedEnvKeys()) {
+      if (!generic.test(name)) continue;
+      const value = nonEmpty(name);
+      if (value) return { value, source: name };
     }
   }
-
-  if (valuePredicate) {
-    for (const [, val] of Object.entries(process.env)) {
-      if (typeof val !== "string" || !val.trim()) continue;
-      const trimmed = val.trim();
-      if (valuePredicate(trimmed)) {
-        return trimmed;
-      }
-    }
-  }
-
   return null;
 }
 
-function findBlobToken(): string | null {
-  return findEnvValue(
-    ["BLOB_READ_WRITE_TOKEN", "BLOB_TOKEN"],
-    /(?:^|_)BLOB_READ_WRITE_TOKEN$|^(?:.*_)?READ_WRITE_TOKEN$|^(?:.*_)?BLOB_TOKEN$/i,
-    (val) => val.startsWith("vercel_blob_rw_"),
-  );
+function findBlobToken(): EnvHit | null {
+  const named = findEnvValue(candidateNames(BLOB_ENV_STEMS.token), GENERIC_BLOB_NAMES.token);
+  if (named) return named;
+  // Last resort: a token stored under an unrecognised legacy name. The
+  // `vercel_blob_rw_` prefix is specific enough that this cannot collide with
+  // an unrelated credential.
+  for (const name of sortedEnvKeys()) {
+    const value = nonEmpty(name);
+    if (value && value.startsWith(BLOB_TOKEN_VALUE_PREFIX)) return { value, source: name };
+  }
+  return null;
 }
 
-function findBlobStoreId(): string | null {
-  return findEnvValue(
-    ["BLOB_STORE_ID", "BLOB_ID"],
-    /(?:^|_)BLOB_STORE_ID$|^(?:.*_)?STORE_ID$|^(?:.*_)?BLOB_ID$/i,
-    (val) => val.startsWith("store_"),
-  );
+function findBlobStoreId(): EnvHit | null {
+  return findEnvValue(candidateNames(BLOB_ENV_STEMS.storeId), GENERIC_BLOB_NAMES.storeId);
 }
 
-function findBlobWebhookPublicKey(): string | null {
-  return findEnvValue(
-    ["BLOB_WEBHOOK_PUBLIC_KEY", "BLOB_WEBHOOK_KEY"],
-    /(?:^|_)BLOB_WEBHOOK_PUBLIC_KEY$|^(?:.*_)?WEBHOOK_PUBLIC_KEY$|^(?:.*_)?BLOB_WEBHOOK_KEY$/i,
-  );
+function findBlobWebhookPublicKey(): EnvHit | null {
+  return findEnvValue(candidateNames(BLOB_ENV_STEMS.webhookPublicKey), GENERIC_BLOB_NAMES.webhookPublicKey);
 }
 
-function findOidcToken(): string | null {
-  return findEnvValue(
-    ["VERCEL_OIDC_TOKEN", "OIDC_TOKEN"],
-    /(?:^|_)VERCEL_OIDC_TOKEN$|^(?:.*_)?OIDC_TOKEN$/i,
-  );
+function findOidcToken(): EnvHit | null {
+  return findEnvValue(OIDC_TOKEN_NAMES);
 }
 
 function parseStoreIdFromToken(token: string): string | null {
@@ -138,49 +203,51 @@ function parseStoreIdFromToken(token: string): string | null {
   return null;
 }
 
-/** Inspect Blob credentials without throwing (used by health probes). */
+/**
+ * Inspect Blob credentials without throwing (used by health probes).
+ *
+ * Side effect: backfills the three canonical `BLOB_*` names below. This is a
+ * compatibility shim for SDK paths that read the environment directly. It is
+ * strictly additive — a name is only written when it is currently unset, an
+ * existing value is never replaced, no key is ever deleted, and only these
+ * three Blob-scoped names are ever touched. Core backend configuration
+ * (`FIREBASE_*`, `ADMIN_PASS`, `INTEGRATION_API_KEY`, `CRON_SECRET`,
+ * `AM_STORAGE_*`) is never read from or written to here.
+ */
 export function readBlobStoreConfig(): BlobStoreConfig {
-  const token = findBlobToken();
-  const rawStoreId = findBlobStoreId();
-  const oidcToken = findOidcToken();
-  const webhookPublicKey = findBlobWebhookPublicKey();
+  const tokenHit = findBlobToken();
+  const storeIdHit = findBlobStoreId();
+  const oidcHit = findOidcToken();
+  const webhookKeyHit = findBlobWebhookPublicKey();
 
-  const storeId = rawStoreId ?? (token ? parseStoreIdFromToken(token) : null);
+  const token = tokenHit?.value ?? null;
+  const oidcToken = oidcHit?.value ?? null;
+  const webhookPublicKey = webhookKeyHit?.value ?? null;
+  const storeId = storeIdHit?.value ?? (token ? parseStoreIdFromToken(token) : null);
 
-  // Normalize standard env variables so downstream packages / SDKs find them seamlessly
-  if (token && !process.env.BLOB_READ_WRITE_TOKEN) {
-    process.env.BLOB_READ_WRITE_TOKEN = token;
-  }
-  if (storeId && !process.env.BLOB_STORE_ID) {
-    process.env.BLOB_STORE_ID = storeId;
-  }
+  const sources: BlobEnvSources = {
+    ...(tokenHit ? { token: tokenHit.source } : {}),
+    ...(storeIdHit ? { storeId: storeIdHit.source } : {}),
+    ...(oidcHit ? { oidcToken: oidcHit.source } : {}),
+    ...(webhookKeyHit ? { webhookPublicKey: webhookKeyHit.source } : {}),
+  };
+
+  // Additive only: never overwrite an operator-set value.
+  if (token && !process.env.BLOB_READ_WRITE_TOKEN) process.env.BLOB_READ_WRITE_TOKEN = token;
+  if (storeId && !process.env.BLOB_STORE_ID) process.env.BLOB_STORE_ID = storeId;
   if (webhookPublicKey && !process.env.BLOB_WEBHOOK_PUBLIC_KEY) {
     process.env.BLOB_WEBHOOK_PUBLIC_KEY = webhookPublicKey;
   }
 
   if (token) {
-    return {
-      ok: true,
-      token,
-      storeId,
-      oidcToken,
-      authMode: "token",
-      webhookPublicKey,
-    };
+    return { ok: true, token, storeId, oidcToken, authMode: "token", webhookPublicKey, sources };
   }
 
   if (storeId) {
-    return {
-      ok: true,
-      token: null,
-      storeId,
-      oidcToken,
-      authMode: "oidc",
-      webhookPublicKey,
-    };
+    return { ok: true, token: null, storeId, oidcToken, authMode: "oidc", webhookPublicKey, sources };
   }
 
-  if (oidcToken && !storeId) {
+  if (oidcToken) {
     return {
       ok: false,
       token: null,
@@ -189,6 +256,7 @@ export function readBlobStoreConfig(): BlobStoreConfig {
       authMode: "none",
       error: BLOB_STORE_ID_MISSING,
       webhookPublicKey,
+      sources,
     };
   }
 
@@ -200,6 +268,7 @@ export function readBlobStoreConfig(): BlobStoreConfig {
     authMode: "none",
     error: BLOB_TOKEN_MISSING,
     webhookPublicKey,
+    sources,
   };
 }
 

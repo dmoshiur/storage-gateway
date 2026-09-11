@@ -42,6 +42,32 @@ Dry runs use the lock but make no metadata or R2 changes.
 | A cleanup lock is stranded | Lock becomes stale after 20 minutes | Next run reclaims it; investigate function timeout/logs |
 | `SERVICE_CONFIGURATION_ERROR` | Route is unavailable by design | Check server-only Vercel environment variables; do not paste secrets into tickets |
 
+## Every dashboard module fails at once
+
+When *all* admin screens (`/admin/users`, `/admin/files`, `/admin/recent`,
+`/admin/favorites`, `/admin/retention`) fail together, the cause is almost always
+shared server configuration rather than any one page. Diagnose in this order:
+
+1. **Read the API response body, not just the banner.** The dashboard shows a
+   generic "Something went wrong" container, but every `/api/*` response carries
+   `error.code` and `error.message`. That code is the diagnosis:
+   - `SERVICE_CONFIGURATION_ERROR` (503) — a server-only variable is missing or
+     malformed. The message names it, e.g. `Missing server configuration for
+     firebase: FIREBASE_PRIVATE_KEY`. Re-signing in will never fix this.
+   - `SESSION_EXPIRED` / `UNAUTHENTICATED` (401) — the visitor's session really
+     is gone; sign in again.
+   - `FILES_UNAVAILABLE` (503) — Firestore rejected or timed out the query.
+2. **Confirm it is not storage.** `GET /api/v1/health` is unauthenticated and
+   always answers; `blobConfigured: false` means the Blob store credentials are
+   missing, which breaks uploads but never the users/files listings.
+3. **Confirm it is not authorization.** A single 403 `FORBIDDEN` on one module
+   means the signed-in role lacks that capability, which is policy, not an
+   outage.
+
+Session verification deliberately keeps these apart: an identity-provider or
+configuration failure surfaces as a 503 so the operator sees the real cause,
+while only genuine credential problems are reported as an expired session.
+
 ## Monitoring
 
 Review at least monthly:
