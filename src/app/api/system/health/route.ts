@@ -3,7 +3,7 @@ import { success } from "@/lib/api/response";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { describeFailure } from "@/lib/api/failures";
-import { getAdminDb } from "@/lib/firebase/admin";
+import { describeAdminCredentialIdentity, getAdminDb } from "@/lib/firebase/admin";
 import { getEffectiveFirebaseWebConfig } from "@/lib/firebase/runtime-store";
 import { getStorageService } from "@/lib/storage";
 import { getCleanupStatus } from "@/lib/firestore/cleanup-lock";
@@ -71,7 +71,11 @@ export async function GET(request: Request) {
       : firebaseWeb.adminProjectMatch === false
         ? "degraded"
         : "healthy";
-    const degraded = !database.connected || !blob.reachable || firebaseWebStatus !== "healthy";
+    // A service account from a different project than FIREBASE_PROJECT_ID makes
+    // every Firestore read fail with PERMISSION_DENIED — report it explicitly.
+    const credential = describeAdminCredentialIdentity();
+    const credentialMismatch = credential.projectMatch === false;
+    const degraded = !database.connected || !blob.reachable || firebaseWebStatus !== "healthy" || credentialMismatch;
     return success({
       status: degraded ? "degraded" : "healthy",
       version: appVersion,
@@ -84,9 +88,13 @@ export async function GET(request: Request) {
           provider: "cloud-firestore",
           collection: database.collection,
           documentsRead: database.documentsRead,
-          // The project the Admin SDK credential belongs to — this is the value
-          // that must match the Firebase project holding the `files` collection.
+          // The project the Admin SDK queries — this is the value that must
+          // match the Firebase project holding the `files` collection.
           adminProjectId: adminProjectId(),
+          // …and the project the service account actually belongs to. A
+          // mismatch means every read fails with PERMISSION_DENIED.
+          credentialProjectId: credential.credentialProjectId,
+          credentialProjectMatch: credential.projectMatch,
           ...(database.error ? { error: database.error } : {}),
           ...(database.errorCode ? { errorCode: database.errorCode } : {}),
           ...(database.hint ? { hint: database.hint } : {}),

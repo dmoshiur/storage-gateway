@@ -9,6 +9,8 @@ vi.mock("@/lib/security/rate-limit", () => ({ enforceRateLimit: vi.fn() }));
 /** Firestore state: `failWith` reproduces an Admin SDK / database failure. */
 const state: { failWith: Error | null; fileCount: number } = { failWith: null, fileCount: 3 };
 
+const credential = { projectId: "am-st-b507f", credentialProjectId: "am-st-b507f", projectMatch: true as boolean | null };
+
 vi.mock("@/lib/firebase/admin", () => ({
   getAdminDb: () => ({
     collection: () => ({
@@ -20,6 +22,7 @@ vi.mock("@/lib/firebase/admin", () => ({
       }),
     }),
   }),
+  describeAdminCredentialIdentity: () => ({ ...credential }),
 }));
 
 const healthCheck = vi.fn();
@@ -56,6 +59,9 @@ describe("GET /api/system/health — Firestore diagnostics are never swallowed",
     vi.clearAllMocks();
     state.failWith = null;
     state.fileCount = 3;
+    credential.projectId = "am-st-b507f";
+    credential.credentialProjectId = "am-st-b507f";
+    credential.projectMatch = true;
     process.env.FIREBASE_PROJECT_ID = "am-st-b507f";
     requireAdminRequest.mockResolvedValue({ uid: "admin-1", email: "a@ngo.example", role: "admin", type: "admin" });
     healthCheck.mockResolvedValue({ reachable: true, latencyMs: 8, checkedAt: "2026-09-09T00:00:00.000Z", error: null, authMode: "token" });
@@ -114,5 +120,25 @@ describe("GET /api/system/health — Firestore diagnostics are never swallowed",
     expect(body.data.services.blobStorage.authMode).toBe("token");
     expect(JSON.stringify(body)).not.toContain("supersecret");
     delete process.env.BLOB_READ_WRITE_TOKEN;
+  });
+
+  it("reports which project the Admin SDK queries and which one the credential owns", async () => {
+    const body = await (await GET(adminRequest())).json();
+    expect(body.data.services.database.adminProjectId).toBe("am-st-b507f");
+    expect(body.data.services.database.credentialProjectId).toBe("am-st-b507f");
+    expect(body.data.services.database.credentialProjectMatch).toBe(true);
+    expect(body.data.status).toBe("healthy");
+  });
+
+  it("degrades and names the mismatch when the credential is from another project", async () => {
+    credential.credentialProjectId = "some-other-project";
+    credential.projectMatch = false;
+
+    const body = await (await GET(adminRequest())).json();
+    // The Firestore read itself succeeds here; the misconfiguration alone must
+    // still be reported, because it is what makes every other read 403.
+    expect(body.data.status).toBe("degraded");
+    expect(body.data.services.database.credentialProjectMatch).toBe(false);
+    expect(body.data.services.database.credentialProjectId).toBe("some-other-project");
   });
 });

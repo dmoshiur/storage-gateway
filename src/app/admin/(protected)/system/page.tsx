@@ -19,6 +19,9 @@ interface Health {
       collection?: string;
       documentsRead?: number | null;
       adminProjectId?: string | null;
+      /** Project the service account belongs to; `false` match = every read 403s. */
+      credentialProjectId?: string | null;
+      credentialProjectMatch?: boolean | null;
       /** Real Firestore error when the probe failed — surfaced, never hidden. */
       error?: string;
       errorCode?: string;
@@ -97,7 +100,9 @@ export default function SystemPage() {
                 status={data.services.database.status}
                 detail={`${data.services.database.latencyMs} ms${
                   data.services.database.adminProjectId ? ` · project ${data.services.database.adminProjectId}` : ""
-                }${data.services.database.collection ? ` · collection \`${data.services.database.collection}\`` : ""}`}
+                }${data.services.database.collection ? ` · collection \`${data.services.database.collection}\`` : ""}${
+                  data.services.database.credentialProjectId ? ` · credential ${data.services.database.credentialProjectId}` : ""
+                }`}
               />
               <StatusRow
                 label="Blob Storage (Private)"
@@ -119,8 +124,21 @@ export default function SystemPage() {
                 />
               )}
             </ul>
-            {(data.services.database.error || data.services.blobStorage.error) && (
+            {(data.services.database.error || data.services.blobStorage.error || data.services.database.credentialProjectMatch === false) && (
               <div className="mt-4 space-y-2">
+                {data.services.database.credentialProjectMatch === false && (
+                  <div className="rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2.5">
+                    <p className="text-[13px] font-medium text-red-700 dark:text-red-300">
+                      Admin credential belongs to a different Firebase project
+                    </p>
+                    <p className="mt-1 break-words text-[12px] leading-5 text-red-700 dark:text-red-300">
+                      FIREBASE_PROJECT_ID is <span className="font-mono">{data.services.database.adminProjectId ?? "unset"}</span> but
+                      FIREBASE_CLIENT_EMAIL belongs to <span className="font-mono">{data.services.database.credentialProjectId ?? "unknown"}</span>.
+                      Every Firestore read will fail with PERMISSION_DENIED until both point at the project that owns the
+                      <span className="font-mono"> files</span> collection.
+                    </p>
+                  </div>
+                )}
                 {data.services.database.error && (
                   <div className="rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2.5">
                     <p className="text-[13px] font-medium text-red-700 dark:text-red-300">
