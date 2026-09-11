@@ -268,6 +268,10 @@ export function UploadModal({ onClose }: { onClose: () => void }) {
         throw finalizeError;
       }
       patch(item.key, { status: "done", progress: 100, orphaned: false, duplicateOf: completed.duplicateOf ?? init.duplicateOf });
+      // Requirement: a finished upload appears in the list straight away, not
+      // only after the modal is closed. The list refetch is stale-while-
+      // revalidate, so the table stays interactive behind the dialog.
+      window.dispatchEvent(new Event("nfc:files-changed"));
     } catch (error) {
       if (isAbortError(error) || controller.signal.aborted) {
         // Aborts come from the user (cancel) or a guard tripping; guards embed
