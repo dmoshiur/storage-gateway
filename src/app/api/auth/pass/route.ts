@@ -29,8 +29,8 @@ export async function POST(request: Request) {
     }
     const { cookie, actor } = createSharedPassSession(SESSION_MAX_AGE_SECONDS);
     await Promise.all([
-      recordAdminLogin(actor),
-      writeAuditLog({ action: "LOGIN", actor: auditActorFrom(actor), details: { method: "shared_pass" } }),
+      recordAdminLogin(actor).catch(() => undefined),
+      writeAuditLog({ action: "LOGIN", actor: auditActorFrom(actor), details: { method: "shared_pass" } }).catch(() => undefined),
     ]);
     const response = success({ actor: { uid: actor.uid, email: actor.email, role: actor.role } }, requestId);
     response.cookies.set({

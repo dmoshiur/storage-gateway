@@ -24,7 +24,13 @@ export async function POST(request: Request) {
     const actor = await requireAdminRequest(request, "manage_files", true);
     enforceRateLimit(`upload:init:${actor.uid}`, 30);
     const input = await parseJson(request, uploadInitSchema);
-    const [settings, stats] = await Promise.all([getSettings(), getStorageStats()]);
+    let settings;
+    let stats;
+    try {
+      [settings, stats] = await Promise.all([getSettings(), getStorageStats()]);
+    } catch {
+      throw new ApiError(503, "STORAGE_UNAVAILABLE", "Storage service is temporarily unavailable. Please retry shortly.");
+    }
     const document = assertDocumentMetadata(input.originalName, input.size, settings.maxPdfSizeBytes, input.mimeType);
     if (stats.totalStorageBytes + stats.pendingUploadBytes + input.size > settings.storageLimitBytes) {
       throw new ApiError(409, "STORAGE_LIMIT_EXCEEDED", "Uploading this document would exceed the configured storage limit.");
