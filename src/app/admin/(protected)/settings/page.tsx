@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import { useSession, useToast } from "@/components/providers";
 import { useQuery } from "@/hooks/use-query";
+import { FirebaseConfigManager } from "@/components/settings/firebase-config-manager";
 import { EmptyState, ErrorState, Spinner } from "@/components/ui/feedback";
 import { apiFetch, ClientApiError } from "@/lib/client/api";
 import type { SerializedSettings } from "@/types/settings";
@@ -123,11 +124,12 @@ export default function SettingsPage() {
   };
 
   return (
-    <div className="mx-auto max-w-2xl space-y-4">
+    <div className="mx-auto max-w-3xl space-y-4">
       <div>
         <h1 className="page-title">Settings</h1>
-        <p className="page-sub">Storage limits, retention defaults, and signed-URL behavior.</p>
+        <p className="page-sub">Firebase configuration, storage limits, retention defaults, and signed-URL behavior.</p>
       </div>
+      <FirebaseConfigManager />
       {loading && (
         <div className="card-pad space-y-3" aria-label="Loading settings">
           <div className="skeleton h-6 w-40" />

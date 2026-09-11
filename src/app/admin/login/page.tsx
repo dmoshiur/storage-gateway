@@ -1,10 +1,15 @@
 "use client";
 
-import { Suspense, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { signInWithEmailAndPassword, type AuthError } from "firebase/auth";
 import { Database, KeyRound, LoaderCircle, Mail } from "lucide-react";
-import { getFirebaseClientAuth, getFirebaseConfigStatus } from "@/lib/firebase/client";
+import {
+  fetchFirebaseRuntimeStatus,
+  getFirebaseClientAppAsync,
+  getFirebaseClientAuthAsync,
+  getFirebaseConfigStatus,
+} from "@/lib/firebase/client";
 import { apiFetch, ClientApiError } from "@/lib/client/api";
 
 function mapFirebaseError(error: unknown): string {
@@ -51,7 +56,42 @@ function LoginForm() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const busyRef = useRef(false);
-  const configStatus = getFirebaseConfigStatus();
+  const envStatus = getFirebaseConfigStatus();
+  const [runtime, setRuntime] = useState<{
+    configured: boolean;
+    missing: string[];
+    projectId: string | null;
+    authDomain: string | null;
+    source: "stored" | "env" | "none";
+  } | null>(null);
+
+  // Resolve the managed Firebase config (if an admin saved one) and warm the
+  // SDK so sign-in uses it immediately. Falls back to the build-time env.
+  useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+    fetchFirebaseRuntimeStatus(controller.signal)
+      .then((status) => {
+        if (cancelled || !status) return;
+        setRuntime({
+          configured: status.configured,
+          missing: status.missing,
+          projectId: status.projectId,
+          authDomain: status.authDomain,
+          source: status.source,
+        });
+      })
+      .catch(() => undefined);
+    // Fire-and-forget: applies the stored override to the default app early.
+    getFirebaseClientAppAsync(controller.signal).catch(() => undefined);
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, []);
+
+  const configStatus = runtime ?? envStatus;
+  const configSource = runtime?.source ?? (envStatus.configured ? "env" : "none");
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -67,7 +107,7 @@ function LoginForm() {
               "Set these in Vercel Project Settings → Environment Variables and redeploy.",
           );
         }
-        const auth = getFirebaseClientAuth();
+        const auth = await getFirebaseClientAuthAsync();
         const credential = await signInWithEmailAndPassword(auth, email.trim(), password);
         const idToken = await credential.user.getIdToken(true);
         await apiFetch("/api/auth/session", { method: "POST", body: JSON.stringify({ idToken }) });
@@ -198,7 +238,10 @@ function LoginForm() {
         </div>
         <p className="mt-5 text-center font-mono text-[11px] text-ink-faint">NGO File Cloud · private access only</p>
         {configStatus.configured && (
-          <p className="mt-2 text-center text-[11px] text-ink-faint">Project: {configStatus.projectId} · Domain: {configStatus.authDomain}</p>
+          <p className="mt-2 text-center text-[11px] text-ink-faint">
+            Project: {configStatus.projectId} · Domain: {configStatus.authDomain}
+            {configSource === "stored" ? " · managed configuration" : ""}
+          </p>
         )}
       </div>
     </div>

@@ -15,6 +15,14 @@ interface Health {
     database: { status: string; latencyMs: number };
     blobStorage: { status: string; latencyMs: number; checkedAt: string };
     authentication: { status: string; provider: string };
+    firebaseWeb?: {
+      status: string;
+      source: string;
+      projectId: string | null;
+      redeployRequired: boolean;
+      adminProjectMatch: boolean | null;
+      missing?: string[];
+    };
     scheduledCleanup: {
       status: string;
       lastRunAt: string | null;
@@ -76,6 +84,17 @@ export default function SystemPage() {
               <StatusRow label="Database (Firestore)" status={data.services.database.status} detail={`${data.services.database.latencyMs} ms`} />
               <StatusRow label="Blob Storage (Private)" status={data.services.blobStorage.status} detail={`${data.services.blobStorage.latencyMs} ms`} />
               <StatusRow label="Authentication" status={data.services.authentication.status} detail={data.services.authentication.provider} />
+              {data.services.firebaseWeb && (
+                <StatusRow
+                  label="Firebase web config"
+                  status={data.services.firebaseWeb.status}
+                  detail={
+                    data.services.firebaseWeb.projectId
+                      ? `${data.services.firebaseWeb.projectId} · ${data.services.firebaseWeb.source === "stored" ? "managed override" : "build env"}${data.services.firebaseWeb.redeployRequired ? " · redeploy required" : ""}${data.services.firebaseWeb.adminProjectMatch === false ? " · admin project mismatch" : ""}`
+                      : data.services.firebaseWeb.missing?.join(", ") ?? "missing"
+                  }
+                />
+              )}
             </ul>
           </div>
           <div className="card-pad">

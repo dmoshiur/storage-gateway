@@ -14,6 +14,7 @@ const connectSources = [
   "https://identitytoolkit.googleapis.com",
   "https://securetoken.googleapis.com",
   "https://www.googleapis.com",
+  "https://firestore.googleapis.com",
   "https://*.blob.vercel-storage.com",
   "https://blob.vercel-storage.com",
 ].join(" ");

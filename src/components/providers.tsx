@@ -240,6 +240,10 @@ export function Providers({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
+    // Warm the managed Firebase runtime config so Auth/Firestore use the
+    // Settings-saved project without waiting for first use. Fire-and-forget:
+    // every consumer falls back to the build-time env baseline.
+    void import("@/lib/firebase/client").then((module) => module.warmFirebaseRuntimeCache()).catch(() => undefined);
     // Deferred so session state updates never run synchronously inside the effect.
     void Promise.resolve().then(() => loadSession());
     const onExpired = () => {
