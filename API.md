@@ -19,6 +19,31 @@ Errors use the same stable envelope and never return internal stack traces:
 }
 ```
 
+Dependency failures (Firestore, Vercel Blob) additionally carry the real cause
+in `error.details`, so a failed page can be diagnosed without server access:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "FILES_FETCH_FAILED",
+    "message": "Unable to load files. The file metadata store did not answer.",
+    "requestId": "uuid",
+    "details": {
+      "cause": "9 FAILED_PRECONDITION: The query requires an index…",
+      "causeCode": "FIRESTORE_FAILED_PRECONDITION",
+      "retryable": false,
+      "operation": "files/list",
+      "hint": "Missing Firestore composite index. Deploy it with: npx firebase deploy --only firestore:indexes"
+    }
+  },
+  "requestId": "uuid"
+}
+```
+
+`details` never contains credentials. The same cause is logged server-side
+against the same `requestId`.
+
 Save `requestId` when reporting an issue. API responses use `Cache-Control: no-store`.
 
 ## Authentication modes
@@ -41,9 +66,9 @@ server exists. Two integration modes are available:
    TXT, PPT, and PPTX documents authenticated with a **dual-token credential**
    generated in the dashboard (**Admin → API Management**): a visible
    **API Key ID** (`am_store_live_…`) plus an **API Secret Key**
-   (`am_sec_live_…`, displayed exactly once, Cloudflare R2 style). The bridge
+   (`am_sec_live_…`, displayed exactly once). The bridge
    validates the credential against the registry, stores the document in
-   private R2, registers it, and returns a signed document URL. The same
+   the Vercel Private Blob store, registers it, and returns a signed document URL. The same
    credential also authorizes read-only `GET /api/files`,
    `GET /api/files/{id}` and `GET /api/files/{id}/download`, and
    `GET /api/v1/health` reports bridge liveness without authentication.
@@ -75,7 +100,7 @@ server exists. Two integration modes are available:
    > ~4.5 MB before application code runs. Send documents up to **~4 MB** with
    > direct multipart `POST /api/v1/storage/upload`; send larger documents (up
    > to the configured max, default 50 MB) through the presigned
-   > `POST /api/v1/storage/upload/init` → `PUT` bytes straight to R2 →
+   > `POST /api/v1/storage/upload/init` → `PUT` bytes straight to Vercel Blob →
    > `POST /api/v1/storage/upload/complete` flow. Ready-made snippets for both
    > flows are on the dashboard **API Management** page.
 
@@ -192,7 +217,7 @@ Text search and relative-date filters use a bounded server-side scan (1,000 matc
 }
 ```
 
-`storageKey`, R2 bucket details, staging keys, and credentials are never returned.
+`storagePath`, Blob store details, staging keys, and credentials are never returned.
 
 **Integration behavior:** status is forced to `active`; expired retention records and non-active lifecycle states are never returned.
 
@@ -204,7 +229,7 @@ Return one metadata record. Admin callers can read active or Trash records; inte
 
 ### `POST /api/files/upload/init` (admin only)
 
-`POST /api/files/upload` is a compatibility alias for this upload-authorization step. Both routes return the same direct-to-R2 upload contract; neither accepts raw document bytes.
+`POST /api/files/upload` is a compatibility alias for this upload-authorization step. Both routes return the same direct-to-Blob upload contract; neither accepts raw document bytes.
 
 Authorize a direct, short-lived staging upload. The document payload itself does **not** pass through this API or Vercel.
 
@@ -248,11 +273,11 @@ The server validates a supported `.pdf/.doc/.docx/.txt/.ppt/.pptx` extension, a 
 }
 ```
 
-Upload the raw bytes with `PUT` and exactly the returned headers, then call completion. Configure R2 CORS as described in `docs/SETUP.md`.
+Upload the raw bytes with `PUT` and exactly the returned headers, then call completion. The Vercel Blob hosts allowed by the browser are declared in the CSP `connect-src` in `next.config.ts`.
 
 ### `POST /api/files/:id/complete` (admin only)
 
-Finalize a staging upload after the direct R2 `PUT` returns success. Send `{}` as the JSON body.
+Finalize an upload after the direct Blob `PUT` returns success. Send `{}` as the JSON body.
 
 The server heads/range-reads the private staging object and checks:
 
@@ -286,7 +311,7 @@ At least one supported field is required. Retention dates are calculated using t
 
 ### `DELETE /api/files/:id` (admin only)
 
-Moves an **active** document to Trash. This is a soft deletion: its private R2 object remains available for recovery until `permanentDeleteAt`. The route requires an explicit server-side confirmation body in addition to the dashboard’s accessible custom confirmation dialog:
+Moves an **active** document to Trash. This is a soft deletion: its private Blob object remains available for recovery until `permanentDeleteAt`. The route requires an explicit server-side confirmation body in addition to the dashboard’s accessible custom confirmation dialog:
 
 ```json
 { "confirmation": "MOVE_TO_TRASH" }
@@ -308,16 +333,22 @@ Permanently removes a Trash object. The body must contain an exact server-side c
 { "confirmation": "DELETE" }
 ```
 
-The gateway first moves metadata through `deleting`, then deletes the R2 object, and only then marks the record `deleted`. R2 deletion failures return `502 DELETE_FAILED` and metadata returns to Trash for retry when possible. If Firestore completion is interrupted, the record remains `deleting` and is safely retried by cleanup because S3 delete is idempotent.
+The gateway first moves metadata through `deleting`, then deletes the Blob object, and only then marks the record `deleted`. Blob deletion failures return `502 DELETE_FAILED` (with the real cause in `error.details`) and metadata returns to Trash for retry when possible. If Firestore completion is interrupted, the record remains `deleting` and is safely retried by cleanup because Blob delete is idempotent.
 
 ### `GET /api/files/:id/download`
 
-Generate a configurable short-lived R2 `GET` URL. Both admin sessions and website integration keys can call this for permitted active documents.
+Serves a permitted active document. Both admin sessions and website
+integration keys can call it. Two transports are available:
+
+- `stream=true` (used by the dashboard) proxies the PDF bytes through this
+  authenticated route. The browser never receives a Blob URL at all.
+- the default returns a short-lived, single-path signed Vercel Blob `GET` URL.
 
 | Query | Default | Meaning |
 | --- | --- | --- |
 | `disposition` | `attachment` | `attachment` or `inline` |
-| `redirect` | `false` | use `true` only for a browser navigation to redirect directly to R2 |
+| `stream` | `false` | `true` streams the bytes through this route (`Content-Disposition` + `Accept-Ranges`) |
+| `redirect` | `false` | use `true` only for a browser navigation to redirect directly to the signed URL |
 
 **JSON success (`redirect=false`)**
 
@@ -339,7 +370,7 @@ When `redirect=true`, the gateway returns `302 Location: <temporary signed URL>`
 ### `GET /api/storage` (admin only)
 
 Returns metadata-based counts and capacity information, the result of the
-initial Cloudflare R2 bucket connectivity check, and the accumulated API
+initial Vercel Blob store connectivity check, and the accumulated API
 request totals from gramunnayan.com:
 
 ```json
@@ -365,10 +396,10 @@ request totals from gramunnayan.com:
 
 `source` is `"live"` when `stats` were computed from Firestore metadata and
 `"fallback"` when Firestore was unreachable — in that case `stats` contains
-documented mock metrics (`totalPdfCount: 0`, `totalStorageBytes: 0`, i.e.
-"0 files, 0 KB used") so the dashboard always renders. The R2 `HeadBucket`
-probe is bounded (3 s) and wrapped: any failure resolves to
-`r2.reachable: false` instead of an error response. This route therefore
+explicitly labelled degraded metrics (`totalPdfCount: 0`, `totalStorageBytes: 0`)
+so the dashboard always renders. The Blob store
+probe is bounded and wrapped: any failure resolves to
+`blob.reachable: false` with the real error text instead of an error response. This route therefore
 returns `200` for all degraded-dependency states; only authentication
 failures produce `4xx`.
 
@@ -550,8 +581,8 @@ Step 1 of the presigned flow for larger documents (up to the configured max).
 JSON body: `{ originalName, size, mimeType?, title?, description?, category?, tags? }`.
 Success responds `201` with `{ file, uploadUrl, uploadHeaders, directUploadRecommended, expiresAt }`.
 The integration then `PUT`s the exact bytes to `uploadUrl` with the returned
-`uploadHeaders` (`Content-Type` + `x-amz-meta-file-id`) — bytes stream straight
-to private R2, never through Vercel.
+`uploadHeaders` — bytes stream straight
+to the private Blob store.
 
 ### `POST /api/v1/storage/upload/complete`
 
@@ -605,7 +636,7 @@ best-effort — a failure here never changes the upload outcome.
 
 ### `POST /api/internal/bridge/files`
 
-Body includes the final R2 object key (`documents/YYYY/MM/<uuid>.pdf|doc|docx|txt|ppt|pptx`),
+Body includes the final Blob pathname (`pdfs/YYYY/MM/<uuid>.pdf|doc|docx|txt|ppt|pptx`),
 validated document metadata (`originalName`, optional `title`/`description`/`category`/`tags`,
 plus `mimeType`/`extension`), and `size`. Enforces the configured max document size and storage
 limit, creates an `active` document, and writes a `BRIDGE_UPLOAD` audit event. Responds `201`
@@ -630,5 +661,5 @@ with the serialized file record.
 | `409 FILE_CONTENT_UNAVAILABLE` | Trash object cannot be recovered |
 | `413 FILE_TOO_LARGE` | Exceeds configured document size limit |
 | `429 RATE_LIMITED` | Slow down and retry later |
-| `502 STORAGE_UNAVAILABLE` / `DELETE_FAILED` | R2 operation needs retry; details are logged server-side |
+| `502 STORAGE_UNAVAILABLE` / `DELETE_FAILED` | Blob operation needs retry; the real cause is in `error.details` and in the server logs |
 | `503 SERVICE_CONFIGURATION_ERROR` | Deployment has missing server configuration |

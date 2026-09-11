@@ -22,6 +22,9 @@ export function failure(error: unknown, requestId: string, context?: Record<stri
         message: error.message,
         requestId,
         ...(error.fields ? { fields: error.fields } : {}),
+        // The real dependency cause (Firestore gRPC code/message, retryability,
+        // operator hint) so the dashboard can show *why* it failed.
+        ...(error.details ? { details: error.details } : {}),
       },
       requestId,
     }, {

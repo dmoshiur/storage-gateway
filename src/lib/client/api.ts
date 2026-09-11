@@ -5,11 +5,18 @@ export class ClientApiError extends Error {
   readonly status: number | null;
   readonly requestId: string | null;
   readonly fields?: Record<string, string>;
+  /** Real backend cause carried by the API: cause, causeCode, hint, retryable. */
+  readonly details?: Record<string, string | number | boolean>;
 
   constructor(
     code: string,
     message: string,
-    options: { status?: number | null; requestId?: string | null; fields?: Record<string, string> } = {},
+    options: {
+      status?: number | null;
+      requestId?: string | null;
+      fields?: Record<string, string>;
+      details?: Record<string, string | number | boolean>;
+    } = {},
   ) {
     super(message);
     this.name = "ClientApiError";
@@ -17,13 +24,28 @@ export class ClientApiError extends Error {
     this.status = options.status ?? null;
     this.requestId = options.requestId ?? null;
     this.fields = options.fields;
+    this.details = options.details;
+  }
+
+  /** The underlying dependency message, when the API reported one. */
+  get causeMessage(): string | null {
+    const cause = this.details?.cause;
+    return typeof cause === "string" && cause ? cause : null;
   }
 }
 
-/** Normalizes a caught error into a user-facing message + request id for toasts. */
+/**
+ * Normalizes a caught error into a user-facing message + request id for toasts.
+ * The real backend cause is appended when the API reported one, so an operator
+ * is never left with only a generic "could not be completed".
+ */
 export function apiErrorOptions(error: unknown, fallback: string): { message: string; requestId?: string } {
   if (error instanceof ClientApiError) {
-    return { message: error.message, requestId: error.requestId ?? undefined };
+    const cause = error.causeMessage;
+    return {
+      message: cause && cause !== error.message ? `${error.message} — ${cause}` : error.message,
+      requestId: error.requestId ?? undefined,
+    };
   }
   return { message: fallback };
 }
@@ -32,7 +54,14 @@ interface ErrorEnvelope {
   success?: boolean;
   data?: unknown;
   requestId?: string;
-  error?: { code?: string; message?: string; requestId?: string; fields?: Record<string, string> };
+  error?: {
+    code?: string;
+    message?: string;
+    requestId?: string;
+    fields?: Record<string, string>;
+    /** Real backend cause: cause, causeCode, hint, retryable, operation. */
+    details?: Record<string, string | number | boolean>;
+  };
 }
 
 export async function apiFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
@@ -68,7 +97,7 @@ export async function apiFetch<T>(url: string, options: RequestInit = {}): Promi
     throw new ClientApiError(
       payload.error?.code ?? "REQUEST_FAILED",
       payload.error?.message ?? "The request could not be completed.",
-      { status: response.status, requestId, fields: payload.error?.fields },
+      { status: response.status, requestId, fields: payload.error?.fields, details: payload.error?.details },
     );
   }
   return payload.data as T;

@@ -21,6 +21,9 @@ interface ListResponse {
   files: SerializedFile[];
   nextCursor: string | null;
   searchLimited: boolean;
+  /** True when the read was served without the composite Firestore index. */
+  degraded?: boolean;
+  pagination?: { count: number; pageSize: number; nextCursor: string | null; hasMore: boolean };
 }
 
 const SORT_MAP: Record<FileSortKey, Record<"asc" | "desc", string>> = {
@@ -91,8 +94,18 @@ export function FilesView({
     return `/api/files?${params.toString()}`;
   }, [status, filter, apiSort, debouncedSearch, category, retention, cursor]);
 
-  const { data, error, loading, refresh } = useQuery<ListResponse>(url);
+  const { data, errorInfo, loading, refresh } = useQuery<ListResponse>(url);
   const { data: categoryData } = useQuery<{ categories: { name: string }[] }>("/api/categories");
+
+  // Explicit retry that visibly does something: it re-runs the same query and
+  // keeps the button in a busy state until that request settles. No effect is
+  // needed — `loading` already tells us when the retry finished.
+  const [retryToken, setRetryToken] = useState(0);
+  const retrying = retryToken > 0 && loading;
+  const retry = useCallback(() => {
+    setRetryToken((value) => value + 1);
+    refresh();
+  }, [refresh]);
 
   // Reset pagination/selection when filters change (render-adjust, not an effect).
   const filterKey = `${debouncedSearch}|${category}|${retention}|${status}|${filter}|${apiSort}`;
@@ -319,7 +332,22 @@ export function FilesView({
       )}
 
       {loading && !data && <TableSkeleton />}
-      {error && !data && !loading && <div className="tbl-wrap"><ErrorState message={error} onRetry={refresh} /></div>}
+      {errorInfo && !data && !loading && (
+        <div className="tbl-wrap">
+          <ErrorState
+            message={errorInfo.message}
+            onRetry={refresh}
+            busy={retrying}
+            detail={{
+              code: errorInfo.code,
+              requestId: errorInfo.requestId,
+              cause: errorInfo.cause,
+              causeCode: errorInfo.causeCode,
+              hint: errorInfo.hint,
+            }}
+          />
+        </div>
+      )}
       {data && (
         <>
           {loading && (
@@ -327,10 +355,31 @@ export function FilesView({
               <Spinner className="h-3.5 w-3.5" /> Refreshing files…
             </div>
           )}
-          {error && (
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2.5 text-sm text-red-700 dark:text-red-300" role="alert">
-              <span>{error}</span>
-              <button type="button" className="btn-secondary btn-sm" onClick={refresh}>Retry</button>
+          {errorInfo && (
+            <div className="rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2.5 text-sm text-red-700 dark:text-red-300" role="alert">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <span className="font-medium">{errorInfo.message}</span>
+                <button type="button" className="btn-secondary btn-sm" onClick={retry} disabled={retrying}>
+                  {retrying ? "Retrying…" : "Retry"}
+                </button>
+              </div>
+              {/* The real backend cause + request id, never a bare "something went wrong". */}
+              {errorInfo.cause && (
+                <p className="mt-1.5 break-words font-mono text-[12px] leading-5">
+                  {errorInfo.causeCode ? `${errorInfo.causeCode}: ` : ""}
+                  {errorInfo.cause}
+                </p>
+              )}
+              {errorInfo.hint && <p className="mt-1 text-[12px] leading-5">{errorInfo.hint}</p>}
+              <p className="mt-1 font-mono text-[11px] opacity-80">
+                {[errorInfo.code, errorInfo.requestId ? `request ${errorInfo.requestId}` : null].filter(Boolean).join(" · ")}
+              </p>
+            </div>
+          )}
+          {data.degraded && (
+            <div className="rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2 text-[12px] leading-5 text-amber-800 dark:text-amber-300" role="status">
+              Showing real data from a degraded read: the Firestore composite index for this view is missing, so results are
+              sorted in memory. Deploy it with <span className="font-mono">npx firebase deploy --only firestore:indexes</span>.
             </div>
           )}
           <FileTable

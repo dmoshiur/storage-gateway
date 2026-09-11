@@ -51,7 +51,7 @@ describe("Vercel Private Blob PDF upload / list / preview / download / delete", 
       etag: "\"1\"",
       uploadedAt: new Date("2026-09-10T00:00:00.000Z"),
     });
-    blobGet.mockResolvedValue({
+    blobGet.mockImplementation(async () => ({
       statusCode: 200,
       stream: new ReadableStream({
         start(controller) {
@@ -59,7 +59,9 @@ describe("Vercel Private Blob PDF upload / list / preview / download / delete", 
           controller.close();
         },
       }),
-    });
+      headers: new Headers(),
+      blob: { size: pdfBytes.byteLength, contentType: "application/pdf" },
+    }));
     issueSignedToken.mockResolvedValue("signed-token");
     presignUrl.mockImplementation(async (_token: string, options: { operation: string }) => ({
       presignedUrl: `https://blob.vercel-storage.com/${pathname}?sig=${options.operation}&exp=short`,
@@ -89,6 +91,18 @@ describe("Vercel Private Blob PDF upload / list / preview / download / delete", 
 
     const downloaded = await storage.download(pathname);
     expect([...downloaded]).toEqual([...pdfBytes]);
+
+    // Streaming read used by the authenticated preview/download routes: the
+    // raw Blob stream is handed back untouched, with the real object metadata.
+    const streamed = await storage.downloadStream(pathname, "bytes=0-7");
+    expect(streamed.statusCode).toBe(200);
+    expect(streamed.contentLength).toBe(pdfBytes.byteLength);
+    expect(streamed.contentType).toBe("application/pdf");
+    expect([...new Uint8Array(await new Response(streamed.stream).arrayBuffer())]).toEqual([...pdfBytes]);
+    expect(blobGet).toHaveBeenLastCalledWith(
+      privateUrl,
+      expect.objectContaining({ access: "private", headers: { Range: "bytes=0-7" } }),
+    );
 
     const previewUrl = await storage.getSignedUrl(pathname, {
       expiresInSeconds: 120,

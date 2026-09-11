@@ -7,6 +7,7 @@ import { recordFileAccess, requireFileById } from "@/lib/firestore/files";
 import { getSettings } from "@/lib/firestore/settings";
 import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
 import { getStorageService } from "@/lib/storage";
+import { streamStoredFile } from "@/lib/files/serve";
 import { requireReadActor } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
@@ -16,6 +17,8 @@ export const runtime = "nodejs";
 const downloadQuerySchema = z.object({
   disposition: z.enum(["inline", "attachment"]).default("attachment"),
   redirect: z.enum(["true", "false"]).optional().default("false"),
+  /** `stream=true` serves the bytes through this authenticated route. */
+  stream: z.enum(["true", "false"]).optional().default("false"),
 });
 
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
@@ -27,6 +30,26 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     if (file.status !== "active" || (actor.type === "integration" && file.autoDeleteEnabled && file.deleteAt && file.deleteAt <= new Date())) {
       throw new ApiError(404, "FILE_NOT_FOUND", "The requested document was not found.");
     }
+
+    // Authenticated + authorized + metadata loaded: now serve the private bytes.
+    if (query.stream === "true") {
+      const response = await streamStoredFile(file, {
+        disposition: query.disposition,
+        range: request.headers.get("range") ?? undefined,
+        requestId,
+      });
+      await recordFileAccess(file.id, "download");
+      await writeAuditLogSafely({
+        action: "DOWNLOAD",
+        actor: auditActorFrom(actor),
+        fileId: file.id,
+        fileName: file.originalName,
+        details: { disposition: query.disposition, via: "stream" },
+      });
+      emitWebhookEvent("file.downloaded", { fileId: file.id, fileName: file.originalName, size: file.size });
+      return response;
+    }
+
     const settings = await getSettings();
     const url = await getStorageService().getSignedUrl(file.storagePath, {
       expiresInSeconds: settings.signedUrlExpirySeconds,
@@ -36,7 +59,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     });
     await recordFileAccess(file.id, "download");
     await writeAuditLogSafely({ action: "DOWNLOAD", actor: auditActorFrom(actor), fileId: file.id, fileName: file.originalName, details: { disposition: query.disposition } });
-    emitWebhookEvent("file.downloaded", { fileId: file.id, fileName: file.originalName });
+    emitWebhookEvent("file.downloaded", { fileId: file.id, fileName: file.originalName, size: file.size });
 
     if (query.redirect === "true") {
       const response = Response.redirect(url, 302);

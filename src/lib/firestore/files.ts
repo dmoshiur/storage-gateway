@@ -1,14 +1,23 @@
 import "server-only";
 
-import type { DocumentSnapshot, Query } from "firebase-admin/firestore";
+import type { DocumentSnapshot, Firestore, Query } from "firebase-admin/firestore";
 import { getAdminDb } from "@/lib/firebase/admin";
 import { ApiError } from "@/lib/api/errors";
+import { describeFailure, indexBuildLink, isMissingIndexError } from "@/lib/api/failures";
+import { logger } from "@/lib/logging/logger";
 import { calculateDeleteAt, type RetentionInput } from "@/lib/retention";
 import type { FileDocument, FileFilter, FileSort, FileStatus, RetentionType, SerializedFile } from "@/types/file";
 import { DOCUMENT_EXTENSION_BY_MIME, getDocumentExtension } from "@/lib/validation/documents";
 import { asDate, toIso } from "@/utils/date";
 
+/**
+ * The single real metadata collection. Every document here describes one PDF
+ * whose bytes live in the private Blob store under `storagePath`. Reserved /
+ * probe document ids (for example `__gateway_probe__`) are never written to
+ * Firestore — connectivity probes read existing documents instead.
+ */
 const FILES = "files";
+/** Upper bound for the server-side search/filter scan window. */
 const SEARCH_SCAN_LIMIT = 1000;
 
 function extensionFrom(originalName: string, mimeType: string): string {
@@ -255,6 +264,40 @@ export async function markUploadFailed(id: string, failureCode: string): Promise
     failureCode,
     updatedAt: new Date(),
   }, { merge: true });
+}
+
+/**
+ * Marks an upload whose bytes are already in Blob but whose Firestore
+ * metadata could not be finalized — an ORPHAN.
+ *
+ * The record intentionally stays in `uploading` so the client can retry
+ * `POST /api/files/:id/complete` and finish the metadata write without
+ * re-uploading the bytes. `uploadExpiresAt` is pushed out so the scheduled
+ * cleanup does not delete a retryable orphan during its retry window; once
+ * that window passes, cleanup removes both the Blob object and the record.
+ * Best-effort: when Firestore itself is down the caller still reports the
+ * failure, and the stale-upload sweep cleans the orphan up later.
+ */
+export async function markUploadOrphaned(
+  id: string,
+  failureCode: string,
+  retryWindowMs = 30 * 60 * 1000,
+): Promise<void> {
+  const now = new Date();
+  try {
+    await getAdminDb().collection(FILES).doc(id).set({
+      failureCode,
+      orphanedAt: now,
+      uploadExpiresAt: new Date(now.getTime() + retryWindowMs),
+      updatedAt: now,
+    }, { merge: true });
+  } catch (error) {
+    logger.error("Could not mark upload as orphaned", {
+      fileId: id,
+      failureCode,
+      cause: error instanceof Error ? error.message : "unknown",
+    });
+  }
 }
 
 export async function clearUploadKey(id: string): Promise<void> {
@@ -533,39 +576,104 @@ export interface ListFilesInput {
   onlyAccessible?: boolean;
 }
 
-export async function listFiles(input: ListFilesInput): Promise<{ files: SerializedFile[]; nextCursor: string | null; searchLimited: boolean }> {
-  const db = getAdminDb();
-  const resolvedStatus = statusFor(input);
-  const needsDerivedScan = input.filter === "expiring_soon" || input.filter === "expired" || input.filter === "auto_delete" || input.filter === "never_delete" || input.filter === "favorites" || input.filter === "recent";
-  const requiresScan = Boolean(input.search || input.category || input.retention) || needsDerivedScan || Boolean(input.onlyAccessible);
-  const order = sortDefinition(input.sort, resolvedStatus);
+export interface ListFilesPagination {
+  /** Number of documents returned on this page. */
+  count: number;
+  pageSize: number;
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+export interface ListFilesResult {
+  files: SerializedFile[];
+  nextCursor: string | null;
+  searchLimited: boolean;
+  /**
+   * True when Firestore rejected the indexed query (missing composite index)
+   * and the read was served from the bounded, index-free fallback below. The
+   * page still shows real data; the operator gets a log line telling them
+   * which index to deploy.
+   */
+  degraded: boolean;
+  pagination: ListFilesPagination;
+}
+
+function collectionQuery(db: Firestore, status: "all" | FileStatus): Query {
   let query: Query = db.collection(FILES);
-  if (resolvedStatus !== "all") query = query.where("status", "==", resolvedStatus);
+  if (status !== "all") query = query.where("status", "==", status);
+  return query;
+}
 
-  if (requiresScan) {
-    // Search/filter stays server-side for a small NGO dataset without a separate search service.
-    // Bound text/derived scans to the newest records deterministically. The
-    // matching sort is applied below after filtering, while this keeps the
-    // "searchLimited" notice truthful and uses the existing status/createdAt
-    // composite index.
-    const snapshot = await query.orderBy("createdAt", "desc").limit(SEARCH_SCAN_LIMIT).get();
-    const all = snapshot.docs.map(toDocument)
-      .filter((file) => matchesText(file, input.search))
-      .filter((file) => matchesCategory(file, input.category))
-      .filter((file) => matchesRetention(file, input.retention))
-      .filter((file) => matchesDerivedFilter(file, input.filter, new Date(), input.onlyAccessible))
-      .sort((left, right) => compareFiles(left, right, order.field, order.direction));
-    const cursorId = decodeCursor(input.cursor);
-    const start = cursorId ? Math.max(0, all.findIndex((file) => file.id === cursorId) + 1) : 0;
-    const page = all.slice(start, start + input.pageSize);
-    return {
-      files: page.map(serializeFile),
-      nextCursor: start + input.pageSize < all.length ? encodeCursor(page.at(-1)!.id) : null,
-      searchLimited: snapshot.docs.length === SEARCH_SCAN_LIMIT,
-    };
+/** Log each missing-index fallback once per instance instead of on every request. */
+const reportedMissingIndexes = new Set<string>();
+
+function logMissingIndexFallback(operation: string, error: unknown): void {
+  const failure = describeFailure(error, "firestore");
+  const key = `${operation}:${failure.code}`;
+  if (reportedMissingIndexes.has(key)) return;
+  reportedMissingIndexes.add(key);
+  logger.warn("Firestore query fell back to an index-free read", {
+    operation,
+    causeCode: failure.code,
+    cause: failure.message,
+    hint: failure.hint ?? "Deploy the missing composite index: npx firebase deploy --only firestore:indexes",
+    indexBuildLink: indexBuildLink(failure.message) ?? null,
+  });
+}
+
+/**
+ * Bounded read used for search / derived filters.
+ *
+ * `where(status) + orderBy(createdAt)` needs the composite index declared in
+ * `firestore.indexes.json`. When that index has not been deployed, Firestore
+ * fails the whole query with FAILED_PRECONDITION — which previously took the
+ * entire Files page down with an opaque "could not be loaded" error. The
+ * single-field `status` index is created automatically, so the retry without
+ * `orderBy` always succeeds and the ordering is applied in memory over the
+ * same bounded window.
+ */
+async function readScanWindow(
+  db: Firestore,
+  status: "all" | FileStatus,
+  limit: number,
+  operation: string,
+  /** Set when the caller already proved the composite index is missing. */
+  indexKnownMissing = false,
+): Promise<{ docs: DocumentSnapshot[]; degraded: boolean }> {
+  const query = collectionQuery(db, status);
+  if (indexKnownMissing) {
+    const snapshot = await query.limit(limit).get();
+    return { docs: snapshot.docs, degraded: true };
   }
+  try {
+    const snapshot = await query.orderBy("createdAt", "desc").limit(limit).get();
+    return { docs: snapshot.docs, degraded: false };
+  } catch (error) {
+    if (!isMissingIndexError(error)) throw error;
+    logMissingIndexFallback(operation, error);
+    const snapshot = await query.limit(limit).get();
+    return { docs: snapshot.docs, degraded: true };
+  }
+}
 
-  query = query.orderBy(order.field, order.direction);
+function listResult(files: SerializedFile[], nextCursor: string | null, searchLimited: boolean, degraded: boolean, pageSize: number): ListFilesResult {
+  return {
+    files,
+    nextCursor,
+    searchLimited,
+    degraded,
+    pagination: { count: files.length, pageSize, nextCursor, hasMore: nextCursor !== null },
+  };
+}
+
+/** Index-backed page read (status + sort field composite index). */
+async function listFilesIndexed(
+  db: Firestore,
+  input: ListFilesInput,
+  resolvedStatus: "all" | FileStatus,
+  order: { field: string; direction: "asc" | "desc" },
+): Promise<ListFilesResult> {
+  let query: Query = collectionQuery(db, resolvedStatus).orderBy(order.field, order.direction);
   const cursorId = decodeCursor(input.cursor);
   if (cursorId) {
     const cursor = await db.collection(FILES).doc(cursorId).get();
@@ -573,11 +681,70 @@ export async function listFiles(input: ListFilesInput): Promise<{ files: Seriali
   }
   const snapshot = await query.limit(input.pageSize + 1).get();
   const visible = snapshot.docs.slice(0, input.pageSize).map(toDocument);
-  return {
-    files: visible.map(serializeFile),
-    nextCursor: snapshot.docs.length > input.pageSize ? encodeCursor(visible.at(-1)!.id) : null,
-    searchLimited: false,
-  };
+  return listResult(
+    visible.map(serializeFile),
+    snapshot.docs.length > input.pageSize ? encodeCursor(visible.at(-1)!.id) : null,
+    false,
+    false,
+    input.pageSize,
+  );
+}
+
+/**
+ * Server-side search/filter without a separate search service: read a bounded
+ * window of real documents, filter, then sort in memory.
+ */
+async function listFilesByScan(
+  db: Firestore,
+  input: ListFilesInput,
+  resolvedStatus: "all" | FileStatus,
+  order: { field: string; direction: "asc" | "desc" },
+  indexKnownMissing = false,
+): Promise<ListFilesResult> {
+  const { docs, degraded } = await readScanWindow(db, resolvedStatus, SEARCH_SCAN_LIMIT, "files/list:scan", indexKnownMissing);
+  const all = docs.map(toDocument)
+    .filter((file) => matchesText(file, input.search))
+    .filter((file) => matchesCategory(file, input.category))
+    .filter((file) => matchesRetention(file, input.retention))
+    .filter((file) => matchesDerivedFilter(file, input.filter, new Date(), input.onlyAccessible))
+    .sort((left, right) => compareFiles(left, right, order.field, order.direction));
+  const cursorId = decodeCursor(input.cursor);
+  const start = cursorId ? Math.max(0, all.findIndex((file) => file.id === cursorId) + 1) : 0;
+  const page = all.slice(start, start + input.pageSize);
+  return listResult(
+    page.map(serializeFile),
+    start + input.pageSize < all.length ? encodeCursor(page.at(-1)!.id) : null,
+    docs.length === SEARCH_SCAN_LIMIT,
+    degraded,
+    input.pageSize,
+  );
+}
+
+/**
+ * Lists real file metadata from the Firestore `files` collection.
+ *
+ * There is no fallback data source: either Firestore answers or the caller
+ * gets a structured failure describing the real cause.
+ */
+export async function listFiles(input: ListFilesInput): Promise<ListFilesResult> {
+  const db = getAdminDb();
+  const resolvedStatus = statusFor(input);
+  const needsDerivedScan = input.filter === "expiring_soon" || input.filter === "expired" || input.filter === "auto_delete" || input.filter === "never_delete" || input.filter === "favorites" || input.filter === "recent";
+  const requiresScan = Boolean(input.search || input.category || input.retention) || needsDerivedScan || Boolean(input.onlyAccessible);
+  const order = sortDefinition(input.sort, resolvedStatus);
+
+  if (!requiresScan) {
+    try {
+      return await listFilesIndexed(db, input, resolvedStatus, order);
+    } catch (error) {
+      if (!isMissingIndexError(error)) throw error;
+      logMissingIndexFallback("files/list:indexed", error);
+      // Undeployed composite index: serve the same page from the index-free
+      // read, and skip a second round trip we already know would fail.
+      return listFilesByScan(db, input, resolvedStatus, order, true);
+    }
+  }
+  return listFilesByScan(db, input, resolvedStatus, order);
 }
 
 export async function getRecentFiles(status: FileStatus, limit = 6): Promise<FileDocument[]> {

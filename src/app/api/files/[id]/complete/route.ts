@@ -10,9 +10,11 @@ import {
   attachBlobIdentity,
   findActiveFileByContentHash,
   markUploadFailed,
+  markUploadOrphaned,
   requireFileById,
   serializeFile,
 } from "@/lib/firestore/files";
+import { toServiceFailure } from "@/lib/api/failures";
 import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
 import { getStorageService } from "@/lib/storage";
 import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
@@ -65,8 +67,35 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       try { await storage.delete(file.uploadKey); } catch { /* safe, retryable staging cleanup */ }
     }
     const contentHash = body?.contentHash ?? file.contentHash;
-    if (contentHash) await attachBlobIdentity(id, { contentHash });
-    const active = await activateUpload(id);
+    let active;
+    try {
+      if (contentHash) await attachBlobIdentity(id, { contentHash });
+      active = await activateUpload(id);
+    } catch (error) {
+      // The PDF bytes are already in the private Blob store; only the Firestore
+      // metadata write failed. That is an ORPHAN, not a failed upload: the
+      // record stays `uploading` (so `/complete` can be retried without
+      // re-uploading the bytes), is flagged for the operator, and is swept by
+      // the scheduled cleanup only after its retry window expires.
+      await markUploadOrphaned(id, "METADATA_FINALIZE_FAILED");
+      await writeAuditLogSafely({
+        action: "UPLOAD_FAILED",
+        actor: auditActorFrom(actor),
+        fileId: id,
+        fileName: file.originalName,
+        details: { reason: "METADATA_FINALIZE_FAILED", orphaned: true, retryable: true },
+      });
+      throw toServiceFailure({
+        status: 503,
+        code: "FILES_METADATA_FINALIZE_FAILED",
+        message: "The document reached private storage, but its metadata could not be saved. Retry — the uploaded bytes are kept.",
+        cause: error,
+        operation: "files/upload/complete:metadata",
+        area: "firestore",
+        requestId,
+        context: { fileId: id, storagePath: file.storagePath, orphaned: true, retryable: true },
+      });
+    }
     let duplicateOf: { id: string; originalName: string } | null = null;
     if (contentHash) {
       const existing = await findActiveFileByContentHash(contentHash);
