@@ -19,7 +19,6 @@ function describeFailure(error: unknown, fallback: string): string {
 export function PdfViewer({ file, onClose }: { file: SerializedFile; onClose: () => void }) {
   const { toast } = useToast();
   const [url, setUrl] = useState<string | null>(null);
-  const [expiresAt, setExpiresAt] = useState<string | null>(null);
   const [tokenLoading, setTokenLoading] = useState(true);
   const [frameLoading, setFrameLoading] = useState(false);
   const [downloadBusy, setDownloadBusy] = useState(false);
@@ -56,9 +55,8 @@ export function PdfViewer({ file, onClose }: { file: SerializedFile; onClose: ()
       const blob = await fetchStreamedFile(`/api/files/${file.id}/preview?stream=true`);
       const objectUrl = URL.createObjectURL(blob);
       objectUrlRef.current = objectUrl;
-      setUrl(objectUrl);
       // Streamed previews carry no link lifetime, so there is nothing to renew.
-      setExpiresAt(null);
+      setUrl(objectUrl);
     } catch (fetchError) {
       setError(describeFailure(fetchError, "Preview could not be loaded. Try again."));
       setFrameLoading(false);
@@ -77,24 +75,6 @@ export function PdfViewer({ file, onClose }: { file: SerializedFile; onClose: ()
   }, [load]);
 
   const panelRef = useOverlayBehavior({ onClose });
-
-  // Refresh the signed URL before it expires so long reads never break. A
-  // minimum delay also handles settings configured with a very short lifetime.
-  useEffect(() => {
-    if (!expiresAt) return;
-    const expiresIn = new Date(expiresAt).getTime() - Date.now();
-    if (!Number.isFinite(expiresIn)) return;
-    if (expiresIn <= 0) {
-      const timer = window.setTimeout(() => void load(), 0);
-      return () => window.clearTimeout(timer);
-    }
-    // Refresh 20 percent before expiry, capped at one minute. Using a fixed
-    // one-minute lead would create a one-second request loop for the valid
-    // 60-second minimum setting.
-    const refreshLead = Math.min(60_000, Math.max(5_000, expiresIn * 0.2));
-    const timer = setTimeout(() => void load(), Math.max(1_000, expiresIn - refreshLead));
-    return () => clearTimeout(timer);
-  }, [expiresAt, load]);
 
   const download = async () => {
     if (downloadBusyRef.current) return;
