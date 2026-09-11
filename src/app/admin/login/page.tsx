@@ -1,11 +1,44 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { signInWithEmailAndPassword } from "firebase/auth";
+import { signInWithEmailAndPassword, type AuthError } from "firebase/auth";
 import { Database, KeyRound, LoaderCircle, Mail } from "lucide-react";
-import { getFirebaseClientAuth } from "@/lib/firebase/client";
+import { getFirebaseClientAuth, getFirebaseConfigStatus } from "@/lib/firebase/client";
 import { apiFetch, ClientApiError } from "@/lib/client/api";
+
+function mapFirebaseError(error: unknown): string {
+  const code = (error as { code?: string })?.code ?? "";
+  const message = error instanceof Error ? error.message : String(error);
+
+  // Known Firebase Auth error codes.
+  if (code === "auth/invalid-credential" || code === "auth/wrong-password" || code === "auth/user-not-found" || code === "auth/invalid-email") {
+    return "Invalid email or password. Check your credentials and try again.";
+  }
+  if (code === "auth/user-disabled") {
+    return "This account has been disabled. Contact an administrator.";
+  }
+  if (code === "auth/too-many-requests") {
+    return "Too many failed attempts. Please wait a moment and try again.";
+  }
+  if (code === "auth/network-request-failed") {
+    return "Network error contacting Firebase. Check your connection and try again.";
+  }
+  if (code === "auth/unauthorized-domain") {
+    return "This domain is not authorized for Firebase Authentication. Add your production domain to Firebase Console → Authentication → Settings → Authorized domains.";
+  }
+  if (code === "auth/invalid-api-key" || code === "auth/api-key-not-valid.-please-pass-a-valid-api-key.") {
+    return "Firebase API key is invalid. Verify NEXT_PUBLIC_FIREBASE_API_KEY in Vercel environment variables matches your Firebase project.";
+  }
+  if (code === "auth/project-not-found" || code === "auth/configuration-not-found") {
+    return "Firebase project configuration not found. Verify NEXT_PUBLIC_FIREBASE_PROJECT_ID and other public Firebase env vars.";
+  }
+  // Fallback: if message contains auth/ pattern, treat as invalid credentials.
+  if (/auth\//.test(code) || /auth\//.test(message)) {
+    return `Firebase authentication failed (${code || "unknown"}). ${message.slice(0, 200)}`;
+  }
+  return message || "Sign-in failed.";
+}
 
 function LoginForm() {
   const router = useRouter();
@@ -17,15 +50,26 @@ function LoginForm() {
   const [adminPass, setAdminPass] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const busyRef = useRef(false);
+  const configStatus = getFirebaseConfigStatus();
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
     setError(null);
     try {
       if (mode === "firebase") {
-        const credential = await signInWithEmailAndPassword(getFirebaseClientAuth(), email.trim(), password);
-        const idToken = await credential.user.getIdToken();
+        if (!configStatus.configured) {
+          throw new Error(
+            `Firebase is not configured. Missing: ${configStatus.missing.join(", ")}. ` +
+              "Set these in Vercel Project Settings → Environment Variables and redeploy.",
+          );
+        }
+        const auth = getFirebaseClientAuth();
+        const credential = await signInWithEmailAndPassword(auth, email.trim(), password);
+        const idToken = await credential.user.getIdToken(true);
         await apiFetch("/api/auth/session", { method: "POST", body: JSON.stringify({ idToken }) });
       } else {
         await apiFetch("/api/auth/pass", { method: "POST", body: JSON.stringify({ adminPass }) });
@@ -34,13 +78,22 @@ function LoginForm() {
       router.refresh();
     } catch (submitError) {
       if (submitError instanceof ClientApiError) {
-        setError(submitError.message);
-      } else if (submitError instanceof Error && /auth\//.test(submitError.message)) {
-        setError("Invalid email or password.");
+        // Handle specific server errors with actionable messages.
+        if (submitError.code === "SERVICE_CONFIGURATION_ERROR") {
+          setError(
+            `${submitError.message} Check Vercel environment variables and redeploy. ` +
+              "If using Firebase, also verify your production domain is in Firebase Authorized domains.",
+          );
+        } else {
+          setError(submitError.message);
+        }
+      } else if ((submitError as AuthError)?.code?.startsWith?.("auth/") || submitError instanceof Error) {
+        setError(mapFirebaseError(submitError));
       } else {
         setError(submitError instanceof Error ? submitError.message : "Sign-in failed.");
       }
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   };
@@ -57,6 +110,13 @@ function LoginForm() {
             <p className="text-xs text-ink-muted">Private document storage</p>
           </div>
         </div>
+        {!configStatus.configured && mode === "firebase" && (
+          <div className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-sm text-amber-800 dark:text-amber-200" role="alert">
+            <p className="font-medium">Firebase not fully configured in this environment</p>
+            <p className="mt-1 text-xs">Missing: {configStatus.missing.join(", ")}</p>
+            <p className="mt-1 text-xs">Set these in Vercel → Settings → Environment Variables and redeploy. Also add your domain to Firebase Console → Auth → Authorized domains.</p>
+          </div>
+        )}
         <div className="card p-6 sm:p-7">
           <h1 className="text-lg font-semibold tracking-tight text-ink">Sign in</h1>
           <p className="mt-1 text-sm text-ink-muted">Access your organization&apos;s documents.</p>
@@ -94,6 +154,7 @@ function LoginForm() {
                     value={email}
                     onChange={(event) => setEmail(event.target.value)}
                     placeholder="you@organization.org"
+                    disabled={busy}
                   />
                 </div>
                 <div>
@@ -107,6 +168,7 @@ function LoginForm() {
                     value={password}
                     onChange={(event) => setPassword(event.target.value)}
                     placeholder="••••••••"
+                    disabled={busy}
                   />
                 </div>
               </>
@@ -122,18 +184,22 @@ function LoginForm() {
                   value={adminPass}
                   onChange={(event) => setAdminPass(event.target.value)}
                   placeholder="Shared administrator passphrase"
+                  disabled={busy}
                 />
                 <p className="field-hint">Full administrator access. Rotating it signs out every shared session.</p>
               </div>
             )}
-            {error && <p role="alert" className="rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">{error}</p>}
-            <button type="submit" disabled={busy} className="btn-primary w-full">
+            {error && <p role="alert" className="rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400 whitespace-pre-wrap break-words">{error}</p>}
+            <button type="submit" disabled={busy} aria-busy={busy} className="btn-primary w-full">
               {busy && <LoaderCircle className="h-4 w-4 animate-spin" />}
               {busy ? "Signing in…" : "Sign in"}
             </button>
           </form>
         </div>
         <p className="mt-5 text-center font-mono text-[11px] text-ink-faint">NGO File Cloud · private access only</p>
+        {configStatus.configured && (
+          <p className="mt-2 text-center text-[11px] text-ink-faint">Project: {configStatus.projectId} · Domain: {configStatus.authDomain}</p>
+        )}
       </div>
     </div>
   );

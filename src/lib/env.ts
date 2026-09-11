@@ -14,18 +14,53 @@ function configurationError(area: string, issues: string[], publicMessage?: stri
   throw new ApiError(
     503,
     "SERVICE_CONFIGURATION_ERROR",
-    publicMessage ?? `Missing server configuration for ${area}: ${issues.join(", ")}.`,
+    publicMessage ?? `Missing server configuration for ${area}: ${issues.join(", ")}. Check Vercel Project Settings → Environment Variables and redeploy.`,
   );
 }
 
+function normalizePrivateKeyInput(raw: string): string {
+  let key = raw.trim();
+  if ((key.startsWith('"') && key.endsWith('"')) || (key.startsWith("'") && key.endsWith("'"))) {
+    key = key.slice(1, -1);
+  }
+  key = key.replace(/\\n/g, "\n");
+  return key;
+}
+
 export function getFirebaseAdminEnv() {
+  const rawProjectId = process.env.FIREBASE_PROJECT_ID?.trim() ?? "";
+  const rawClientEmail = process.env.FIREBASE_CLIENT_EMAIL?.trim() ?? "";
+  const rawPrivateKey = process.env.FIREBASE_PRIVATE_KEY ?? "";
+
   const parsed = firebaseAdminSchema.safeParse({
-    FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID,
-    FIREBASE_CLIENT_EMAIL: process.env.FIREBASE_CLIENT_EMAIL,
-    FIREBASE_PRIVATE_KEY: process.env.FIREBASE_PRIVATE_KEY,
+    FIREBASE_PROJECT_ID: rawProjectId,
+    FIREBASE_CLIENT_EMAIL: rawClientEmail,
+    FIREBASE_PRIVATE_KEY: rawPrivateKey,
   });
-  if (!parsed.success) return configurationError("firebase", parsed.error.issues.map((issue) => issue.path.join(".")));
-  return { ...parsed.data, FIREBASE_PRIVATE_KEY: parsed.data.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n") };
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map((issue) => issue.path.join("."));
+    const missingDetails = issues.join(", ");
+    return configurationError(
+      "firebase",
+      issues,
+      `Firebase Admin is not configured. Missing or invalid: ${missingDetails}. ` +
+        "Set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY in Vercel. " +
+        "For FIREBASE_PRIVATE_KEY, paste the full private key with -----BEGIN PRIVATE KEY----- header, preserving newlines or using \\n escapes.",
+    );
+  }
+  const normalizedKey = normalizePrivateKeyInput(parsed.data.FIREBASE_PRIVATE_KEY);
+  if (!normalizedKey.includes("BEGIN PRIVATE KEY") || !normalizedKey.includes("END PRIVATE KEY")) {
+    return configurationError(
+      "firebase",
+      ["FIREBASE_PRIVATE_KEY"],
+      "FIREBASE_PRIVATE_KEY is malformed. It must include -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY-----.",
+    );
+  }
+  return {
+    FIREBASE_PROJECT_ID: parsed.data.FIREBASE_PROJECT_ID.trim(),
+    FIREBASE_CLIENT_EMAIL: parsed.data.FIREBASE_CLIENT_EMAIL.trim(),
+    FIREBASE_PRIVATE_KEY: normalizedKey,
+  };
 }
 
 /**
@@ -299,7 +334,7 @@ export function getBlobStoreConfig(): {
 
 export function getRequiredSecret(name: "INTEGRATION_API_KEY" | "CRON_SECRET"): string {
   const value = process.env[name];
-  if (!value || value.length < 24) return configurationError("secret", [name]);
+  if (!value || value.length < 24) return configurationError("secret", [name], `Missing server secret: ${name}. Set a high-entropy value (24+ chars) in Vercel.`);
   return value;
 }
 
@@ -312,8 +347,12 @@ export function getRequiredSecret(name: "INTEGRATION_API_KEY" | "CRON_SECRET"): 
 export function getMasterKey(): Buffer | null {
   const value = process.env.AM_STORAGE_MASTER_KEY;
   if (!value) return null;
-  const key = Buffer.from(value.trim(), "base64");
-  return key.length === 32 ? key : null;
+  try {
+    const key = Buffer.from(value.trim(), "base64");
+    return key.length === 32 ? key : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -330,15 +369,19 @@ export function getBridgeUrl(): string | null {
 /** Required shared administrator passphrase. It gates access to the admin sign-in form. */
 export function getAdminPass(): string {
   const value = process.env.ADMIN_PASS;
-  if (!value || value.length < 8) return configurationError("secret", ["ADMIN_PASS"]);
+  if (!value || value.length < 8) return configurationError("secret", ["ADMIN_PASS"], "ADMIN_PASS is not configured. Set a long passphrase (8+ chars) in Vercel.");
   return value;
 }
 
 /** Constant-time comparison so a missing/mismatched passphrase cannot be distinguished by timing. */
 export function verifyAdminPass(candidate: string): boolean {
-  const expected = Buffer.from(getAdminPass());
-  const supplied = Buffer.from(candidate);
-  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+  try {
+    const expected = Buffer.from(getAdminPass());
+    const supplied = Buffer.from(candidate);
+    return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+  } catch {
+    return false;
+  }
 }
 
 export function getAdminEmails(): Set<string> {

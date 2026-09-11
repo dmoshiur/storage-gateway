@@ -223,7 +223,19 @@ export function Providers({ children }: { children: ReactNode }) {
     setSessionLoading(true);
     apiFetch<{ actor: Session }>("/api/auth/me")
       .then((data) => setSession(data.actor))
-      .catch(() => setSession(null))
+      .catch((error) => {
+        // Distinguish configuration errors (503) from auth failures (401).
+        // 503 should not clear session as expired; it indicates server misconfiguration.
+        const status = (error as { status?: number })?.status;
+        const code = (error as { code?: string })?.code;
+        if (status === 503 || code === "SERVICE_CONFIGURATION_ERROR") {
+          console.error("Session check failed due to server configuration:", error);
+          // Keep existing session if any, but don't treat as unauthenticated.
+          // The server-side layout will handle 503 properly.
+        } else {
+          setSession(null);
+        }
+      })
       .finally(() => setSessionLoading(false));
   }, []);
 

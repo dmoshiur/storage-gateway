@@ -307,7 +307,10 @@ export async function handleBridgeUploadInit(request: Request, requestId: string
 
   try {
     const expiresInSeconds = Math.min(20 * 60, Math.max(5 * 60, settings.signedUrlExpirySeconds));
-    const uploadUrl = await getStorageService().getSignedUploadUrl(file.uploadKey!, {
+    // For bridge uploads, storagePath is the final private Blob pathname (pdfs/...).
+    // Direct-to-final upload: no staging key, so use storagePath.
+    const uploadPath = file.storagePath;
+    const uploadUrl = await getStorageService().getSignedUploadUrl(uploadPath, {
       expiresInSeconds,
       contentType: document.mimeType,
       contentLength: file.size,

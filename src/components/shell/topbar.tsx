@@ -47,7 +47,16 @@ export function Topbar({ onOpenPalette, onOpenMenu }: { onOpenPalette: () => voi
 
   const logout = async () => {
     try {
+      // Clear server session first.
       await apiFetch("/api/auth/logout", { method: "POST" });
+      // Also sign out from Firebase client to clear local persistence.
+      try {
+        const { getFirebaseClientAuth } = await import("@/lib/firebase/client");
+        const { signOut } = await import("firebase/auth");
+        await signOut(getFirebaseClientAuth()).catch(() => undefined);
+      } catch {
+        // Firebase client sign-out is best-effort; server session is authoritative.
+      }
     } catch {
       toast("Sign-out failed. Please try again.", "error");
       return;

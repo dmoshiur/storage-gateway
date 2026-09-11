@@ -207,12 +207,13 @@ async function logUploadCompleted(payload: {
 }
 
 function resolveWebhookPublicKey(): string | null {
-  return (
-    getBlobStoreConfig().webhookPublicKey ??
-    process.env.BLOB_WEBHOOK_PUBLIC_KEY ??
-    process.env.BLOB_WEBHOOK_KEY ??
-    null
-  );
+  try {
+    const config = getBlobStoreConfig();
+    if (config.webhookPublicKey) return config.webhookPublicKey;
+  } catch {
+    // Blob not configured yet - fall back to direct env var for webhook key.
+  }
+  return process.env.BLOB_WEBHOOK_PUBLIC_KEY ?? process.env.BLOB_WEBHOOK_KEY ?? null;
 }
 
 export async function POST(request: Request) {
