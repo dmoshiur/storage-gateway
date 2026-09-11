@@ -1,134 +1,45 @@
-# Firebase, Firestore, R2, and Vercel setup
+# Production setup
 
-This guide assumes a separate set of cloud resources for **development**, **preview**, and **production**. Do not reuse production R2 credentials or bucket names locally.
+## 1. PostgreSQL
 
-## 1. Firebase project and Authentication
-
-1. Create/select a Firebase project for this environment.
-2. In **Authentication → Sign-in method**, enable **Email/Password**. Do not enable anonymous authentication.
-3. Create the initial administrator email/password user in Firebase Authentication.
-4. In **Project settings → Service accounts**, generate a service-account credential for the gateway server. Store only its project ID, client email, and private key in Vercel environment variables; do not commit downloaded JSON files.
-5. In **Project settings → General**, register the Web app and copy its public config values to the `NEXT_PUBLIC_FIREBASE_*` variables.
-6. Add local and deployed gateway domains in Firebase Authentication’s authorized domains list.
-7. After the first deploy, an admin can rotate or correct the Web App config at runtime in **Settings → Firebase Configuration** (paste → Test → Save & apply → Verify login) without a rebuild. The saved override takes effect immediately; Settings then shows a “redeploy required” snippet so the `NEXT_PUBLIC_FIREBASE_*` baseline is updated for the next build. See [FIREBASE_CONFIG.md](FIREBASE_CONFIG.md) for the complete flow. Service-account private keys are never pasted there — they stay in Vercel env vars only.
-
-### Assign production roles
-
-Use Firebase custom claims as the long-term source of truth. From a tightly controlled, server-only administration script or Cloud Function:
-
-```ts
-await admin.auth().setCustomUserClaims("FIREBASE_UID", { role: "admin" });
-```
-
-The gateway recognizes `admin`, `editor`, and `viewer`. Any user created in Firebase Authentication (email/password) can sign in; the assigned role decides what they may do — `admin` has full control, while `editor` and `viewer` get read-only access to the library. Independently of Firebase, the shared `ADMIN_PASS` passphrase signs in directly as a full administrator. Set `ADMIN_EMAILS` only to bootstrap a first admin; remove it once custom claims are managed.
-
-## 2. Firestore
-
-1. Create Firestore in Native mode in the same regional strategy appropriate for your NGO.
-2. Review [`../firestore.rules`](../firestore.rules). There is no `allow read, write: if true` rule. Browser writes are denied; the gateway uses server-side Admin SDK after server authorization.
-3. Install the Firebase CLI in a controlled administrative environment:
-
-   ```bash
-   npm install -g firebase-tools
-   firebase login
-   firebase use <environment-project-id>
-   firebase deploy --only firestore:rules,firestore:indexes
-   ```
-
-4. Verify the index build status in Firebase Console. Query links may be suggested if an index differs by Firestore SDK version.
-
-`firebase.json` points at the committed rules/index configuration. Required indexes include active retention cleanup, Trash expiry, sorting, and stale upload scans.
-
-### Firestore collections
-
-```text
-users/{uid}              last successful login and last known role only
-auditLogs/{auto-id}      activity log
-files/{auto-id}          document metadata and lifecycle; never document bytes
-settings/app             singleton configuration
-system/cleanupLock       scheduler lock / previous summary
-```
-
-The `files` document carries a private random final `storageKey` and temporary `uploadKey`, but neither is exposed through the JSON API. Firebase Admin bypasses Rules, so do not add a route that uses it without the existing `requireAdminRequest` / `requireReadActor` checks.
-
-## 3. Cloudflare R2
-
-1. In the Cloudflare dashboard, create a distinct bucket per environment, e.g. `ngo-documents-dev`, `ngo-documents-preview`, `ngo-documents-production`.
-2. **Do not enable public bucket access or attach a public custom domain.** The gateway uses R2’s S3 API endpoint only.
-3. Create an R2 API token scoped as narrowly as possible to the one bucket: object read/write/delete/list as required by this gateway. Do not use a broad account API token when a bucket-limited token is available.
-4. Set:
-
-   ```text
-   R2_ACCOUNT_ID
-   R2_ACCESS_KEY_ID
-   R2_SECRET_ACCESS_KEY
-   R2_BUCKET_NAME
-   R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
-   ```
-
-5. Configure bucket CORS. Start with [`../r2-cors.json`](../r2-cors.json), replacing `https://your-gateway.vercel.app` with all gateway origins that need direct browser upload. Add specific preview hosts only when needed; avoid `*`.
-
-   Required methods/headers:
-
-   ```json
-   {
-     "AllowedMethods": ["PUT", "GET", "HEAD"],
-     "AllowedHeaders": ["content-type", "x-amz-meta-file-id"],
-     "ExposeHeaders": ["etag"]
-   }
-   ```
-
-   The direct browser `PUT` uses only a short-lived presigned staging URL. The final key is produced server-side by an R2 copy operation after document verification.
-
-6. Test `HEAD`, range `GET`, `PUT`, `CopyObject`, and `DeleteObject` permissions against the **non-production** bucket before deploying. This gateway needs range reads to validate the header/trailer and `CopyObject` to publish staging bytes safely.
-
-## 4. Local environment
+Create a PostgreSQL 14 or newer database with TLS enabled for hosted deployments. Set `DATABASE_URL` and run:
 
 ```bash
-cp .env.example .env.local
-npm install
-npm run dev
+npm ci
+npm run db:migrate
 ```
 
-Use quoted escaped newlines in `FIREBASE_PRIVATE_KEY`:
+The migration runner takes a PostgreSQL advisory lock, records applied versions in `schema_migrations`, and is safe to run on every deployment. Set `INITIAL_ADMIN_EMAIL` and `INITIAL_ADMIN_PASSWORD` only for the first migration; the bootstrap password must be at least 12 characters.
 
-```dotenv
-FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-```
+For Vercel, use a connection pooler or a provider connection string with a small pool. `src/lib/db/client.ts` caps the application pool and converts unavailable database failures into structured `503` errors.
 
-Generate long independent secrets, for example:
+## 2. Vercel Private Blob
 
-```bash
-openssl rand -base64 48
-```
+1. Attach a Vercel Blob store to the same Vercel project.
+2. Keep the store private; do not configure a public custom domain for documents.
+3. Add the server-only `BLOB_READ_WRITE_TOKEN`, or configure Vercel OIDC with `BLOB_STORE_ID` and `VERCEL_OIDC_TOKEN`.
+4. Confirm `/api/v1/health` reports the Blob store as ready after authentication.
 
-Use one output for `INTEGRATION_API_KEY` and a different output for `CRON_SECRET`.
+Only `src/lib/storage/vercel-blob.ts` talks to Blob. The database stores the private pathname and metadata, never document bytes. Preview and download are authorized server streams.
 
-## 5. Vercel deployment (single deployment: dashboard + bridge + cron)
+## 3. Secrets and deployment variables
 
-1. Import the repository into Vercel.
-2. Add every variable in `.env.example` through **Settings → Environment Variables**. Scope values correctly to Development, Preview, and Production. Use different Firebase projects/buckets/secrets per environment when possible.
-3. Set `NEXT_PUBLIC_APP_URL` to the deployed app URL in each environment. The Storage Bridge is embedded in this same deployment — no second service is required. Optionally tune `AM_STORAGE_MAX_DOCUMENT_BYTES`, `AM_STORAGE_SIGNED_URL_EXPIRY_SECONDS`, and `CORS_ORIGINS` (all documented in `.env.example`).
-4. Deploy. Vercel uses the standard `npm run build` script.
-5. After deployment, open `/admin/login`, sign in using an admin custom claim / bootstrap email, and complete the smoke tests in [TESTING.md](TESTING.md).
-6. Set `CRON_SECRET` in the Vercel project. Vercel Cron discovers [`../vercel.json`](../vercel.json) and sends the matching Bearer authorization header to the daily cleanup route.
-7. On the gramunnayan.com **server**, set `AM_STORAGE_BRIDGE_URL` to this same deployed app URL and verify `GET <app-url>/api/v1/health` returns `"bridge": "ready"`.
+Required variables are documented in `.env.example`. Generate secrets with a cryptographically secure generator, use separate values per environment, and never prefix server secrets with `NEXT_PUBLIC_`.
 
-### Preview deployment note
+- `CRON_SECRET` authenticates Vercel Cron.
+- `NEXT_PUBLIC_APP_URL` is the canonical HTTPS origin.
+- API key secrets are random, shown once, and stored only as SHA-256 digests; no reversible API-secret encryption variable is used.
 
-R2 CORS does not accept a wildcard safely for credential-like signed uploads. Add each preview hostname that staff need to test, or use a dedicated stable preview domain. Keep preview bucket/data isolated from production.
+## 4. Vercel Cron
 
-## 6. Hardening review
+`vercel.json` schedules `/api/cron/cleanup` daily. Vercel sends `Authorization: Bearer <CRON_SECRET>`. Check the deployment logs and `/api/system/health` after the first run.
 
-Before handling real NGO records:
+## 5. First smoke test
 
-- [ ] Production R2 bucket is private and has no public custom domain.
-- [ ] No real `.env*` file is tracked by Git (`git status --ignored` can help verify locally).
-- [ ] Firebase Admin variables are absent from `NEXT_PUBLIC_*` names and browser bundles.
-- [ ] Firestore Rules/indexes deployed to the intended project.
-- [ ] Firebase authorized domains include only legitimate gateway origins.
-- [ ] `ADMIN_EMAILS` has been replaced or tightly controlled with custom claims.
-- [ ] R2 CORS lists exact gateway origins, not `*`.
-- [ ] Website integration secret exists only in the NGO main website server environment.
-- [ ] `CRON_SECRET` exists in Vercel and is different from every other key.
-- [ ] Vercel WAF/rate rules are configured as a defense-in-depth layer for `/api/*`.
+1. Run the migration and sign in as the bootstrap administrator.
+2. Create an editor and viewer under `/admin/users` with unique passwords.
+3. Verify editor upload/edit/Trash permissions and viewer read-only behavior.
+4. Upload a known-safe PDF, preview it, download it, edit metadata, move it to Trash, restore it, and permanently delete it.
+5. Confirm the file row exists in PostgreSQL and the object exists only in the private Blob store.
+6. Create an API key, call `/api/v1/health` and `/api/v1/files`, then revoke the key and confirm `401`.
+7. Run a cleanup dry run and inspect the audit log.

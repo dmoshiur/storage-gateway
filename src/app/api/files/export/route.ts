@@ -3,8 +3,8 @@ import { apiRoute } from "@/lib/api/route";
 import { parseQuery } from "@/lib/api/body";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
-import { listFilesForStats, serializeFile } from "@/lib/firestore/files";
-import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
+import { listFilesForStats, serializeFile } from "@/lib/db/files";
+import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
 
 export const runtime = "nodejs";
 
@@ -32,6 +32,7 @@ export async function GET(request: Request) {
       action: "EXPORT",
       actor: auditActorFrom(actor),
       details: { format: query.format, status: query.status, count: files.length },
+      requestId,
     });
 
     if (query.format === "json") {

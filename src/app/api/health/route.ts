@@ -1,77 +1,85 @@
 import { apiRoute } from "@/lib/api/route";
 import { success } from "@/lib/api/response";
 import { requireAdminRequest } from "@/lib/security/request-auth";
-import { getBridgeUrl } from "@/lib/env";
-import { bridgeUrlPointsAtRequest } from "@/lib/bridge/config";
+import { query } from "@/lib/db/client";
+import { withTimeout } from "@/lib/db/with-timeout";
+import { getStorageService } from "@/lib/storage";
+import type { StorageHealth } from "@/lib/storage/storage-service";
+import { logger } from "@/lib/logging/logger";
 import { version as appVersion } from "../../../../package.json";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-export interface BridgeProbe {
-  configured: boolean;
-  reachable: boolean;
+interface DatabaseProbe {
+  connected: boolean;
   latencyMs: number;
-  version: string | null;
-  checkedAt: string;
-  /** `embedded` = same Vercel deployment; `external` = legacy standalone bridge origin. */
-  mode: "embedded" | "external";
+  error?: string;
 }
 
-/**
- * Probes bridge connectivity for the dashboard's "System Status" signal.
- *
- * The bridge is embedded in this same deployment, so the probe is local unless
- * an operator explicitly configured a *different* external bridge origin
- * (legacy standalone FastAPI host). Any failure (DNS, timeout, HTTP error,
- * malformed body) degrades to `reachable: false` — never a 500.
- */
-async function probeBridge(request: Request): Promise<BridgeProbe> {
-  const checkedAt = new Date().toISOString();
-  const base = getBridgeUrl();
-  if (!base || bridgeUrlPointsAtRequest(request, base)) {
-    return { configured: true, reachable: true, latencyMs: 0, version: appVersion, checkedAt, mode: "embedded" };
-  }
+async function probeDatabase(): Promise<DatabaseProbe> {
   const startedAt = Date.now();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 4000);
   try {
-    const response = await fetch(`${base}/health`, { signal: controller.signal, cache: "no-store" });
-    if (!response.ok) {
-      return { configured: true, reachable: false, latencyMs: Date.now() - startedAt, version: null, checkedAt, mode: "external" };
-    }
-    const body = (await response.json().catch(() => null)) as { version?: string } | null;
+    await withTimeout(query("SELECT 1"), 8_000, "health:postgresql");
+    return { connected: true, latencyMs: Date.now() - startedAt };
+  } catch (error) {
+    logger.error("PostgreSQL health probe failed", { error: error instanceof Error ? error.message : "unknown" });
+    return { connected: false, latencyMs: Date.now() - startedAt, error: "PostgreSQL health probe failed." };
+  }
+}
+
+async function probeBlob(): Promise<StorageHealth> {
+  try {
+    return await getStorageService().healthCheck();
+  } catch (error) {
+    logger.error("Vercel Blob health probe failed", { error: error instanceof Error ? error.message : "unknown" });
     return {
-      configured: true,
-      reachable: true,
-      latencyMs: Date.now() - startedAt,
-      version: body && typeof body.version === "string" ? body.version : null,
-      checkedAt,
-      mode: "external",
+      reachable: false,
+      latencyMs: 0,
+      checkedAt: new Date().toISOString(),
+      error: "Vercel Blob health probe failed.",
+      authMode: "none",
     };
-  } catch {
-    return { configured: true, reachable: false, latencyMs: Date.now() - startedAt, version: null, checkedAt, mode: "external" };
-  } finally {
-    clearTimeout(timer);
   }
 }
 
 /**
- * Dashboard system health: gateway runtime status plus Storage Bridge
- * connectivity. `systemStatus` is "operational" only when the bridge is
- * reachable; the embedded bridge always is.
+ * Authenticated application health check. Dependency state is probed for real;
+ * this endpoint never reports a configured or reachable service merely because
+ * the Next.js process is running.
  */
 export async function GET(request: Request) {
   return apiRoute(request, async (requestId) => {
     await requireAdminRequest(request, "read_files");
-    const bridge = await probeBridge(request);
+    const checkedAt = new Date().toISOString();
+    const [database, blob] = await Promise.all([probeDatabase(), probeBlob()]);
+    const operational = database.connected && blob.reachable;
+
     return success({
-      systemStatus: bridge.reachable ? "operational" : "degraded",
-      gateway: {
-        runtime: "nodejs",
-        uptimeSeconds: Math.round(process.uptime()),
-        checkedAt: new Date().toISOString(),
+      systemStatus: operational ? "operational" : "degraded",
+      gateway: { runtime: "nodejs", uptimeSeconds: Math.round(process.uptime()), checkedAt },
+      bridge: {
+        mode: "embedded",
+        endpoint: "/api/v1",
+        status: operational ? "healthy" : "degraded",
       },
-      bridge,
+      database: {
+        provider: "postgresql",
+        status: database.connected ? "healthy" : "degraded",
+        latencyMs: database.latencyMs,
+        ...(database.error ? { error: database.error } : {}),
+      },
+      storage: {
+        provider: "vercel-private-blob",
+        configured: blob.authMode === "token" || blob.authMode === "oidc",
+        status: blob.reachable ? "healthy" : "degraded",
+        reachable: blob.reachable,
+        latencyMs: blob.latencyMs,
+        authMode: blob.authMode,
+        ...(blob.error ? { error: blob.error } : {}),
+      },
+      version: appVersion,
+      checkedAt,
     }, requestId);
   }, { route: "health" });
 }

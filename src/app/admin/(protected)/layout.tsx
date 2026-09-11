@@ -16,7 +16,7 @@ export default async function ProtectedLayout({ children }: Readonly<{ children:
     // not as a silent redirect loop that looks like a login problem.
     const isAuthError = error instanceof Error && (error as { status?: number }).status === 401;
     const code = (error as { code?: string })?.code;
-    const isUnauthenticated = code === "UNAUTHENTICATED" || code === "SESSION_EXPIRED" || code === "INVALID_ID_TOKEN";
+    const isUnauthenticated = code === "UNAUTHENTICATED" || code === "SESSION_EXPIRED";
     if (isAuthError || isUnauthenticated || error === null) {
       redirect("/admin/login");
     }

@@ -4,7 +4,7 @@ import { success } from "@/lib/api/response";
 import { parseJson, parseQuery } from "@/lib/api/body";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
-import { listNotifications, markAllNotificationsRead, markNotificationRead } from "@/lib/firestore/notifications";
+import { listNotifications, markAllNotificationsRead, markNotificationRead } from "@/lib/db/notifications";
 
 export const runtime = "nodejs";
 

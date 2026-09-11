@@ -1,169 +1,23 @@
 import "server-only";
 
 import { randomBytes } from "node:crypto";
-import { getAdminDb } from "@/lib/firebase/admin";
 import { ApiError } from "@/lib/api/errors";
+import { query, toDate } from "@/lib/db/client";
 import type { WebhookDelivery, WebhookEvent, WebhookRecord } from "@/types/webhook";
-import { asDate } from "@/utils/date";
 
-const WEBHOOKS = "webhooks";
-const DELIVERIES = "webhookDeliveries";
-
-function serialize(id: string, data: Record<string, unknown>): WebhookRecord {
-  return {
-    id,
-    name: String(data.name ?? ""),
-    url: String(data.url ?? ""),
-    events: Array.isArray(data.events) ? (data.events as WebhookEvent[]) : [],
-    enabled: Boolean(data.enabled),
-    lastTriggeredAt: asDate(data.lastTriggeredAt)?.toISOString() ?? null,
-    lastStatus: data.lastStatus === "success" || data.lastStatus === "failed" ? data.lastStatus : null,
-    failureCount: typeof data.failureCount === "number" ? data.failureCount : 0,
-    createdAt: asDate(data.createdAt)?.toISOString() ?? new Date(0).toISOString(),
-    updatedAt: asDate(data.updatedAt)?.toISOString() ?? new Date(0).toISOString(),
-    createdBy: String(data.createdBy ?? ""),
-  };
+function serialize(row: Record<string, unknown>): WebhookRecord {
+  return { id: String(row.id), name: String(row.name ?? ""), url: String(row.url ?? ""), events: Array.isArray(row.events) ? row.events as WebhookEvent[] : [], enabled: Boolean(row.enabled), lastTriggeredAt: toDate(row.last_triggered_at)?.toISOString() ?? null, lastStatus: row.last_status === "success" || row.last_status === "failed" ? row.last_status : null, failureCount: Number(row.failure_count ?? 0), createdAt: toDate(row.created_at)?.toISOString() ?? new Date(0).toISOString(), updatedAt: toDate(row.updated_at)?.toISOString() ?? new Date(0).toISOString(), createdBy: String(row.created_by ?? "") };
 }
 
-export async function listWebhooks(): Promise<WebhookRecord[]> {
-  const snapshot = await getAdminDb().collection(WEBHOOKS).orderBy("createdAt", "desc").get();
-  return snapshot.docs.map((doc) => serialize(doc.id, doc.data()));
+export async function listWebhooks(): Promise<WebhookRecord[]> { const result = await query(`SELECT id, name, url, events, enabled, last_triggered_at, last_status, failure_count, created_at, updated_at, created_by FROM webhooks ORDER BY created_at DESC`); return result.rows.map(serialize); }
+export async function createWebhook(input: { name: string; url: string; events: WebhookEvent[]; createdBy: string }): Promise<{ webhook: WebhookRecord; secret: string }> {
+  const secret = `whsec_${randomBytes(24).toString("base64url")}`; const result = await query(`INSERT INTO webhooks(name, url, events, secret, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id, name, url, events, enabled, last_triggered_at, last_status, failure_count, created_at, updated_at, created_by`, [input.name.trim().slice(0, 80), input.url.trim(), input.events, secret, input.createdBy]); return { webhook: serialize(result.rows[0]), secret };
 }
-
-export async function createWebhook(input: {
-  name: string;
-  url: string;
-  events: WebhookEvent[];
-  createdBy: string;
-}): Promise<{ webhook: WebhookRecord; secret: string }> {
-  const secret = `whsec_${randomBytes(24).toString("base64url")}`;
-  const now = new Date();
-  const ref = await getAdminDb().collection(WEBHOOKS).add({
-    name: input.name.trim().slice(0, 80),
-    url: input.url.trim(),
-    events: input.events,
-    enabled: true,
-    // The secret signs every payload. It lives only in this server-side
-    // collection (Firestore rules deny all client access) and is returned
-    // exactly once at creation/rotation — never serialized again.
-    secret,
-    lastTriggeredAt: null,
-    lastStatus: null,
-    failureCount: 0,
-    createdAt: now,
-    updatedAt: now,
-    createdBy: input.createdBy,
-  });
-  const snapshot = await ref.get();
-  return { webhook: serialize(ref.id, snapshot.data() ?? {}), secret };
-}
-
-export async function updateWebhook(
-  id: string,
-  patch: { name?: string; url?: string; events?: WebhookEvent[]; enabled?: boolean },
-): Promise<WebhookRecord> {
-  const updates: Record<string, unknown> = { updatedAt: new Date() };
-  if (patch.name !== undefined) updates.name = patch.name.trim().slice(0, 80);
-  if (patch.url !== undefined) updates.url = patch.url.trim();
-  if (patch.events !== undefined) updates.events = patch.events;
-  if (patch.enabled !== undefined) {
-    updates.enabled = patch.enabled;
-    if (patch.enabled) updates.failureCount = 0;
-  }
-  const ref = getAdminDb().collection(WEBHOOKS).doc(id);
-  await ref.set(updates, { merge: true });
-  const snapshot = await ref.get();
-  if (!snapshot.exists) throw new ApiError(404, "WEBHOOK_NOT_FOUND", "The webhook was not found.");
-  return serialize(id, snapshot.data() ?? {});
-}
-
-export async function deleteWebhook(id: string): Promise<void> {
-  await getAdminDb().collection(WEBHOOKS).doc(id).delete();
-}
-
-export async function rotateWebhookSecret(id: string): Promise<string> {
-  const secret = `whsec_${randomBytes(24).toString("base64url")}`;
-  await getAdminDb().collection(WEBHOOKS).doc(id).set({
-    secret,
-    updatedAt: new Date(),
-  }, { merge: true });
-  return secret;
-}
-
-export async function getWebhookWithSecret(id: string): Promise<DispatchableWebhook | null> {
-  const snapshot = await getAdminDb().collection(WEBHOOKS).doc(id).get();
-  if (!snapshot.exists) return null;
-  const data = snapshot.data() ?? {};
-  if (typeof data.secret !== "string" || !data.secret) return null;
-  return { id, url: String(data.url ?? ""), secret: data.secret };
-}
-
-export async function recordDelivery(input: {
-  webhookId: string;
-  event: WebhookEvent;
-  status: "success" | "failed";
-  statusCode: number | null;
-  durationMs: number;
-  error: string | null;
-}): Promise<void> {
-  const db = getAdminDb();
-  await db.collection(DELIVERIES).add({ ...input, createdAt: new Date() });
-  const ref = db.collection(WEBHOOKS).doc(input.webhookId);
-  const snapshot = await ref.get();
-  const failureCount = typeof snapshot.data()?.failureCount === "number" ? snapshot.data()!.failureCount as number : 0;
-  await ref.set({
-    lastTriggeredAt: new Date(),
-    lastStatus: input.status,
-    failureCount: input.status === "failed" ? failureCount + 1 : 0,
-    // Auto-disable after 20 consecutive failures to protect the platform.
-    ...(input.status === "failed" && failureCount + 1 >= 20 ? { enabled: false } : {}),
-    updatedAt: new Date(),
-  }, { merge: true });
-}
-
-export async function listDeliveries(webhookId: string, limit = 50): Promise<WebhookDelivery[]> {
-  const snapshot = await getAdminDb()
-    .collection(DELIVERIES)
-    .where("webhookId", "==", webhookId)
-    .orderBy("createdAt", "desc")
-    .limit(Math.min(Math.max(limit, 1), 100))
-    .get();
-  return snapshot.docs.map((doc) => {
-    const data = doc.data();
-    return {
-      id: doc.id,
-      webhookId: String(data.webhookId),
-      event: data.event as WebhookEvent,
-      status: data.status as "success" | "failed",
-      statusCode: typeof data.statusCode === "number" ? data.statusCode : null,
-      durationMs: typeof data.durationMs === "number" ? data.durationMs : 0,
-      error: typeof data.error === "string" ? data.error : null,
-      createdAt: asDate(data.createdAt)?.toISOString() ?? new Date(0).toISOString(),
-    };
-  });
-}
-
-export interface DispatchableWebhook {
-  id: string;
-  url: string;
-  secret: string;
-}
-
-/** Webhooks subscribed to an event. Secrets are needed for signing; this stays server-side. */
-export async function getWebhooksForEvent(event: WebhookEvent): Promise<DispatchableWebhook[]> {
-  const snapshot = await getAdminDb()
-    .collection(WEBHOOKS)
-    .where("enabled", "==", true)
-    .where("events", "array-contains", event)
-    .get();
-  return snapshot.docs
-    .map((doc) => {
-      const data = doc.data();
-      return {
-        id: doc.id,
-        url: String(data.url ?? ""),
-        secret: typeof data.secret === "string" ? data.secret : "",
-      };
-    })
-    .filter((webhook) => Boolean(webhook.url && webhook.secret));
-}
+export async function updateWebhook(id: string, patch: { name?: string; url?: string; events?: WebhookEvent[]; enabled?: boolean }): Promise<WebhookRecord> { const result = await query(`UPDATE webhooks SET name = COALESCE($2,name), url = COALESCE($3,url), events = COALESCE($4,events), enabled = COALESCE($5,enabled), failure_count = CASE WHEN $5 = true THEN 0 ELSE failure_count END, updated_at = now() WHERE id = $1 RETURNING id, name, url, events, enabled, last_triggered_at, last_status, failure_count, created_at, updated_at, created_by`, [id, patch.name?.trim().slice(0,80) || null, patch.url?.trim() || null, patch.events ?? null, patch.enabled ?? null]); if (!result.rows[0]) throw new ApiError(404, "WEBHOOK_NOT_FOUND", "The webhook was not found."); return serialize(result.rows[0]); }
+export async function deleteWebhook(id: string): Promise<void> { await query(`DELETE FROM webhooks WHERE id = $1`, [id]); }
+export async function rotateWebhookSecret(id: string): Promise<string> { const secret = `whsec_${randomBytes(24).toString("base64url")}`; const result = await query(`UPDATE webhooks SET secret = $2, updated_at = now() WHERE id = $1 RETURNING id`, [id, secret]); if (!result.rowCount) throw new ApiError(404, "WEBHOOK_NOT_FOUND", "The webhook was not found."); return secret; }
+export async function getWebhookWithSecret(id: string): Promise<DispatchableWebhook | null> { const result = await query(`SELECT id, url, secret FROM webhooks WHERE id = $1 AND enabled = true`, [id]); const row = result.rows[0]; return row ? { id: String(row.id), url: String(row.url), secret: String(row.secret) } : null; }
+export async function recordDelivery(input: { webhookId: string; event: WebhookEvent; status: "success" | "failed"; statusCode: number | null; durationMs: number; error: string | null }): Promise<void> { await query(`INSERT INTO webhook_deliveries(webhook_id,event,status,status_code,duration_ms,error) VALUES ($1,$2,$3,$4,$5,$6)`, [input.webhookId,input.event,input.status,input.statusCode,input.durationMs,input.error]); await query(`UPDATE webhooks SET last_triggered_at=now(), last_status=$2, failure_count=CASE WHEN $2='failed' THEN failure_count+1 ELSE 0 END, enabled=CASE WHEN $2='failed' AND failure_count+1 >= 20 THEN false ELSE enabled END, updated_at=now() WHERE id=$1`, [input.webhookId,input.status]); }
+export async function listDeliveries(webhookId: string, limit = 50): Promise<WebhookDelivery[]> { const result = await query(`SELECT id, webhook_id, event, status, status_code, duration_ms, error, created_at FROM webhook_deliveries WHERE webhook_id = $1 ORDER BY created_at DESC LIMIT $2`, [webhookId, Math.min(Math.max(limit,1),100)]); return result.rows.map((row) => ({ id: String(row.id), webhookId: String(row.webhook_id), event: row.event as WebhookEvent, status: row.status as "success" | "failed", statusCode: typeof row.status_code === "number" ? row.status_code : null, durationMs: Number(row.duration_ms ?? 0), error: typeof row.error === "string" ? row.error : null, createdAt: toDate(row.created_at)?.toISOString() ?? new Date(0).toISOString() })); }
+export interface DispatchableWebhook { id: string; url: string; secret: string; }
+export async function getWebhooksForEvent(event: WebhookEvent): Promise<DispatchableWebhook[]> { const result = await query(`SELECT id, url, secret FROM webhooks WHERE enabled = true AND $1 = ANY(events)`, [event]); return result.rows.map((row) => ({ id: String(row.id), url: String(row.url), secret: String(row.secret) })).filter((webhook) => Boolean(webhook.url && webhook.secret)); }

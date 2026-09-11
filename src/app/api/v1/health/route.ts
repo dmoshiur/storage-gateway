@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
-import { requestIdFrom } from "@/lib/api/response";
+import { apiRoute } from "@/lib/api/route";
 import { bridgePreflightResponse, withBridgeCors } from "@/lib/bridge/upload";
 import { readBlobStoreConfig } from "@/lib/env";
+import { enforceRateLimit } from "@/lib/security/rate-limit";
+import { getClientIp } from "@/lib/security/request-auth";
 import { version as appVersion } from "../../../../../package.json";
 
 export const runtime = "nodejs";
@@ -18,22 +20,22 @@ function blobConfigured(): boolean {
  * `GET <app>/api/v1/health` before uploading.
  */
 export async function GET(request: Request) {
-  const requestId = requestIdFrom(request);
-  return withBridgeCors(
-    NextResponse.json(
+  const response = await apiRoute(request, async (requestId) => {
+    enforceRateLimit(`v1:health:${getClientIp(request)}`, 120);
+    return NextResponse.json(
       {
         status: "ok",
         service: "NGO File Cloud",
         bridge: "ready",
         mode: "embedded",
         version: appVersion,
-        auth: "bearer|dual-token|hmac|legacy",
+        auth: "bearer|dual-token",
         blobConfigured: blobConfigured(),
       },
       { status: 200, headers: { "X-Request-Id": requestId, "Cache-Control": "no-store" } },
-    ),
-    request,
-  );
+    );
+  }, { route: "v1/health" });
+  return withBridgeCors(response, request);
 }
 
 export async function OPTIONS(request: Request) {

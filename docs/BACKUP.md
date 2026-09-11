@@ -1,20 +1,21 @@
-# Backup and retention considerations
+# Backup and recovery
 
-Cloudflare R2 is durable object storage, but it is **not by itself a complete NGO backup strategy**. This gateway intentionally avoids an expensive backup subsystem at its small expected scale. The NGO should still decide how it will recover from accidental administrator action, cloud-account compromise, a configuration error, or a wider operational incident.
+The system has two production data planes:
 
-## Recommended future-ready approach
+1. PostgreSQL: users, sessions, roles, file metadata, categories, tags, API-key digests, audit logs, retention rules, notifications, settings, and cleanup state.
+2. Vercel Private Blob: PDF and supported document bytes under random server-generated paths.
 
-1. **Periodic metadata export** — export non-sensitive Firestore `files` metadata and `auditLogs` to an encrypted, access-controlled location. Preserve IDs, original names, retention fields, and final object keys so an object inventory can be reconciled.
-2. **Second bucket / provider copy** — copy final `documents/` objects to a separately permissioned R2 bucket, Cloudflare account, or another approved archival provider. Do not grant the gateway runtime token write access to the backup destination.
-3. **Restore drills** — periodically choose a non-sensitive test document (PDF, DOCX, TXT, or PPTX) and prove the organization can restore metadata/object access using documented procedures.
-4. **Retention alignment** — make backup retention consistent with legal, donor, and safeguarding requirements. A backup should not indefinitely defeat an approved deletion policy without governance approval.
-5. **Encryption and access review** — use provider encryption at rest and restrict backup principals. Keep recovery keys/accounts outside a single administrator’s control.
+Use PostgreSQL point-in-time recovery or encrypted scheduled dumps. The database backup must include `files.storage_path`, content hashes, lifecycle status, and retention timestamps so objects can be reconciled.
 
-## What not to do
+Use the private Blob store's supported export/replication process for document bytes. Never make the store public while taking a backup and never export credentials into application logs.
 
-- Do not call a public R2 URL a backup.
-- Do not store document base64 or binary in Firestore exports.
-- Do not put backup credentials in the Next.js frontend or repository.
-- Do not silently enable a replication rule without documenting its cost, retention, and deletion implications.
+## Recovery order
 
-Before implementing a backup worker, clarify recovery objectives, data classification, geographic/legal constraints, owner responsibility, testing cadence, and budget.
+1. Restore PostgreSQL and run any pending migrations.
+2. Restore or reconnect the private Blob store.
+3. Reconcile active and Trash file rows against the Blob inventory using server-side credentials.
+4. Mark missing objects as failed and create audit records; do not silently recreate metadata.
+5. Revoke all sessions and rotate API keys if the database snapshot could have been copied.
+6. Verify login, role permissions, preview/download, Trash restore, and cleanup before reopening traffic.
+
+Test a restore at least quarterly in an isolated environment. A successful database dump without the corresponding private object inventory is not a complete document backup.

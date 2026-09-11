@@ -4,7 +4,7 @@ import { success } from "@/lib/api/response";
 import { parseJson } from "@/lib/api/body";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
-import { createCategory, listCategories } from "@/lib/firestore/categories";
+import { createCategory, listCategories } from "@/lib/db/categories";
 
 export const runtime = "nodejs";
 

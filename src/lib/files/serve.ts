@@ -8,8 +8,8 @@ import type { FileDocument } from "@/types/file";
 /**
  * Serves stored PDF bytes through the authenticated API route itself.
  *
- * The caller must already have authenticated the Firebase user, authorized
- * their role, and loaded the file metadata from Firestore. What this adds is
+ * The caller must already have authenticated the first-party auth user, authorized
+ * their role, and loaded the file metadata from PostgreSQL. What this adds is
  * the transport: the bytes are read from the private Blob store with the
  * server-side credential and streamed to the browser, so the browser never
  * receives a Blob URL at all — not a permanent one, and not even a short-lived
@@ -50,6 +50,7 @@ export async function streamStoredFile(
   });
   const length = stored.contentLength ?? (Number.isFinite(file.size) ? file.size : null);
   if (length !== null) headers.set("Content-Length", String(length));
+  if (stored.contentRange) headers.set("Content-Range", stored.contentRange);
 
   return new Response(stored.stream, {
     status: stored.statusCode === 206 ? 206 : 200,

@@ -12,10 +12,9 @@ export const maxDuration = 60;
 /**
  * Embedded Storage Bridge — served by this same Vercel deployment.
  *
- * `POST /api/v1/storage/upload` accepts one multipart document (PDF, DOC,
- * DOCX, TXT, PPT, PPTX) authenticated with the dashboard-managed dual-token
- * credential (`X-AM-Storage-Key-Id` + `X-AM-Storage-Key-Secret`), an HMAC
- * signature, or a legacy single key. It validates the credential, checks the
+ * `POST /api/v1/storage/upload` accepts one multipart PDF authenticated with
+ * a PostgreSQL-backed API credential (`Authorization: Bearer ng_live_…` or
+ * `X-AM-Storage-Key-Id` + `X-AM-Storage-Key-Secret`). It validates the credential, checks the
  * document structure, streams the bytes into the private Blob store, registers
  * the document, logs the attempt for the dashboard, and returns a signed
  * document URL.
@@ -25,7 +24,7 @@ export const maxDuration = 60;
  * `.../upload/init` → PUT → `.../upload/complete` flow instead.
  */
 export async function POST(request: Request) {
-  const response = await apiRoute(request, (requestId) => handleBridgeDirectUpload(request, requestId), {
+  const response = await apiRoute(request, (requestId) => handleBridgeDirectUpload(request, requestId, { allowBearer: true, requiredScope: "files:upload" }), {
     route: "v1/storage/upload",
   });
   return withBridgeCors(response, request);

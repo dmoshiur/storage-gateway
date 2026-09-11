@@ -1,64 +1,34 @@
-# Testing and production verification
+# Testing and release verification
 
-## Automated checks
-
-Run before every deployment:
+Run the local checks before deployment:
 
 ```bash
+npm install
+npm run db:migrate
 npm run typecheck
 npm run lint
 npm test
 npm run build
 ```
 
-Included Vitest coverage exercises:
+Use a dedicated PostgreSQL database and private Blob store for integration tests. Do not use production credentials in local tests.
 
-- mocked session-route creation, unauthorized login rejection, and logout cookie clearing, plus admin role resolution;
-- document extension/signature/EOF checks for PDF, DOC/DOCX, TXT, PPT/PPTX, R2 size/ownership checks, and oversize rejection;
-- 30-day, 3-month, 6-month, 1-year, custom-date, and Never retention handling;
-- active → Trash → restore and transient permanent-deletion lifecycle rules;
-- expired/non-expired cleanup eligibility and stale upload selection.
+## Fifteen-item release gate
 
-## Firebase Emulator integration tests (recommended)
+1. **Dependency audit:** `package.json`, the lockfile, source imports, environment examples, and deployment config contain no retired third-party auth/database dependency or reference.
+2. **Stale-file audit:** there are no retired-provider, provider-config, demo-backend, or mock-service directories left in the application tree.
+3. **Migration bootstrap:** `npm run db:migrate` creates PostgreSQL tables, seed roles/settings, and the initial administrator; the second run is a no-op.
+4. **First-party login:** the bootstrap administrator and a newly created account can sign in with email/password and receive an HTTP-only, expiring session cookie.
+5. **Session security:** logout, expiry, disabled-account rejection, password change, reset-token expiry, one-time reset use, and administrator session revocation work.
+6. **Role boundaries:** admin, editor, and viewer permissions are rejected server-side with the correct statuses, regardless of UI controls.
+7. **User management:** create, role change, disable/enable, reset password, sign out sessions, delete, last login, and audit activity work from `/admin/users`.
+8. **API key secrecy:** key creation returns the secret once, only a one-way digest is present in PostgreSQL, logs contain no secret, scopes are enforced, rotation works, and revocation returns `401`.
+9. **API protocol:** `/api/v1` returns request IDs, structured JSON errors, correct status codes, database-backed rate-limit responses, and audit/request metric rows.
+10. **Blob upload:** a known-good PDF uploads to Vercel Private Blob, size/MIME/magic-byte checks run before activation, and oversized or invalid bytes are rejected.
+11. **Metadata source of truth:** the active file row, categories, tags, retention values, actor, and audit record are in PostgreSQL; Blob contains bytes only.
+12. **Private access:** preview/download are authenticated server streams or short-lived signed links; no permanent public PDF URL appears in a browser response, log, or client bundle.
+13. **File lifecycle:** edit, favorite, Trash, restore, permanent delete, failed-delete retry, and stale-upload cleanup update PostgreSQL and Blob consistently.
+14. **Retention worker:** Vercel Cron authentication, PostgreSQL cleanup locking, automatic retention, Trash expiry, cleanup dry-run, notifications, and retry behavior work.
+15. **Production verification:** `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build` all pass; inspect client chunks and environment configuration to confirm server secrets remain server-only.
 
-Use a non-production Firebase project or Emulator Suite for route integration tests. Do not attempt to emulate R2 with production credentials.
-
-1. Configure Firebase Auth Emulator and Firestore Emulator.
-2. Create an admin test user and assign an `admin` custom claim through Admin SDK.
-3. Assert login yields an HTTP-only session cookie.
-4. Call an admin mutation without the cookie and assert `401`/`403`.
-5. Call `POST /api/auth/logout`, then assert the cookie is cleared and `GET /api/auth/me` rejects.
-6. Stub the `StorageService` in a route/service test to simulate R2 HEAD/range/copy/delete outcomes.
-
-The storage abstraction in `src/lib/storage/storage-service.ts` is designed expressly to make such tests independent of a live bucket.
-
-## Non-production R2 smoke test
-
-Before production, use a dedicated test bucket and harmless test documents (PDF, DOCX, TXT, PPTX):
-
-1. Sign in as an authorized admin.
-2. Upload a valid PDF, a DOCX, and a TXT below the configured limit; verify progress, `UPLOAD` audit event, and active file listing (including `mimeType`/`extension`).
-3. Attempt a `.exe` file, a text file renamed `.pdf`, an invalid PDF header, a missing EOF marker, and an oversize document. Confirm no active record is created.
-4. View and download an active document (inline/attachment). Confirm the returned R2 URL expires and the bucket is not anonymously browseable/public.
-5. Update title/category/tags and each retention option. Confirm `deleteAt` is set by the server and `CHANGE_RETENTION` is logged.
-6. Move a document to Trash. Confirm an omitted/wrong `MOVE_TO_TRASH` confirmation is rejected, the R2 object remains, Restore works, and the original object need not be re-uploaded.
-7. Move it back to Trash and enter an incorrect permanent-delete confirmation. Confirm it is rejected. Enter `DELETE`; confirm R2 object is gone and metadata is `deleted`.
-8. Create an expired active test record only through a controlled test helper, then invoke cron dry-run and real cleanup. Confirm safety mode moves it to Trash and a failure on one stubbed object does not stop other records.
-9. Repeat with `trashEnabled: false` only in test, then restore the safe default afterward.
-10. Use the NGO website server (not browser) with `X-Storage-Gateway-Key`; verify read/download work, while Trash/settings/upload endpoints reject it.
-11. Embedded bridge smoke test (same deployment, no separate bridge server): `GET <app>/api/v1/health` returns `{"status":"ok","bridge":"ready","mode":"embedded",...}`. `POST <app>/api/v1/storage/upload` with a dual-token credential and a small PDF returns `201` with `{ file, url }`; without a credential it returns JSON `401 INVALID_API_KEY` (never HTML). `GET <app>/api/v1/storage/upload` returns JSON `405 METHOD_NOT_ALLOWED`, an unknown `/api/v1/*` subpath returns JSON `404 UNKNOWN_BRIDGE_ROUTE`, and a document over ~4 MB goes through `POST .../upload/init` → `PUT` to R2 → `POST .../upload/complete` and appears in the dashboard with a Success entry in API Upload Activity.
-
-## Accessibility and mobile verification
-
-- Use keyboard only: tab through upload, filters, row actions, and dialogs; Escape should close dialogs and focus should return to the trigger.
-- Test at roughly 320px, tablet, and desktop widths. File tables should become usable cards on mobile.
-- Use a screen reader to check labels, dialog titles/descriptions, upload progress, and status notices.
-- Confirm capacity warnings include readable text/icon semantics, not color alone.
-
-## Security verification
-
-- Inspect browser network and built client chunks: no `R2_SECRET_ACCESS_KEY`, Firebase Admin private key, integration key, or cron secret may appear.
-- Verify all non-GET cookie routes reject a foreign `Origin`.
-- Verify Firestore Rules deny unauthenticated reads/writes and direct client writes.
-- Verify R2 CORS allows only intended gateway origins and headers.
-- Verify an unauthenticated request to `/api/cron/cleanup` returns `401`.
+The application intentionally keeps password-reset delivery local-token based. In non-production, `POST /api/auth/password/request` returns a reset token for local testing; production deployments should connect an organization-controlled SMTP/notification worker without changing first-party authentication or password verification.

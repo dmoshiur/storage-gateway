@@ -1,665 +1,151 @@
-# AM Storage Company — Storage Gateway API
+# Storage Gateway API
 
-Base URL examples below use `https://storage.example.org`. All responses are JSON unless `redirect=true` is explicitly requested.
-
-```json
-{ "success": true, "data": {}, "requestId": "uuid" }
-```
-
-Errors use the same stable envelope and never return internal stack traces:
+All JSON responses use this shape:
 
 ```json
-{
-  "success": false,
-  "error": {
-    "code": "FILE_NOT_FOUND",
-    "message": "The requested document was not found."
-  },
-  "requestId": "uuid"
-}
+{ "success": true, "data": {}, "requestId": "..." }
 ```
 
-Dependency failures (Firestore, Vercel Blob) additionally carry the real cause
-in `error.details`, so a failed page can be diagnosed without server access:
+Errors use:
 
 ```json
 {
   "success": false,
   "error": {
-    "code": "FILES_FETCH_FAILED",
-    "message": "Unable to load files. The file metadata store did not answer.",
-    "requestId": "uuid",
-    "details": {
-      "cause": "9 FAILED_PRECONDITION: The query requires an index…",
-      "causeCode": "FIRESTORE_FAILED_PRECONDITION",
-      "retryable": false,
-      "operation": "files/list",
-      "hint": "Missing Firestore composite index. Deploy it with: npx firebase deploy --only firestore:indexes"
-    }
-  },
-  "requestId": "uuid"
-}
-```
-
-`details` never contains credentials. The same cause is logged server-side
-against the same `requestId`.
-
-Save `requestId` when reporting an issue. API responses use `Cache-Control: no-store`.
-
-## Authentication modes
-
-### Admin dashboard API
-
-The admin browser signs in one of two ways: the shared `ADMIN_PASS` passphrase at `POST /api/auth/pass` (full administrator, no Firebase account), or Firebase email/password exchanged for a server-verified session cookie at `POST /api/auth/session`. Every dashboard route requires that verified cookie and enforces the actor role; mutation routes additionally require a same-origin request.
-
-Never construct an admin-only request based on a browser-side `isAdmin` value.
-
-### NGO website integration API
-
-The NGO main website ([gramunnayan.com](https://gramunnayan.com)) calls this same
-Vercel deployment. `AM_STORAGE_BRIDGE_URL` on the integration server is this
-app's own URL (for example `https://st.thamjj13.top`) — no separate bridge
-server exists. Two integration modes are available:
-
-1. **Recommended — through the embedded Storage Bridge.** The public bridge
-   endpoint `POST /api/v1/storage/upload` accepts multipart PDF, DOC, DOCX,
-   TXT, PPT, and PPTX documents authenticated with a **dual-token credential**
-   generated in the dashboard (**Admin → API Management**): a visible
-   **API Key ID** (`am_store_live_…`) plus an **API Secret Key**
-   (`am_sec_live_…`, displayed exactly once). The bridge
-   validates the credential against the registry, stores the document in
-   the Vercel Private Blob store, registers it, and returns a signed document URL. The same
-   credential also authorizes read-only `GET /api/files`,
-   `GET /api/files/{id}` and `GET /api/files/{id}/download`, and
-   `GET /api/v1/health` reports bridge liveness without authentication.
-
-   Three credential forms are accepted (in priority order):
-
-   ```http
-   # a) Dual-token (recommended)
-   X-AM-Storage-Key-Id: am_store_live_xxxxxx
-   X-AM-Storage-Key-Secret: am_sec_live_yyyyyy
-
-   # b) HMAC signed (secret is never sent after setup; replay-protected by
-   #    the 5-minute timestamp window). signature = HMAC-SHA256(
-   #    keySecret, "<timestamp>:<sha256hex(raw body bytes)>") in lowercase hex.
-   #    The timestamp accepts unix seconds or milliseconds.
-   X-AM-Storage-Key-Id: am_store_live_xxxxxx
-   X-AM-Storage-Timestamp: 1788888888
-   X-AM-Storage-Signature: <64-char hex>
-
-   # c) Legacy single key (pre-upgrade integrations, rotate to dual-token)
-   X-AM-Storage-Key: am_store_live_zzzzzz
-   ```
-
-   Signed mode requires the gateway to have `AM_STORAGE_MASTER_KEY` configured
-   (the secret is then stored AES-256-GCM encrypted so HMACs can be verified
-   without persisting plaintext). Revocation takes effect on the next request.
-
-   > **Upload size guidance.** Vercel functions reject request payloads above
-   > ~4.5 MB before application code runs. Send documents up to **~4 MB** with
-   > direct multipart `POST /api/v1/storage/upload`; send larger documents (up
-   > to the configured max, default 50 MB) through the presigned
-   > `POST /api/v1/storage/upload/init` → `PUT` bytes straight to Vercel Blob →
-   > `POST /api/v1/storage/upload/complete` flow. Ready-made snippets for both
-   > flows are on the dashboard **API Management** page.
-
-2. **Direct read-only gateway access** from the NGO server's own backend with:
-
-   ```http
-   X-Storage-Gateway-Key: <INTEGRATION_API_KEY>
-   ```
-
-This integration key must never be sent to the NGO website browser, committed to source, logged, or put in `NEXT_PUBLIC_*`. An integration caller can access active, non-expired metadata and request a short-lived download URL. It cannot access Trash, settings, logs, uploads, or any destructive endpoint.
-
-## Admin auth
-
-### `POST /api/auth/pass`
-
-Sign in the shared administrator with the environment passphrase alone. Requires a same-origin request and is rate limited per client IP.
-
-**Body**
-
-```json
-{ "adminPass": "shared-passphrase" }
-```
-
-**Success `200`**
-
-```json
-{
-  "success": true,
-  "data": {
-    "actor": { "uid": "shared-pass-admin", "email": null, "role": "admin" }
+    "code": "FORBIDDEN",
+    "message": "You do not have permission to perform this action.",
+    "requestId": "...",
+    "details": { "retryable": false }
   }
 }
 ```
 
-Sets the HTTP-only session cookie holding an HMAC-signed shared-pass session with full administrator access. Rotating `ADMIN_PASS` invalidates every shared-pass session. `401 ADMIN_PASS_INVALID` is returned for a wrong passphrase.
+Every request receives an `X-Request-Id` response header. A caller may provide a valid `X-Request-Id`; otherwise the server creates one. Credentials, passwords, private Blob URLs, and storage paths are never logged or serialized to clients.
 
-### `POST /api/auth/session`
+## Authentication
 
-Exchange a Firebase ID token for a server-verified session cookie.
+### Login
 
-**Body**
+`POST /api/auth/login` (alias: `POST /api/auth/session`)
 
-```json
-{ "idToken": "firebase-id-token" }
-```
-
-**Success `200`**
+Same-origin JSON body:
 
 ```json
-{
-  "success": true,
-  "data": {
-    "actor": { "uid": "firebase-uid", "email": "admin@example.org", "role": "admin" }
-  }
-}
+{ "email": "admin@example.org", "password": "a-long-password" }
 ```
 
-`401` is returned for an invalid/revoked ID token. Any user created in Firebase Authentication may sign in; the resolved role (`admin` custom claim, `ADMIN_EMAILS` bootstrap, else `viewer`) decides route-level capabilities, with `editor`/`viewer` limited to read-only access.
+On success the server creates a PostgreSQL session and sets a secure, HTTP-only, SameSite=Lax `storage_gateway_session` cookie. The session expires after seven days and is checked against account status, expiry, and revocation on every protected request.
 
-### `POST /api/auth/logout`
+### Logout and current actor
 
-Clears the session cookie and writes a `LOGOUT` audit event when a session exists. Requires same-origin browser context.
+- `POST /api/auth/logout` — revoke the current session and clear the cookie.
+- `GET /api/auth/me` — return the authenticated actor.
 
-### `GET /api/auth/me`
+### Passwords
 
-Returns the currently verified actor. Requires a valid session.
+- `POST /api/auth/password/request` with `{ "email": "..." }`. The response is intentionally generic to prevent account enumeration.
+- `POST /api/auth/password/reset` with `{ "token": "...", "newPassword": "..." }`.
+- `POST /api/auth/password/change` with `{ "currentPassword": "...", "newPassword": "..." }`.
 
-## File API
+Reset tokens are random, SHA-256 hashed in PostgreSQL, single-use, and expire in one hour. In local development a token may be returned for testing; production delivery is handled by the organization's own SMTP/notification process.
 
-### `GET /api/files`
+## Roles and users
 
-List document metadata using cursor pagination.
+Roles are enforced server-side:
 
-**Admin session query parameters**
+| Capability | admin | editor | viewer |
+| --- | --- | --- | --- |
+| Browse, preview, download | yes | yes | yes |
+| Upload and edit metadata | yes | yes | no |
+| Trash and restore | yes | yes | no |
+| Permanent delete | yes | no | no |
+| Users, settings, API keys, audit | yes | no | no |
 
-| Parameter | Values / default |
-| --- | --- |
-| `pageSize` | `1..100`, default `25` |
-| `cursor` | opaque cursor returned by a prior call |
-| `status` | `active` default; `all`, `trash`, `deleted`, `uploading`, `deleting`, `failed` |
-| `filter` | `all`, `active`, `trash`, `auto_delete`, `never_delete`, `expiring_soon`, `expired` |
-| `sort` | `newest` default, `oldest`, `largest`, `smallest`, `delete_date` |
-| `search` | up to 100 characters; searches filename/title/description/category/tags |
+Admin endpoints:
 
-Text search and relative-date filters use a bounded server-side scan (1,000 matching records) rather than exposing all records to the browser. `searchLimited: true` signals that a narrower search is needed.
+- `GET /api/users?limit=100`
+- `POST /api/users` with `{ email, password?, displayName?, role }`
+- `GET /api/users/:uid` — user audit activity
+- `PATCH /api/users/:uid` with `{ role? , disabled? }`
+- `POST /api/users/:uid/reset-password` with optional `{ password }`
+- `DELETE /api/users/:uid/sessions` — revoke all sessions
+- `DELETE /api/users/:uid` — soft-delete and disable the account
 
-**Success `200`**
+When an administrator omits a password, the server generates a temporary password and returns it once in the create/reset response. It must be transmitted to the user through a secure channel and changed immediately.
 
-```json
-{
-  "success": true,
-  "data": {
-    "files": [
-      {
-        "id": "abc123...",
-        "originalName": "annual-report-2025.pdf",
-        "title": "Annual Report 2025",
-        "description": "Annual report of the NGO",
-        "category": "Reports",
-        "tags": ["annual", "report"],
-        "mimeType": "application/pdf",
-        "extension": "pdf",
-        "size": 5242880,
-        "createdAt": "2026-09-09T11:30:00.000Z",
-        "autoDeleteEnabled": true,
-        "retentionType": "6_months",
-        "deleteAt": "2027-03-09T11:30:00.000Z",
-        "status": "active"
-      }
-    ],
-    "nextCursor": "opaque-or-null",
-    "searchLimited": false
-  }
-}
-```
+## File library
 
-`storagePath`, Blob store details, staging keys, and credentials are never returned.
+Cookie-authenticated endpoints:
 
-**Integration behavior:** status is forced to `active`; expired retention records and non-active lifecycle states are never returned.
+- `GET /api/files` — list active files with search, category, retention, status, sort, and cursor filters.
+- `POST /api/files/upload/init` — validate metadata and create a pending PostgreSQL metadata row.
+- `POST /api/files/:id/complete` — verify the private Blob object and activate the row.
+- `GET /api/files/:id` — metadata.
+- `PATCH /api/files/:id` — title, description, category, tags, and retention.
+- `POST /api/files/:id/favorite` — set favorite state.
+- `GET /api/files/:id/preview` — authenticated inline PDF stream.
+- `GET /api/files/:id/download` — authenticated attachment stream.
+- `POST /api/files/:id/restore` — restore from Trash.
+- `DELETE /api/files/:id` — move to Trash.
+- `POST /api/files/:id/permanent-delete` — permanently delete after typed confirmation.
+- `GET /api/files/trash` — Trash listing.
+- `POST /api/files/bulk` — authorized bulk operations.
+- `GET /api/files/export` — metadata export for administrators.
 
-### `GET /api/files/:id`
+The server checks the file row and caller role before every object operation. The response never includes `storage_path`, upload keys, or permanent public URLs.
 
-Return one metadata record. Admin callers can read active or Trash records; integration callers receive only active, non-expired records.
+## API keys and `/api/v1`
 
-- `404 FILE_NOT_FOUND` for hidden, deleted, failed, uploading, or unavailable records.
-
-### `POST /api/files/upload/init` (admin only)
-
-`POST /api/files/upload` is a compatibility alias for this upload-authorization step. Both routes return the same direct-to-Blob upload contract; neither accepts raw document bytes.
-
-Authorize a direct, short-lived staging upload. The document payload itself does **not** pass through this API or Vercel.
-
-**Body**
+Administrators create keys at `POST /api/api-keys`:
 
 ```json
 {
-  "originalName": "annual-report-2025.pdf",
-  "size": 5242880,
-  "mimeType": "application/pdf",
-  "title": "Annual Report 2025",
-  "description": "Annual report of the NGO",
-  "category": "Reports",
-  "tags": ["annual", "report"],
-  "retention": {
-    "autoDeleteEnabled": true,
-    "retentionType": "6_months",
-    "customDeleteAt": null
-  }
+  "name": "Website production",
+  "description": "Server-side website integration",
+  "scopes": ["files:read", "files:download"],
+  "expiresAt": null
 }
 ```
 
-`retention` is optional; when omitted, the server uses current global defaults. `customDeleteAt` is required as `YYYY-MM-DD` only when `retentionType` is `custom_date`.
+The response contains a bearer secret exactly once. Only its SHA-256 digest is stored. The server checks key existence, expiry, revocation, and scopes on every request. `PATCH /api/api-keys?rotate=true` rotates a key, and `DELETE /api/api-keys?id=<record-id>` revokes it.
 
-The server validates a supported `.pdf/.doc/.docx/.txt/.ppt/.pptx` extension, a positive declared byte size, configurable max size, and configured storage capacity before it returns a signed upload URL.
-
-**Success `201`**
-
-```json
-{
-  "success": true,
-  "data": {
-    "file": { "id": "generated-id", "status": "uploading" },
-    "uploadUrl": "https://...short-lived-signed-r2-put-url...",
-    "uploadHeaders": {
-      "Content-Type": "application/pdf",
-      "x-amz-meta-file-id": "generated-id"
-    },
-    "expiresAt": "2026-09-09T11:40:00.000Z"
-  }
-}
-```
-
-Upload the raw bytes with `PUT` and exactly the returned headers, then call completion. The Vercel Blob hosts allowed by the browser are declared in the CSP `connect-src` in `next.config.ts`.
-
-### `POST /api/files/:id/complete` (admin only)
-
-Finalize an upload after the direct Blob `PUT` returns success. Send `{}` as the JSON body.
-
-The server heads/range-reads the private staging object and checks:
-
-- supported document extension;
-- exact declared versus actual byte size;
-- expected content type (`application/pdf`, Word/PowerPoint MIME types, `text/plain`);
-- signed `x-amz-meta-file-id` ownership marker;
-- type-specific magic bytes: `%PDF-1.x` + `%%EOF` for PDF, OLE2 for DOC/PPT, ZIP for DOCX/PPTX.
-
-A successful object is copied to a random final `documents/YYYY/MM/uuid.ext` key before Firestore becomes `active`. Invalid objects are marked `failed`, audit logged, and deletion is attempted. Retry a transient `STORAGE_UNAVAILABLE` completion; the lifecycle is intentionally idempotent.
-
-### `PATCH /api/files/:id` (admin only)
-
-Update searchable metadata and/or file-specific retention.
-
-```json
-{
-  "title": "Annual Report 2025 (approved)",
-  "description": "Approved final report",
-  "category": "Reports",
-  "tags": ["annual", "approved"],
-  "retention": {
-    "autoDeleteEnabled": true,
-    "retentionType": "1_year",
-    "customDeleteAt": null
-  }
-}
-```
-
-At least one supported field is required. Retention dates are calculated using the server clock. Successful metadata/retention changes create audit records.
-
-### `DELETE /api/files/:id` (admin only)
-
-Moves an **active** document to Trash. This is a soft deletion: its private Blob object remains available for recovery until `permanentDeleteAt`. The route requires an explicit server-side confirmation body in addition to the dashboard’s accessible custom confirmation dialog:
-
-```json
-{ "confirmation": "MOVE_TO_TRASH" }
-```
-
-**Success `200`** returns the record with `status: "trash"` and a scheduled permanent deletion timestamp.
-
-### `POST /api/files/:id/restore` (admin only)
-
-Restores a Trash document to active state if the private object still exists. If elapsed date-based retention would immediately re-expire, server-side calendar policies are recalculated; an expired custom date is reset to Never (automatic deletion off) so an administrator can deliberately choose a new policy.
-
-- `409 FILE_CONTENT_UNAVAILABLE` means the private object has already gone and cannot be restored.
-
-### `POST /api/files/:id/permanent-delete` (admin only)
-
-Permanently removes a Trash object. The body must contain an exact server-side confirmation:
-
-```json
-{ "confirmation": "DELETE" }
-```
-
-The gateway first moves metadata through `deleting`, then deletes the Blob object, and only then marks the record `deleted`. Blob deletion failures return `502 DELETE_FAILED` (with the real cause in `error.details`) and metadata returns to Trash for retry when possible. If Firestore completion is interrupted, the record remains `deleting` and is safely retried by cleanup because Blob delete is idempotent.
-
-### `GET /api/files/:id/download`
-
-Serves a permitted active document. Both admin sessions and website
-integration keys can call it. Two transports are available:
-
-- `stream=true` (used by the dashboard) proxies the PDF bytes through this
-  authenticated route. The browser never receives a Blob URL at all.
-- the default returns a short-lived, single-path signed Vercel Blob `GET` URL.
-
-| Query | Default | Meaning |
-| --- | --- | --- |
-| `disposition` | `attachment` | `attachment` or `inline` |
-| `stream` | `false` | `true` streams the bytes through this route (`Content-Disposition` + `Accept-Ranges`) |
-| `redirect` | `false` | use `true` only for a browser navigation to redirect directly to the signed URL |
-
-**JSON success (`redirect=false`)**
-
-```json
-{
-  "success": true,
-  "data": {
-    "url": "https://...temporary-signed-r2-get-url...",
-    "expiresAt": "2026-09-09T11:40:00.000Z",
-    "disposition": "inline"
-  }
-}
-```
-
-When `redirect=true`, the gateway returns `302 Location: <temporary signed URL>` with `Cache-Control: no-store`. Download events are audit logged. The bucket itself remains private and no permanent URL is exposed.
-
-## Storage, settings, and audit API
-
-### `GET /api/storage` (admin only)
-
-Returns metadata-based counts and capacity information, the result of the
-initial Vercel Blob store connectivity check, and the accumulated API
-request totals from gramunnayan.com:
-
-```json
-{
-  "stats": {
-    "totalPdfCount": 347,
-    "activeFileCount": 335,
-    "trashFileCount": 12,
-    "totalStorageBytes": 8804682957,
-    "storageLimitBytes": 10737418240,
-    "activeStorageBytes": 8000000000,
-    "trashStorageBytes": 804682957,
-    "availableBytes": 1932735283,
-    "usagePercent": 82,
-    "warningLevel": "warning",
-    "expiringSoonCount": 5
-  },
-  "source": "live",
-  "r2": { "reachable": true, "latencyMs": 24, "checkedAt": "2026-09-09T11:40:00.000Z" },
-  "apiRequests": { "totalRequests": 1287, "lastRequestDate": "2026-09-09" }
-}
-```
-
-`source` is `"live"` when `stats` were computed from Firestore metadata and
-`"fallback"` when Firestore was unreachable — in that case `stats` contains
-explicitly labelled degraded metrics (`totalPdfCount: 0`, `totalStorageBytes: 0`)
-so the dashboard always renders. The Blob store
-probe is bounded and wrapped: any failure resolves to
-`blob.reachable: false` with the real error text instead of an error response. This route therefore
-returns `200` for all degraded-dependency states; only authentication
-failures produce `4xx`.
-
-### `GET /api/health` (admin only)
-
-Dashboard system health: gateway runtime plus a live probe of the FastAPI
-bridge (`GET <BRIDGE_URL>/health`, bounded 4 s). The probe never throws; it
-degrades to `bridge.reachable: false`.
-
-```json
-{
-  "systemStatus": "operational",
-  "gateway": { "runtime": "nodejs", "uptimeSeconds": 3600, "checkedAt": "2026-09-09T11:40:00.000Z" },
-  "bridge": { "configured": true, "reachable": true, "latencyMs": 31, "version": "3.1.0", "checkedAt": "2026-09-09T11:40:00.000Z" }
-}
-```
-
-`systemStatus` is `"operational"` when the bridge is reachable (or no bridge
-origin is configured for this deployment) and `"degraded"` when a configured
-bridge does not answer.
-
-### `GET /api/api-logs` (admin only)
-
-Recent API (bridge) upload attempts for the dashboard's "API Upload Activity"
-widget. Query: `limit` (`1..50`, default `5`). The bridge records both
-successful and rejected attempts, so failures carry their `failureCode`.
-
-```json
-{
-  "logs": [
-    {
-      "id": "…",
-      "keyId": "am_store_live_xxxxxx",
-      "filename": "annual-report.pdf",
-      "sizeBytes": 432100,
-      "status": "success",
-      "failureCode": null,
-      "requestId": "…",
-      "timestamp": "2026-09-09T11:41:02.000Z"
-    }
-  ]
-}
-```
-
-### `GET /api/settings` (admin only)
-
-Returns the current settings (or documented safe defaults if `settings/app` has not yet been persisted).
-
-### `PATCH /api/settings` (admin only)
-
-All fields below are required to avoid accidental partial/implicit changes:
-
-```json
-{
-  "maxPdfSizeBytes": 52428800,
-  "storageLimitBytes": 10737418240,
-  "defaultAutoDelete": false,
-  "defaultRetentionType": "6_months",
-  "trashEnabled": true,
-  "trashRetentionDays": 30,
-  "signedUrlExpirySeconds": 600,
-  "warningThresholdPercent": 80,
-  "criticalThresholdPercent": 90,
-  "applyToExisting": false
-}
-```
-
-`criticalThresholdPercent` must exceed `warningThresholdPercent`. `applyToExisting` is false by default; when true, all active files explicitly receive the selected default policy and new server-calculated dates. The change is audit logged.
-
-### `GET /api/audit-logs` (admin only)
-
-Query: `pageSize` (`1..100`, default `50`) and optional opaque `cursor`.
-
-Returns sorted audit records such as `LOGIN`, `UPLOAD`, `DOWNLOAD`, `UPDATE_METADATA`, `CHANGE_RETENTION`, `MOVE_TO_TRASH`, `RESTORE`, `PERMANENT_DELETE`, `AUTO_DELETE`, `SETTINGS_CHANGE`, and `CLEANUP_FAILURE`. Logs intentionally exclude passwords, tokens, secrets, signed URLs, and document contents.
-
-### `POST /api/cleanup` (admin only)
-
-Runs the same cleanup process as cron through a verified admin session. It is rate-limited to five requests per administrator per hour and returns a summary:
-
-```json
-{
-  "checked": 25,
-  "movedToTrash": 21,
-  "permanentlyDeleted": 2,
-  "staleUploadsRemoved": 1,
-  "failed": 1,
-  "skipped": 3,
-  "lockAcquired": true,
-  "dryRun": false
-}
-```
-
-## Scheduler endpoint
-
-### `GET|POST /api/cron/cleanup`
-
-This endpoint is intentionally **not** session- or public-key authenticated. Only a scheduler with the secret may call it:
+Use:
 
 ```http
-Authorization: Bearer <CRON_SECRET>
+Authorization: Bearer ng_live_<secret>
 ```
 
-Optional query: `dryRun=true` performs no mutations and is useful for a controlled scheduler smoke test.
+The embedded versioned API includes:
 
-A concurrent job returns `202` with `lockAcquired: false`; it does not run duplicate deletion work.
+- `GET /api/v1/health`
+- `GET /api/v1/files`
+- `GET /api/v1/files/:id`
+- `GET /api/v1/files/:id/download`
+- `PATCH /api/v1/files/:id`
+- `DELETE /api/v1/files/:id`
+- `POST /api/v1/files/:id/restore`
+- `POST /api/v1/storage/upload`
+- `POST /api/v1/storage/upload/init`
+- `POST /api/v1/storage/upload/complete`
 
-## Website integration example
+A missing scope returns `403 INSUFFICIENT_SCOPE`; an invalid, expired, or revoked key returns `401 INVALID_API_KEY`. Key registry/database failures return `503 KEY_SERVICE_UNAVAILABLE`, never a misleading bad-key response.
 
-This must run on the NGO website’s **server**, for example a Next.js Route Handler or server component — never in a client component:
+## Rate limiting, audit, and status codes
 
-```ts
-// NGO main website server-only module
-const gateway = process.env.DOCUMENT_GATEWAY_URL!;
-const key = process.env.DOCUMENT_GATEWAY_INTEGRATION_KEY!;
+Login, password reset, user management, uploads, and API-key operations are rate limited. API requests and upload attempts are persisted in PostgreSQL with request IDs. Security-sensitive actions write immutable-style audit rows. Common statuses are:
 
-export async function listNgoReports() {
-  const response = await fetch(`${gateway}/api/files?search=report&pageSize=25`, {
-    headers: { "X-Storage-Gateway-Key": key },
-    cache: "no-store",
-  });
-  if (!response.ok) throw new Error("The document gateway is unavailable.");
-  const payload = await response.json();
-  return payload.data.files;
-}
+- `200` successful read/update
+- `201` created user, key, or file
+- `400` invalid input or lifecycle transition
+- `401` missing/invalid session or API key
+- `403` valid identity without permission or invalid origin
+- `404` missing resource
+- `409` conflict, duplicate user, or invalid state transition
+- `429` rate limit exceeded
+- `500` unexpected application failure
+- `502` private Blob operation failed
+- `503` PostgreSQL, Blob, or configuration dependency unavailable
 
-export async function getDocumentDownloadUrl(fileId: string) {
-  const response = await fetch(`${gateway}/api/files/${encodeURIComponent(fileId)}/download?disposition=inline`, {
-    headers: { "X-Storage-Gateway-Key": key },
-    cache: "no-store",
-  });
-  if (!response.ok) return null;
-  const payload = await response.json();
-  return payload.data.url; // temporary only; do not persist it
-}
-```
+## Retention and cron
 
-If the public website itself serves visitors, add its own authorization rules before it calls the gateway. A gateway integration key grants the NGO website server access to all active metadata, so it must be kept server-side and scoped operationally.
-
-## Storage Bridge endpoints
-
-These public bridge routes run in this same deployment and authenticate with
-the dashboard-managed dual-token / HMAC / legacy credential (see
-[Authentication modes](#authentication-modes)). Every upload attempt — success
-or failure — is logged to the dashboard's API Upload Activity feed. Responses
-carry CORS headers for the configured `CORS_ORIGINS`.
-
-### `GET /api/v1/health` (no authentication)
-
-Liveness probe for the integration server. Returns the unenveloped payload
-`{ "status": "ok", "service": "AM Storage Company", "bridge": "ready", "mode": "embedded", "version": "…", "auth": "dual-token|hmac|legacy", "r2Configured": true }`.
-
-### `POST /api/v1/storage/upload`
-
-Multipart form data with a `file` field (PDF, DOC, DOCX, TXT, PPT, or PPTX; up
-to ~4 MB) and optional `title`, `description`, `category`, `tags`
-(comma-separated or JSON array, max 20 × 32 chars). Success responds `201`:
-
-```json
-{
-  "success": true,
-  "data": {
-    "file": { "id": "…", "originalName": "annual-report.pdf", "status": "active" },
-    "url": "https://…signed document URL…",
-    "expiresAt": "2026-09-09T13:00:00.000Z",
-    "filename": "annual-report.pdf",
-    "size": 432100
-  },
-  "requestId": "…"
-}
-```
-
-The signed `url` (inline disposition, `AM_STORAGE_SIGNED_URL_EXPIRY_SECONDS`
-lifetime) is what the NGO site shows its visitors. Other methods on this path
-return `405 METHOD_NOT_ALLOWED`.
-
-### `POST /api/v1/storage/upload/init`
-
-Step 1 of the presigned flow for larger documents (up to the configured max).
-JSON body: `{ originalName, size, mimeType?, title?, description?, category?, tags? }`.
-Success responds `201` with `{ file, uploadUrl, uploadHeaders, directUploadRecommended, expiresAt }`.
-The integration then `PUT`s the exact bytes to `uploadUrl` with the returned
-`uploadHeaders` — bytes stream straight
-to the private Blob store.
-
-### `POST /api/v1/storage/upload/complete`
-
-Step 3 of the presigned flow. JSON body: `{ fileId }` from the init response.
-The staged object is verified (size, content type, ownership, magic bytes),
-published to its final key, and registered; only the credential that started
-the upload may complete it (`403` otherwise). Success responds `200` with the
-same `{ file, url, expiresAt, filename, size }` shape as a direct upload, and
-repeating the call for an already-active file mints a fresh URL (idempotent).
-
-## Storage Bridge internal endpoints
-
-These routes are **server-to-server only** and must never be called from a
-browser. They authenticate with the `X-Storage-Gateway-Key` header (the shared
-`INTEGRATION_API_KEY`) and exist solely for the optional legacy standalone
-FastAPI bridge — the embedded bridge above does not use them:
-
-### `POST /api/internal/bridge/verify-key`
-
-Accepts one of three payloads (verified against the Firestore registry):
-
-```json
-{ "key": "am_store_live_…" }
-```
-
-```json
-{ "mode": "dual_token", "keyId": "am_store_live_…", "secret": "am_sec_live_…" }
-```
-
-```json
-{ "mode": "signature", "keyId": "am_store_live_…", "timestamp": 1788888888, "signature": "<64-char hex>", "bodyHash": "<sha256hex of raw body>" }
-```
-
-Dual-token mode performs a constant-time SHA-256 digest comparison. Signature
-mode decrypts the stored secret (AES-256-GCM, requires `AM_STORAGE_MASTER_KEY`),
-recomputes `HMAC-SHA256(secret, "<timestamp>:<bodyHash>")` in constant time,
-and rejects timestamps outside the ±5-minute skew window (replay protection).
-The timestamp accepts unix seconds or milliseconds.
-A successful check refreshes `lastUsedAt` and increments the per-day request
-counter shown on the dashboard. Responds `200` with
-`{ "valid": true, "keyId": "…" }` or `{ "valid": false, "keyId": null }` —
-transport/upstream failures raise `5xx`, never a false rejection.
-
-### `POST /api/internal/bridge/upload-logs`
-
-Body: `{ keyId, filename, sizeBytes, status: "success" | "failed", failureCode, requestId, timestamp }`
-(ISO-8601 timestamp). Records one bridge upload attempt for the dashboard's
-API activity feed and keeps the collection capped at the 50 newest entries.
-Responds `200` with `{ "recorded": true }`. The bridge calls this
-best-effort — a failure here never changes the upload outcome.
-
-### `POST /api/internal/bridge/files`
-
-Body includes the final Blob pathname (`pdfs/YYYY/MM/<uuid>.pdf|doc|docx|txt|ppt|pptx`),
-validated document metadata (`originalName`, optional `title`/`description`/`category`/`tags`,
-plus `mimeType`/`extension`), and `size`. Enforces the configured max document size and storage
-limit, creates an `active` document, and writes a `BRIDGE_UPLOAD` audit event. Responds `201`
-with the serialized file record.
-
-## Common errors
-
-| Status / code | Meaning |
-| --- | --- |
-| `400 VALIDATION_ERROR` | Input/query/body did not match schema |
-| `415 UNSUPPORTED_MEDIA_TYPE` | A JSON control-plane endpoint received a non-JSON body |
-| `400 INVALID_FILE_TYPE` / `INVALID_DOCUMENT` | File did not pass document validation |
-| `401 UNAUTHENTICATED` / `SESSION_EXPIRED` | Login/session missing or invalid |
-| `401 INVALID_INTEGRATION_KEY` | Website key missing/incorrect |
-| `401 INVALID_API_KEY` | Bridge credential missing, revoked, unknown, or signature/timestamp invalid |
-| `503 KEY_SERVICE_UNAVAILABLE` | Bridge could not reach the key registry |
-| `503 SIGNATURE_VERIFICATION_UNAVAILABLE` | HMAC signed mode used but the key was created without a master key |
-| `403 ACCOUNT_NOT_PERMITTED` / `FORBIDDEN` | Identity lacks the required server-side role |
-| `403 INVALID_ORIGIN` | Cross-origin cookie mutation rejected |
-| `404 FILE_NOT_FOUND` | Document does not exist or is intentionally hidden |
-| `409 STORAGE_LIMIT_EXCEEDED` | New upload would exceed configured capacity |
-| `409 FILE_CONTENT_UNAVAILABLE` | Trash object cannot be recovered |
-| `413 FILE_TOO_LARGE` | Exceeds configured document size limit |
-| `429 RATE_LIMITED` | Slow down and retry later |
-| `502 STORAGE_UNAVAILABLE` / `DELETE_FAILED` | Blob operation needs retry; the real cause is in `error.details` and in the server logs |
-| `503 SERVICE_CONFIGURATION_ERROR` | Deployment has missing server configuration |
+`GET /api/cron/cleanup` requires `Authorization: Bearer <CRON_SECRET>` and is scheduled daily by `vercel.json`. It uses PostgreSQL locking, per-file failure isolation, private Blob deletion, and audit records. Administrators may call `POST /api/cleanup` for a manual run; the cron secret is never exposed to the browser.

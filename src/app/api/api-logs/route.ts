@@ -1,7 +1,8 @@
 import { apiRoute } from "@/lib/api/route";
 import { success } from "@/lib/api/response";
+import { toServiceFailure } from "@/lib/api/failures";
 import { requireAdminRequest } from "@/lib/security/request-auth";
-import { getRecentUploadLogs } from "@/lib/firestore/api-metrics";
+import { getRecentUploadLogs } from "@/lib/db/api-metrics";
 
 export const runtime = "nodejs";
 
@@ -15,6 +16,18 @@ export async function GET(request: Request) {
     await requireAdminRequest(request, "read_files");
     const requested = Number(new URL(request.url).searchParams.get("limit") ?? 5);
     const limit = Number.isFinite(requested) && requested > 0 ? Math.min(50, Math.trunc(requested)) : 5;
-    return success({ logs: await getRecentUploadLogs(limit) }, requestId);
+    try {
+      return success({ logs: await getRecentUploadLogs(limit) }, requestId);
+    } catch (error) {
+      throw toServiceFailure({
+        status: 503,
+        code: "API_ACTIVITY_UNAVAILABLE",
+        message: "API upload activity could not be read from PostgreSQL. Please retry shortly.",
+        cause: error,
+        operation: "api-logs/list",
+        area: "database",
+        requestId,
+      });
+    }
   }, { route: "api-logs" });
 }

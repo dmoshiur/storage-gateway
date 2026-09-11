@@ -3,11 +3,9 @@ export class ApiError extends Error {
   readonly code: string;
   readonly fields?: Record<string, string>;
   /**
-   * Machine-readable context about *why* the request failed: the underlying
-   * dependency error code/message, whether a retry can succeed, and an
-   * operator hint. This is what keeps a 503 from being an opaque
-   * "something went wrong" — the real cause travels with the response
-   * (never credentials, never tokens; see `describeFailure`).
+   * Internal machine-readable context for server logs and trusted callers.
+   * `failure()` deliberately does not serialize this field because dependency
+   * messages can contain infrastructure details.
    */
   readonly details?: Record<string, string | number | boolean>;
 

@@ -25,7 +25,6 @@ interface StoragePayload {
     expiringSoonCount: number;
     pendingUploadBytes: number;
   };
-  source: "live" | "fallback";
   blob: { reachable: boolean; latencyMs: number };
 }
 
@@ -84,13 +83,6 @@ export default function OverviewPage() {
           </button>
         )}
       </div>
-      {storage.data.source === "fallback" && (
-        <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2.5 text-sm text-amber-800 dark:text-amber-200" role="status">
-          Live storage metrics are temporarily unavailable. Displayed totals are degraded and not authoritative; retry to reconnect.
-          <button type="button" className="btn-ghost btn-sm ml-2 align-middle" onClick={storage.refresh}>Retry</button>
-        </div>
-      )}
-
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Stat label="Total files" value={formatNumber(stats.activeFileCount)} detail={`${formatNumber(stats.totalPdfCount)} including Trash`} icon={<Files className="h-4 w-4" />} />
         <Stat label="Storage used" value={formatBytes(stats.totalStorageBytes)} detail={`${stats.usagePercent}% of ${formatBytes(stats.storageLimitBytes)}`} icon={<Warehouse className="h-4 w-4" />} />

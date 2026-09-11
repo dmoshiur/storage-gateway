@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requestIdFrom } from "@/lib/api/response";
+import { withBridgeCors } from "@/lib/bridge/upload";
 
 /**
  * JSON diagnostic for unknown `/api/v1/*` subpaths.
@@ -11,7 +12,7 @@ import { requestIdFrom } from "@/lib/api/response";
  * `GET /api/v1/health` for liveness. Anything else under `/api/v1/*` lands
  * here with a structured JSON error instead of the default Next.js HTML 404.
  */
-export function bridgeRouteNotAtGateway(request: Request): NextResponse {
+export function bridgeRouteNotAtGateway(request: Request): Response {
   const requestId = requestIdFrom(request);
   let path = "";
   try {
@@ -19,7 +20,7 @@ export function bridgeRouteNotAtGateway(request: Request): NextResponse {
   } catch {
     path = "";
   }
-  return NextResponse.json(
+  return withBridgeCors(NextResponse.json(
     {
       success: false,
       error: {
@@ -40,6 +41,7 @@ export function bridgeRouteNotAtGateway(request: Request): NextResponse {
         "Cache-Control": "no-store",
         "Content-Type": "application/json",
       },
-    },
+    }),
+    request,
   );
 }

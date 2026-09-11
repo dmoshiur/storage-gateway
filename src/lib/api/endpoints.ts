@@ -67,13 +67,13 @@ export const V1_ENDPOINTS: EndpointDef[] = [
     method: "POST",
     path: "/api/v1/files",
     scope: "files:upload",
-    summary: "Upload a file",
-    description: "Multipart upload of a single document (PDF, DOC, DOCX, TXT, PPT, PPTX). Files larger than ~4.5 MB should use the presigned flow.",
+    summary: "Upload a PDF",
+    description: "Multipart upload of a single PDF. Files larger than ~4.5 MB should use the presigned flow.",
     params: [
       { name: "Authorization", in: "header", required: true, description: "Bearer <API_KEY>" },
     ],
     requestBody: `multipart/form-data
-  file        (required) the document bytes
+  file        (required) the PDF bytes
   title       (optional) display title
   description (optional)
   category    (optional)
@@ -89,7 +89,7 @@ export const V1_ENDPOINTS: EndpointDef[] = [
   "requestId": "req_…"
 }`,
     errorResponses: [
-      { status: 400, code: "INVALID_DOCUMENT", description: "The file is not a valid document." },
+      { status: 400, code: "INVALID_DOCUMENT", description: "The file is not a valid PDF." },
       { status: 401, code: "INVALID_API_KEY", description: "Missing or invalid bearer key." },
       { status: 403, code: "INSUFFICIENT_SCOPE", description: "Key lacks files:upload." },
       { status: 409, code: "STORAGE_LIMIT_EXCEEDED", description: "Storage quota exceeded." },
@@ -131,7 +131,7 @@ export const V1_ENDPOINTS: EndpointDef[] = [
   "description": "Filed with the board",
   "category": "Reports",
   "tags": ["annual", "board"],
-  "retention": { "autoDeleteEnabled": false }
+  "retention": { "autoDeleteEnabled": false, "retentionType": "never", "customDeleteAt": null }
 }`,
     responseExample: `{
   "success": true,

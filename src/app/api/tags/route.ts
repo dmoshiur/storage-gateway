@@ -2,7 +2,7 @@ import { apiRoute } from "@/lib/api/route";
 import { success } from "@/lib/api/response";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
-import { getTagUsage } from "@/lib/firestore/categories";
+import { getTagUsage } from "@/lib/db/categories";
 
 export const runtime = "nodejs";
 

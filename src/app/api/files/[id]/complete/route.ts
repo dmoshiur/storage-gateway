@@ -13,9 +13,9 @@ import {
   markUploadOrphaned,
   requireFileById,
   serializeFile,
-} from "@/lib/firestore/files";
+} from "@/lib/db/files";
 import { toServiceFailure } from "@/lib/api/failures";
-import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
+import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
 import { getStorageService } from "@/lib/storage";
 import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
 import { assertValidatedBlobDocument } from "@/lib/validation/documents";
@@ -31,6 +31,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const id = requireRouteId((await context.params).id);
     const body = await parseJsonOptional(request, completeUploadSchema);
     const file = await requireFileById(id);
+    if (file.uploadedBy !== actor.uid && actor.role !== "admin") throw new ApiError(403, "UPLOAD_NOT_OWNED", "This upload is assigned to a different account.");
     if (file.status === "active") return success({ file: serializeFile(file), alreadyCompleted: true }, requestId);
     if (file.status !== "uploading") throw new ApiError(409, "UPLOAD_NOT_PENDING", "This upload is no longer awaiting completion.");
 
@@ -54,7 +55,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       if (isApiError(error) && VALIDATION_CODES.has(error.code)) {
         try { await storage.delete(objectPath); } catch { /* stale upload cleanup will retry if needed */ }
         await markUploadFailed(file.id, error.code);
-        await writeAuditLogSafely({ action: "UPLOAD_FAILED", actor: auditActorFrom(actor), fileId: file.id, fileName: file.originalName, details: { reason: error.code } });
+        await writeAuditLogSafely({ action: "UPLOAD_FAILED", actor: auditActorFrom(actor), fileId: file.id, fileName: file.originalName, details: { reason: error.code }, requestId });
         throw error;
       }
       if (isApiError(error)) throw error;
@@ -72,7 +73,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       if (contentHash) await attachBlobIdentity(id, { contentHash });
       active = await activateUpload(id);
     } catch (error) {
-      // The PDF bytes are already in the private Blob store; only the Firestore
+      // The PDF bytes are already in the private Blob store; only the PostgreSQL
       // metadata write failed. That is an ORPHAN, not a failed upload: the
       // record stays `uploading` (so `/complete` can be retried without
       // re-uploading the bytes), is flagged for the operator, and is swept by
@@ -84,6 +85,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         fileId: id,
         fileName: file.originalName,
         details: { reason: "METADATA_FINALIZE_FAILED", orphaned: true, retryable: true },
+        requestId,
       });
       throw toServiceFailure({
         status: 503,
@@ -91,7 +93,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         message: "The document reached private storage, but its metadata could not be saved. Retry — the uploaded bytes are kept.",
         cause: error,
         operation: "files/upload/complete:metadata",
-        area: "firestore",
+        area: "database",
         requestId,
         context: { fileId: id, storagePath: file.storagePath, orphaned: true, retryable: true },
       });
@@ -101,7 +103,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       const existing = await findActiveFileByContentHash(contentHash);
       if (existing && existing.id !== active.id) duplicateOf = { id: existing.id, originalName: existing.originalName };
     }
-    await writeAuditLogSafely({ action: "UPLOAD", actor: auditActorFrom(actor), fileId: active.id, fileName: active.originalName, details: { size: active.size } });
+    await writeAuditLogSafely({ action: "UPLOAD", actor: auditActorFrom(actor), fileId: active.id, fileName: active.originalName, details: { size: active.size }, requestId });
     emitWebhookEvent("file.uploaded", { fileId: active.id, fileName: active.originalName, size: active.size });
     return success({ file: serializeFile(active), duplicateOf }, requestId);
   }, { route: "files/upload/complete" });

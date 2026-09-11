@@ -3,9 +3,9 @@ import { apiRoute, requireRouteId } from "@/lib/api/route";
 import { success } from "@/lib/api/response";
 import { parseQuery } from "@/lib/api/body";
 import { ApiError } from "@/lib/api/errors";
-import { recordFileAccess, requireFileById } from "@/lib/firestore/files";
-import { getSettings } from "@/lib/firestore/settings";
-import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
+import { recordFileAccess, requireFileById } from "@/lib/db/files";
+import { getSettings } from "@/lib/db/settings";
+import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
 import { getStorageService } from "@/lib/storage";
 import { streamStoredFile } from "@/lib/files/serve";
 import { requireReadActor } from "@/lib/security/request-auth";
@@ -25,7 +25,7 @@ const previewQuerySchema = z.object({
 
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
   return apiRoute(request, async (requestId) => {
-    const actor = await requireReadActor(request);
+    const actor = await requireReadActor(request, "files:download");
     enforceRateLimit(`files:preview:${actor.type}:${actor.uid}`, actor.type === "integration" ? 120 : 240);
     const query = parseQuery(Object.fromEntries(new URL(request.url).searchParams.entries()), previewQuerySchema);
     const file = await requireFileById(requireRouteId((await context.params).id));
@@ -41,7 +41,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
         requestId,
       });
       await recordFileAccess(file.id, "preview");
-      await writeAuditLogSafely({ action: "PREVIEW", actor: auditActorFrom(actor), fileId: file.id, fileName: file.originalName, details: { via: "stream" } });
+      await writeAuditLogSafely({ action: "PREVIEW", actor: auditActorFrom(actor), fileId: file.id, fileName: file.originalName, details: { via: "stream" }, requestId });
       return response;
     }
 
@@ -54,7 +54,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
       contentType: file.mimeType,
     });
     await recordFileAccess(file.id, "preview");
-    await writeAuditLogSafely({ action: "PREVIEW", actor: auditActorFrom(actor), fileId: file.id, fileName: file.originalName });
+    await writeAuditLogSafely({ action: "PREVIEW", actor: auditActorFrom(actor), fileId: file.id, fileName: file.originalName, requestId });
     if (query.redirect === "true") {
       const response = Response.redirect(url, 302);
       response.headers.set("Cache-Control", "no-store");

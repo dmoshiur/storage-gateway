@@ -11,6 +11,8 @@ import { apiRoute } from "@/lib/api/route";
 import { getBlobStoreConfig } from "@/lib/env";
 import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
+import { getUploadingFileByStoragePath } from "@/lib/db/files";
+import { logger } from "@/lib/logging/logger";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,19 +47,12 @@ export const maxDuration = 30;
 const EVENT_TOKEN = "blob.generate-presigned-url";
 const EVENT_COMPLETED = "blob.upload-completed";
 const MAX_PATHNAME_LENGTH = 950;
-const ALLOWED_PATHNAME_PREFIXES = ["pdfs/", "uploads/"];
+const ALLOWED_PATHNAME_PREFIXES = ["pdfs/"];
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 const DELEGATION_VALIDITY_MS = 60 * 60 * 1000; // signed token lives 1h
 const URL_VALIDITY_MS = 10 * 60 * 1000; // presigned URL lives 10min
 
-const ALLOWED_CONTENT_TYPES = [
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "text/plain",
-  "application/vnd.ms-powerpoint",
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-];
+const ALLOWED_CONTENT_TYPES = ["application/pdf"];
 
 /** Timeouts are env-overridable so tests can run them in milliseconds. */
 function positiveIntEnv(name: string, fallback: number): number {
@@ -153,11 +148,13 @@ async function signPutDelegationToken(pathname: string) {
         "Signing the upload token timed out. The Vercel Blob API (/signed-token) did not respond — please retry.",
       );
     }
-    // Surface OIDC/token misconfiguration with an actionable message.
+    logger.error("Vercel Blob upload-token signing failed", {
+      error: error instanceof Error ? error.message : "unknown",
+    });
     throw new ApiError(
       502,
       "BLOB_SIGNING_FAILED",
-      `Signing the upload token failed: ${error instanceof Error ? error.message : "unknown error"}`,
+      "The private Blob upload token could not be generated. Please retry shortly.",
     );
   } finally {
     clearTimeout(timer);
@@ -187,7 +184,7 @@ function payloadFromPresignedUrl(presignedUrl: string): PresignedUrlPayload {
 
 /** Audit-log webhook completions (signature is verified by the SDK before this runs). */
 async function logUploadCompleted(payload: {
-  blob: { pathname?: string; url?: string };
+  blob: { pathname?: string };
   tokenPayload?: string | null;
 }): Promise<void> {
   try {
@@ -197,7 +194,6 @@ async function logUploadCompleted(payload: {
         level: "info",
         message: "Blob presigned upload completed",
         pathname: payload.blob?.pathname ?? null,
-        url: payload.blob?.url ?? null,
         fileId: typeof parsed.fileId === "string" ? parsed.fileId : null,
       }),
     );
@@ -255,6 +251,10 @@ export async function POST(request: Request) {
 
       const { pathname, multipart } = event.payload;
       assertUploadPathname(pathname);
+      const pendingFile = await getUploadingFileByStoragePath(pathname, actor.uid);
+      if (!pendingFile) {
+        throw new ApiError(403, "UPLOAD_NOT_OWNED", "This upload destination is not assigned to your account.");
+      }
       if (multipart) {
         throw new ApiError(
           400,

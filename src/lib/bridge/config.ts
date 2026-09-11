@@ -3,10 +3,8 @@ import "server-only";
 /**
  * Runtime configuration for the embedded Storage Bridge.
  *
- * The bridge runs inside this same Next.js deployment on Vercel (no separate
- * FastAPI host is required), so every value below is read from the Vercel
- * project's environment variables. The names mirror the historical standalone
- * bridge so existing operator runbooks keep working.
+ * The bridge runs inside this same Next.js deployment on Vercel. Every value
+ * below is read from the Vercel project's environment variables.
  */
 
 export const DEFAULT_BRIDGE_CORS_ORIGINS = ["https://gramunnayan.com", "https://www.gramunnayan.com"];
@@ -55,38 +53,4 @@ export function getBridgeSignedUrlExpirySeconds(): number {
 /** Browser origins allowed to call the bridge (server-to-server calls are unaffected). */
 export function getBridgeCorsOrigins(): string[] {
   return envList("CORS_ORIGINS", DEFAULT_BRIDGE_CORS_ORIGINS);
-}
-
-/**
- * Optional comma-separated static keys accepted without a registry round-trip
- * (self-hosted/offline mode). Dashboard-managed keys are always verified
- * against the Firestore registry.
- */
-export function getStaticBridgeKeys(): string[] {
-  return (process.env.AM_STORAGE_KEYS ?? "")
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
-}
-
-/** True when the legacy external-bridge origin points at this same deployment. */
-export function bridgeUrlPointsAtRequest(request: Request, bridgeUrl: string): boolean {
-  let target: URL;
-  try {
-    target = new URL(bridgeUrl);
-  } catch {
-    return false;
-  }
-  const hostCandidates = [
-    request.headers.get("x-forwarded-host"),
-    request.headers.get("host"),
-  ]
-    .filter((value): value is string => Boolean(value))
-    .map((value) => value.split(",")[0].trim().toLowerCase());
-  try {
-    hostCandidates.push(new URL(request.url).host.toLowerCase());
-  } catch {
-    // request.url is always absolute in Next.js; ignore unexpected shapes.
-  }
-  return hostCandidates.some((host) => host === target.host.toLowerCase());
 }

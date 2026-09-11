@@ -1,7 +1,7 @@
 import "server-only";
 
-import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
-import { acquireCleanupLock, releaseCleanupLock } from "@/lib/firestore/cleanup-lock";
+import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
+import { acquireCleanupLock, releaseCleanupLock } from "@/lib/db/cleanup-lock";
 import {
   beginActivePermanentDeletion,
   beginPermanentDeletion,
@@ -19,13 +19,15 @@ import {
   moveFileToTrash,
   revertActivePermanentDeletion,
   revertPermanentDeletion,
-} from "@/lib/firestore/files";
-import { getSettings } from "@/lib/firestore/settings";
-import { getStorageStats } from "@/lib/firestore/stats";
-import { createNotificationSafe, pruneNotifications } from "@/lib/firestore/notifications";
+} from "@/lib/db/files";
+import { getSettings } from "@/lib/db/settings";
+import { getStorageStats } from "@/lib/db/stats";
+import { createNotificationSafe, pruneNotifications } from "@/lib/db/notifications";
 import { logger } from "@/lib/logging/logger";
 import { isDueForAutomaticCleanup, isDueForTrashExpiry, isStaleUpload } from "@/lib/cleanup/eligibility";
 import { getStorageService } from "@/lib/storage";
+import { pruneDatabaseRateLimits } from "@/lib/security/rate-limit";
+import { pruneExpiredAuthData } from "@/lib/db/users";
 import type { FileDocument } from "@/types/file";
 
 const SYSTEM_ACTOR = { uid: "scheduled-cleanup", email: null, type: "system" as const };
@@ -169,7 +171,11 @@ export async function runCleanup(options: { dryRun?: boolean } = {}): Promise<Cl
       }
     }
 
-    if (!options.dryRun) await emitRunNotifications(summary);
+    if (!options.dryRun) {
+      await pruneDatabaseRateLimits().catch(() => undefined);
+      await pruneExpiredAuthData().catch(() => undefined);
+      await emitRunNotifications(summary);
+    }
 
     // Finalized records with a leftover staging key are safe to clean without touching the real document.
     for (const file of activeStaging) {
@@ -194,7 +200,7 @@ export async function runCleanup(options: { dryRun?: boolean } = {}): Promise<Cl
     if (!options.dryRun) {
       try { await pruneNotifications(); } catch { /* best-effort */ }
     }
-    await releaseCleanupLock({ ...summary }, releaseError);
+    if (summary.lockAcquired) await releaseCleanupLock({ ...summary }, releaseError);
   }
 }
 

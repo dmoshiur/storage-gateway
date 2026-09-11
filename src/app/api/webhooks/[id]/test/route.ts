@@ -5,7 +5,7 @@ import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { getWebhookWithSecret } from "@/lib/webhooks/store";
 import { sendTestEvent } from "@/lib/webhooks/dispatch";
-import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
+import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
 
 export const runtime = "nodejs";
 
@@ -22,6 +22,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       action: "WEBHOOK_TESTED",
       actor: auditActorFrom(actor),
       details: { webhookId: id, ok: result.ok },
+      requestId,
     });
     return success({ delivered: result.ok, statusCode: result.statusCode }, requestId);
   }, { route: "webhooks/test" });

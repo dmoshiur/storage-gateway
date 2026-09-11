@@ -1,9 +1,9 @@
 import { z } from "zod";
 
 /**
- * Server-to-server bridge payloads. These routes are only reachable with the
- * INTEGRATION_API_KEY header and are never called from a browser, so the
- * payloads deliberately stay small and strictly typed.
+ * Server-to-server bridge payloads. These routes require a PostgreSQL-backed
+ * API key and are never called from a browser, so payloads stay small and
+ * strictly typed.
  */
 
 /** Matches the final object layout produced by the app and both bridge flavors. */
@@ -12,7 +12,7 @@ export const bridgeStorageKeySchema = z
   .min(1)
   .max(300)
   .regex(
-    /^(?:documents|pdfs)\/\d{4}\/\d{2}\/[A-Za-z0-9_-]{8,200}\.(?:pdf|doc|docx|txt|ppt|pptx)$/,
+    /^pdfs\/\d{4}\/\d{2}\/[A-Za-z0-9_-]{8,200}\.pdf$/,
     "The storage key is invalid.",
   );
 
@@ -25,13 +25,9 @@ const bridgeKeyId = z
   .trim()
   .regex(/^am_store_live_[A-Za-z0-9_-]{8,32}$/, "The API key id is invalid.");
 
-const sha256Hex = z.string().trim().regex(/^[A-Fa-f0-9]{64}$/, "The value must be a SHA-256 hex digest.");
-
 /**
- * Key verification payloads accepted from the bridge:
- * - dual_token: visible key id + secret (digest-verified)
- * - signature : visible key id + HMAC-SHA256 signature + timestamp + body hash
- * - legacy    : single raw `am_store_live_…` key (pre-upgrade integrations)
+ * Key verification payloads accepted from the bridge. Both forms are checked
+ * against one-way digests in PostgreSQL; raw secrets are never persisted.
  */
 export const bridgeVerifyKeySchema = z.union([
   z
@@ -39,15 +35,6 @@ export const bridgeVerifyKeySchema = z.union([
       mode: z.literal("dual_token"),
       keyId: bridgeKeyId,
       secret: z.string().min(24).max(200),
-    })
-    .strict(),
-  z
-    .object({
-      mode: z.literal("signature"),
-      keyId: bridgeKeyId,
-      timestamp: z.number().int().positive().max(4_102_444_800_000),
-      signature: sha256Hex,
-      bodyHash: sha256Hex,
     })
     .strict(),
   z
@@ -105,7 +92,7 @@ export const bridgeRegisterFileSchema = z.object({
   description: optionalBridgeText(2000),
   category: optionalBridgeText(80),
   tags: z.array(bridgeTag).max(20).optional().default([]),
-  mimeType: z.string().trim().max(100).optional().default("application/pdf"),
-  extension: z.string().trim().regex(/^[A-Za-z0-9]{1,8}$/).optional().default("pdf"),
+  mimeType: z.literal("application/pdf").optional().default("application/pdf"),
+  extension: z.literal("pdf").optional().default("pdf"),
   size: z.number().int().positive().max(1024 * 1024 * 1024),
 });

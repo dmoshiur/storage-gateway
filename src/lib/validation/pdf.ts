@@ -8,8 +8,8 @@ import {
 
 /**
  * Backward-compatible PDF-only helpers. New code should import from
- * `@/lib/validation/documents` so PDF, DOC, DOCX, TXT, PPT, and PPTX uploads
- * share one validation path.
+ * `@/lib/validation/documents` so every upload path shares one PDF
+ * validation path.
  */
 export function hasPdfExtension(name: string): boolean {
   return getDocumentExtension(name.trim()) === "pdf";

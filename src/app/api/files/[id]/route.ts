@@ -2,8 +2,8 @@ import { apiRoute, requireRouteId } from "@/lib/api/route";
 import { success } from "@/lib/api/response";
 import { parseJson } from "@/lib/api/body";
 import { ApiError } from "@/lib/api/errors";
-import { getFileById, serializeFile, updateFileDetails } from "@/lib/firestore/files";
-import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
+import { getFileById, serializeFile, updateFileDetails } from "@/lib/db/files";
+import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
 import { requireAdminRequest, requireReadActor } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { fileUpdateSchema, moveToTrashSchema } from "@/lib/validation/schemas";
@@ -39,9 +39,10 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       fileId: result.file.id,
       fileName: result.file.originalName,
       details: { fields: Object.keys(input).filter((key) => key !== "retention").join(",") || null },
+      requestId,
     });
     if (result.changedRetention) {
-      await writeAuditLogSafely({ action: "CHANGE_RETENTION", actor: auditActorFrom(actor), fileId: result.file.id, fileName: result.file.originalName, details: { retentionType: result.file.retentionType, autoDeleteEnabled: result.file.autoDeleteEnabled } });
+      await writeAuditLogSafely({ action: "CHANGE_RETENTION", actor: auditActorFrom(actor), fileId: result.file.id, fileName: result.file.originalName, details: { retentionType: result.file.retentionType, autoDeleteEnabled: result.file.autoDeleteEnabled }, requestId });
     }
     emitWebhookEvent("file.updated", { fileId: result.file.id, fileName: result.file.originalName });
     return success({ file: serializeFile(result.file) }, requestId);
@@ -55,11 +56,11 @@ export async function DELETE(request: Request, context: { params: Promise<{ id: 
     enforceRateLimit(`files:trash:${actor.uid}`, 60);
     await parseJson(request, moveToTrashSchema);
     const id = requireRouteId((await context.params).id);
-    const { getSettings } = await import("@/lib/firestore/settings");
-    const { moveFileToTrash } = await import("@/lib/firestore/files");
+    const { getSettings } = await import("@/lib/db/settings");
+    const { moveFileToTrash } = await import("@/lib/db/files");
     const settings = await getSettings();
     const file = await moveFileToTrash(id, settings.trashRetentionDays, "manual", actor.uid);
-    await writeAuditLogSafely({ action: "MOVE_TO_TRASH", actor: auditActorFrom(actor), fileId: file.id, fileName: file.originalName, details: { permanentDeleteAt: file.permanentDeleteAt?.toISOString() ?? null } });
+    await writeAuditLogSafely({ action: "MOVE_TO_TRASH", actor: auditActorFrom(actor), fileId: file.id, fileName: file.originalName, details: { permanentDeleteAt: file.permanentDeleteAt?.toISOString() ?? null }, requestId });
     emitWebhookEvent("file.trashed", { fileId: file.id, fileName: file.originalName });
     return success({ file: serializeFile(file) }, requestId);
   }, { route: "files/trash" });

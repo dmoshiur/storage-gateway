@@ -3,9 +3,9 @@ import { apiRoute, requireRouteId } from "@/lib/api/route";
 import { success } from "@/lib/api/response";
 import { parseQuery } from "@/lib/api/body";
 import { ApiError } from "@/lib/api/errors";
-import { recordFileAccess, requireFileById } from "@/lib/firestore/files";
-import { getSettings } from "@/lib/firestore/settings";
-import { writeAuditLogSafely, auditActorFrom } from "@/lib/firestore/audit";
+import { recordFileAccess, requireFileById } from "@/lib/db/files";
+import { getSettings } from "@/lib/db/settings";
+import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
 import { getStorageService } from "@/lib/storage";
 import { streamStoredFile } from "@/lib/files/serve";
 import { requireReadActor } from "@/lib/security/request-auth";
@@ -23,7 +23,7 @@ const downloadQuerySchema = z.object({
 
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
   return apiRoute(request, async (requestId) => {
-    const actor = await requireReadActor(request);
+    const actor = await requireReadActor(request, "files:download");
     enforceRateLimit(`files:download:${actor.type}:${actor.uid}`, actor.type === "integration" ? 60 : 120);
     const query = parseQuery(Object.fromEntries(new URL(request.url).searchParams.entries()), downloadQuerySchema);
     const file = await requireFileById(requireRouteId((await context.params).id));
@@ -45,6 +45,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
         fileId: file.id,
         fileName: file.originalName,
         details: { disposition: query.disposition, via: "stream" },
+        requestId,
       });
       emitWebhookEvent("file.downloaded", { fileId: file.id, fileName: file.originalName, size: file.size });
       return response;
@@ -58,7 +59,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
       contentType: file.mimeType,
     });
     await recordFileAccess(file.id, "download");
-    await writeAuditLogSafely({ action: "DOWNLOAD", actor: auditActorFrom(actor), fileId: file.id, fileName: file.originalName, details: { disposition: query.disposition } });
+    await writeAuditLogSafely({ action: "DOWNLOAD", actor: auditActorFrom(actor), fileId: file.id, fileName: file.originalName, details: { disposition: query.disposition }, requestId });
     emitWebhookEvent("file.downloaded", { fileId: file.id, fileName: file.originalName, size: file.size });
 
     if (query.redirect === "true") {

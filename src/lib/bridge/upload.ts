@@ -1,7 +1,7 @@
 import "server-only";
 
 import { ApiError } from "@/lib/api/errors";
-import { recordUploadLog } from "@/lib/firestore/api-metrics";
+import { recordUploadLog } from "@/lib/db/api-metrics";
 import { getBridgeCorsOrigins } from "@/lib/bridge/config";
 import type { BridgeCredential } from "@/lib/bridge/auth";
 import type { SupportedDocumentExtension } from "@/lib/validation/documents";
@@ -10,8 +10,6 @@ const BRIDGE_CORS_ALLOW_HEADERS = [
   "X-AM-Storage-Key",
   "X-AM-Storage-Key-Id",
   "X-AM-Storage-Key-Secret",
-  "X-AM-Storage-Signature",
-  "X-AM-Storage-Timestamp",
   "Authorization",
   "Content-Type",
   "X-Request-Id",
@@ -54,7 +52,7 @@ export function parseBridgeTags(raw: string | null): string[] {
   return tags;
 }
 
-/** Random final object key following the gateway's documents/YYYY/MM/<uuid>.<ext> layout. */
+/** Random final object key following the gateway's pdfs/YYYY/MM/<uuid>.pdf layout. */
 export function buildBridgeObjectKey(extension: SupportedDocumentExtension): string {
   const now = new Date();
   const month = String(now.getUTCMonth() + 1).padStart(2, "0");
@@ -68,7 +66,7 @@ export function buildBridgeStagingKey(extension: SupportedDocumentExtension): st
   return `uploads/${now.getUTCFullYear()}/${month}/${crypto.randomUUID()}.${extension}`;
 }
 
-/** Firestore `uploadedBy` marker tying a bridge file back to its API credential. */
+/** PostgreSQL `uploadedBy` marker tying a bridge file back to its API credential. */
 export function bridgeUploader(credential: BridgeCredential): string {
   return `bridge:${credential.logKey}`;
 }
@@ -109,7 +107,7 @@ export function bridgePreflightResponse(request: Request): Response {
     status: 204,
     headers: {
       ...bridgeCorsHeaders(request),
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
       "Access-Control-Allow-Headers": BRIDGE_CORS_ALLOW_HEADERS,
       "Access-Control-Max-Age": "86400",
     },
