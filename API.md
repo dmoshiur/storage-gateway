@@ -73,6 +73,48 @@ Admin endpoints:
 
 When an administrator omits a password, the server generates a temporary password and returns it once in the create/reset response. It must be transmitted to the user through a secure channel and changed immediately.
 
+### Creating a user
+
+`POST /api/users` validates the payload with Zod before any database work:
+
+| Field | Rule |
+| --- | --- |
+| `email` | Required, valid address, max 256 characters. Trimmed and lower-cased, so addresses cannot be duplicated by casing. |
+| `password` | Optional. When present it must satisfy the account password policy (minimum 12 characters). An empty string is treated as omitted and a temporary password is generated. |
+| `role` | Required, exactly one of `admin`, `editor`, `viewer`. |
+| `displayName` | Optional, max 120 characters. |
+
+A created account is immediately usable: it is stored with `id`, `email`,
+`password_hash`, `role`, `status`, `created_at`, `updated_at` and
+`last_login_at`, and the user can sign in at `/admin/login` with the email and
+initial password straight away.
+
+Failures return a specific, safe message — never a generic
+"something is invalid" string — with the offending fields in `error.fields`:
+
+| Condition | Status | `error.code` | `error.message` |
+| --- | --- | --- | --- |
+| Malformed email | 400 | `VALIDATION_ERROR` | `Enter a valid email address.` |
+| Password below policy | 400 | `VALIDATION_ERROR` | `Password must be at least 12 characters.` |
+| Unknown role | 400 | `VALIDATION_ERROR` | `Role must be admin, editor, or viewer.` |
+| Email already registered | 409 | `USER_EXISTS` | `An account with this email already exists.` |
+| Caller is not an admin | 403 | `FORBIDDEN` | `You do not have permission to perform this action.` |
+| Database unreachable | 503 | `DATABASE_UNAVAILABLE` | `The database is temporarily unavailable. Please retry shortly.` |
+| Database not configured | 503 | `DATABASE_NOT_CONFIGURED` | Names the missing environment variables. |
+| Unexpected failure | 500 | `USER_CREATE_FAILED` | `User creation failed. Please try again.` |
+
+SQL text, driver output and secret material are never included in a response;
+those stay in the structured server logs, correlated by `requestId`.
+
+### Password storage
+
+Passwords are hashed with scrypt (`N=2^16, r=8, p=2`, 16-byte random salt,
+64-byte digest) — one of the configurations that meets the OWASP Password
+Storage Cheat Sheet minimum. Each hash records its own parameters, so stored
+hashes written with older settings keep verifying and are transparently
+re-hashed to the current policy on the next successful sign-in. Plaintext
+passwords are never stored, logged, or written to the audit trail.
+
 ## File library
 
 Cookie-authenticated endpoints:

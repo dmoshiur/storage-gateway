@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ShieldCheck, UserPlus } from "lucide-react";
 import { useSession, useToast, useConfirm } from "@/components/providers";
 import { useQuery } from "@/hooks/use-query";
@@ -8,15 +8,20 @@ import { Avatar, RelativeTime } from "@/components/ui/data";
 import { Dialog, Dropdown } from "@/components/ui/overlays";
 import { EmptyState, ErrorState, Spinner, TableSkeleton } from "@/components/ui/feedback";
 import { apiFetch, ClientApiError } from "@/lib/client/api";
+import { PASSWORD_MIN_LENGTH, PASSWORD_POLICY_HINT } from "@/lib/auth/password-policy";
 import type { Role } from "@/types/auth";
+
+type UserStatus = "active" | "disabled" | "deleted";
 
 interface ManagedUser {
   uid: string;
   email: string | null;
   displayName: string | null;
   role: Role;
+  status: UserStatus;
   disabled: boolean;
   createdAt: string | null;
+  updatedAt: string | null;
   lastLoginAt: string | null;
 }
 
@@ -24,6 +29,14 @@ function RoleBadge({ role }: { role: Role }) {
   if (role === "admin") return <span className="badge-info">Admin</span>;
   if (role === "editor") return <span className="badge-success">Editor</span>;
   return <span className="badge-neutral">Viewer</span>;
+}
+
+/** Renders the account `status` persisted by the database. */
+function StatusBadge({ user }: { user: ManagedUser }) {
+  const status: UserStatus = user.status ?? (user.disabled ? "disabled" : "active");
+  if (status === "disabled") return <span className="badge-danger">Disabled</span>;
+  if (status === "deleted") return <span className="badge-neutral">Deleted</span>;
+  return <span className="badge-success">Active</span>;
 }
 
 export default function UsersPage() {
@@ -37,6 +50,12 @@ export default function UsersPage() {
   const [initialPassword, setInitialPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  // Per-field messages from the server's Zod validation, rendered under the
+  // matching input so the admin sees exactly which value was rejected.
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  // A ref guards the submit path itself: React state updates are async, so a
+  // fast second click can slip through before `busy` has re-rendered.
+  const submittingRef = useRef(false);
   const [activity, setActivity] = useState<{ user: ManagedUser; logs: { id: string; action: string; createdAt: string; fileName?: string }[] } | null>(null);
 
   if (session && session.role !== "admin") {
@@ -47,20 +66,48 @@ export default function UsersPage() {
     );
   }
 
+  const closeInvite = () => {
+    if (submittingRef.current) return;
+    setInviteOpen(false);
+    setFormError(null);
+    setFieldErrors({});
+  };
+
   const invite = async () => {
+    // Prevent double submission: ignore re-entry while a create is in flight.
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setBusy(true);
     setFormError(null);
+    setFieldErrors({});
     try {
-      const result = await apiFetch<{ user: ManagedUser & { temporaryPassword?: string } }>("/api/users", { method: "POST", body: JSON.stringify({ email, role, password: initialPassword || undefined }) });
-      toast(result.user.temporaryPassword ? `User created. Temporary password: ${result.user.temporaryPassword}` : "User created. Share the initial password securely.");
+      const result = await apiFetch<{ user: ManagedUser & { temporaryPassword?: string } }>("/api/users", {
+        method: "POST",
+        body: JSON.stringify({ email, role, password: initialPassword || undefined }),
+      });
+      // Success: close the modal, refresh the table, and confirm with a toast.
       setInviteOpen(false);
       setEmail("");
       setRole("viewer");
       setInitialPassword("");
       refresh();
+      toast(
+        result.user.temporaryPassword
+          ? `${result.user.email} created. Temporary password: ${result.user.temporaryPassword}`
+          : `${result.user.email} created as ${result.user.role}. Share the initial password securely.`,
+        "success",
+      );
     } catch (inviteError) {
-      setFormError(inviteError instanceof ClientApiError ? inviteError.message : "Invitation failed.");
+      // Show the real, specific backend message inside the modal — never a
+      // generic placeholder that hides which field or check failed.
+      if (inviteError instanceof ClientApiError) {
+        setFormError(inviteError.message);
+        setFieldErrors(inviteError.fields ?? {});
+      } else {
+        setFormError("User creation failed. Please try again.");
+      }
     } finally {
+      submittingRef.current = false;
       setBusy(false);
     }
   };
@@ -198,7 +245,7 @@ export default function UsersPage() {
                       </div>
                     </td>
                     <td><RoleBadge role={user.role} /></td>
-                    <td>{user.disabled ? <span className="badge-danger">Disabled</span> : <span className="badge-success">Active</span>}</td>
+                    <td><StatusBadge user={user} /></td>
                     <td className="text-[13px] text-ink-muted"><RelativeTime iso={user.lastLoginAt} /></td>
                     <td className="text-right">
                       <Dropdown
@@ -236,35 +283,78 @@ export default function UsersPage() {
       )}
 
       {inviteOpen && (
-          <Dialog title="Create user" description="This account signs in directly with email and password. Share the password through a secure channel." onClose={() => setInviteOpen(false)}>
-          <div className="space-y-4">
+          <Dialog title="Create user" description="This account signs in directly with email and password. Share the password through a secure channel." onClose={closeInvite}>
+          <form
+            className="space-y-4"
+            noValidate
+            onSubmit={(event) => {
+              event.preventDefault();
+              void invite();
+            }}
+          >
             <div>
               <label className="field-label" htmlFor="invite-email">Email</label>
-              <input id="invite-email" type="email" className="field-input" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="teammate@organization.org" />
+              <input
+                id="invite-email"
+                type="email"
+                className="field-input"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="teammate@organization.org"
+                autoComplete="off"
+                disabled={busy}
+                aria-invalid={Boolean(fieldErrors.email)}
+                aria-describedby={fieldErrors.email ? "invite-email-error" : undefined}
+              />
+              {fieldErrors.email && <p id="invite-email-error" className="mt-1 text-[13px] text-red-600 dark:text-red-400">{fieldErrors.email}</p>}
             </div>
             <div>
               <label className="field-label" htmlFor="invite-password">Initial password</label>
-              <input id="invite-password" type="password" minLength={12} className="field-input" value={initialPassword} onChange={(event) => setInitialPassword(event.target.value)} placeholder="At least 12 characters (optional)" autoComplete="new-password" />
-              <p className="field-hint">Leave blank to generate a one-time temporary password shown after creation.</p>
+              <input
+                id="invite-password"
+                type="password"
+                minLength={PASSWORD_MIN_LENGTH}
+                className="field-input"
+                value={initialPassword}
+                onChange={(event) => setInitialPassword(event.target.value)}
+                placeholder={`${PASSWORD_POLICY_HINT} (optional)`}
+                autoComplete="new-password"
+                disabled={busy}
+                aria-invalid={Boolean(fieldErrors.password)}
+                aria-describedby={fieldErrors.password ? "invite-password-error" : "invite-password-hint"}
+              />
+              {fieldErrors.password
+                ? <p id="invite-password-error" className="mt-1 text-[13px] text-red-600 dark:text-red-400">{fieldErrors.password}</p>
+                : <p id="invite-password-hint" className="field-hint">{PASSWORD_POLICY_HINT} Leave blank to generate a one-time temporary password shown after creation.</p>}
             </div>
             <div>
               <label className="field-label" htmlFor="invite-role">Role</label>
-              <select id="invite-role" className="field-input" value={role} onChange={(event) => setRole(event.target.value as Role)}>
+              <select
+                id="invite-role"
+                className="field-input"
+                value={role}
+                onChange={(event) => setRole(event.target.value as Role)}
+                disabled={busy}
+                aria-invalid={Boolean(fieldErrors.role)}
+                aria-describedby={fieldErrors.role ? "invite-role-error" : undefined}
+              >
                 <option value="viewer">Viewer — view and download</option>
                 <option value="editor">Editor — manage files</option>
                 <option value="admin">Admin — full access</option>
               </select>
+              {fieldErrors.role && <p id="invite-role-error" className="mt-1 text-[13px] text-red-600 dark:text-red-400">{fieldErrors.role}</p>}
             </div>
             {formError && <p role="alert" className="rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">{formError}</p>}
             <div className="flex justify-end gap-2.5">
-              <button type="button" className="btn-secondary" onClick={() => setInviteOpen(false)} disabled={busy}>Cancel</button>
-              <button type="button" className="btn-primary" onClick={invite} disabled={busy || !email.trim()}>
-                {busy && <Spinner />} Send invite
+              <button type="button" className="btn-secondary" onClick={closeInvite} disabled={busy}>Cancel</button>
+              <button type="submit" className="btn-primary" disabled={busy || !email.trim()} aria-busy={busy}>
+                {busy && <Spinner />} {busy ? "Creating…" : "Send invite"}
               </button>
             </div>
-          </div>
+          </form>
         </Dialog>
       )}
+
       {activity && (
         <Dialog title={`Activity · ${activity.user.email ?? activity.user.uid}`} description="Recent audit events for this account." onClose={() => setActivity(null)}>
           {activity.logs.length === 0 ? <p className="text-sm text-ink-muted">No activity recorded yet.</p> : <div className="max-h-80 space-y-2 overflow-y-auto">{activity.logs.map((log) => <div key={log.id} className="flex items-start justify-between gap-3 border-b border-line pb-2 text-[13px]"><span className="font-medium text-ink">{log.action}{log.fileName ? ` · ${log.fileName}` : ""}</span><RelativeTime iso={log.createdAt} /></div>)}</div>}

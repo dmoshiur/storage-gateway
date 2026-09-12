@@ -1,4 +1,3 @@
-import { z } from "zod";
 import { apiRoute } from "@/lib/api/route";
 import { success } from "@/lib/api/response";
 import { parseJson } from "@/lib/api/body";
@@ -7,12 +6,9 @@ import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { setUserDisabled, setUserRole, deleteUser, resetUserPassword, revokeUserSessions, listUserActivity } from "@/lib/db/users";
 import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
-import { ROLES } from "@/types/auth";
+import { adminResetPasswordSchema, updateUserSchema } from "@/lib/validation/schemas";
 
 export const runtime = "nodejs";
-
-const updateSchema = z.object({ role: z.enum(ROLES).optional(), disabled: z.boolean().optional() }).refine((data) => data.role !== undefined || data.disabled !== undefined, "Provide a role or disabled flag.");
-const resetSchema = z.object({ password: z.string().min(12).max(512).optional() });
 
 export async function GET(request: Request, context: { params: Promise<{ uid: string }> }) {
   return apiRoute(request, async (requestId) => {
@@ -27,7 +23,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ uid: 
   return apiRoute(request, async (requestId) => {
     const actor = await requireAdminRequest(request, "manage_users", true);
     enforceRateLimit(`users:update:${actor.uid}`, 60);
-    const input = await parseJson(request, updateSchema);
+    const input = await parseJson(request, updateUserSchema);
     const uid = (await context.params).uid;
     if (!/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(uid)) throw new ApiError(400, "VALIDATION_ERROR", "The user id is invalid.");
     if (uid === actor.uid && ((input.role !== undefined && input.role !== "admin") || input.disabled === true)) throw new ApiError(409, "SELF_LOCKOUT_DENIED", "You cannot demote or disable your own administrator account.");
@@ -42,7 +38,7 @@ export async function POST(request: Request, context: { params: Promise<{ uid: s
     const actor = await requireAdminRequest(request, "manage_users", true);
     const uid = (await context.params).uid;
     if (!/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(uid)) throw new ApiError(400, "VALIDATION_ERROR", "The user id is invalid.");
-    const input = await parseJson(request, resetSchema);
+    const input = await parseJson(request, adminResetPasswordSchema);
     const result = await resetUserPassword(uid, input.password);
     await writeAuditLogSafely({ action: "PASSWORD_RESET", actor: auditActorFrom(actor), details: { userId: uid }, requestId });
     return success({ reset: true, ...result }, requestId);

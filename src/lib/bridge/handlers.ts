@@ -3,6 +3,7 @@ import "server-only";
 import type { z } from "zod";
 import { ApiError, isApiError } from "@/lib/api/errors";
 import { success } from "@/lib/api/response";
+import { validationError } from "@/lib/api/validation";
 import { getClientIp } from "@/lib/security/request-auth";
 import { logger } from "@/lib/logging/logger";
 import type { ApiRequestContext } from "@/lib/db/api-metrics";
@@ -107,11 +108,7 @@ function parseBridgeJson<T extends z.ZodTypeAny>(raw: Uint8Array, schema: T): z.
     throw new ApiError(400, "INVALID_JSON", "The request body must be valid JSON.");
   }
   const parsed = schema.safeParse(body);
-  if (!parsed.success) {
-    const fields: Record<string, string> = {};
-    for (const issue of parsed.error.issues) fields[issue.path.join(".") || "body"] = issue.message;
-    throw new ApiError(400, "VALIDATION_ERROR", "Some information is missing or invalid.", fields);
-  }
+  if (!parsed.success) throw validationError(parsed.error.issues, "body");
   return parsed.data;
 }
 

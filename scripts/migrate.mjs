@@ -114,8 +114,18 @@ try {
   db.close();
 }
 
+/**
+ * Must stay byte-compatible with src/lib/auth/password.ts (same encoding and
+ * parameters) so the bootstrap administrator can sign in through the app.
+ * Parameters follow the OWASP scrypt minimum (N=2^16, r=8, p=2 is the listed
+ * equivalent of N=2^17, r=8, p=1).
+ */
 function hashPassword(password) {
+  const N = 65536;
+  const r = 8;
+  const p = 2;
   const salt = randomBytes(16);
-  const derived = scryptSync(password, salt, 64, { N: 16384, r: 8, p: 1, maxmem: 128 * 1024 * 1024 });
-  return `scrypt$16384$8$1$${salt.toString("base64url")}$${derived.toString("base64url")}`;
+  const maxmem = 128 * N * r + 128 * r * p + 1024 * 1024;
+  const derived = scryptSync(password, salt, 64, { N, r, p, maxmem });
+  return `scrypt$${N}$${r}$${p}$${salt.toString("base64url")}$${derived.toString("base64url")}`;
 }
