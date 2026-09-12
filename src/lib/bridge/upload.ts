@@ -91,12 +91,22 @@ export async function logBridgeUploadAttempt(entry: {
   }
 }
 
-/** CORS headers for bridge responses. The request origin is echoed only when allow-listed. */
+/**
+ * CORS headers for bridge responses.
+ *
+ * The request origin is echoed back only when it is explicitly allow-listed via
+ * `CORS_ORIGINS`. A wildcard is never emitted: these endpoints authenticate
+ * with credential headers, so `*` would both be rejected by browsers for
+ * credentialed requests and widen the API to every site on the internet.
+ */
 export function bridgeCorsHeaders(request: Request): Record<string, string> {
   const origin = (request.headers.get("origin") ?? "").trim().replace(/\/+$/, "");
   const headers: Record<string, string> = { Vary: "Origin" };
   if (origin && getBridgeCorsOrigins().includes(origin)) {
     headers["Access-Control-Allow-Origin"] = origin;
+    headers["Access-Control-Allow-Credentials"] = "true";
+    // Lets browser clients read the correlation id off a cross-origin response.
+    headers["Access-Control-Expose-Headers"] = "X-Request-Id";
   }
   return headers;
 }

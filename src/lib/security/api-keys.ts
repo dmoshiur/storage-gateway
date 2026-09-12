@@ -18,10 +18,27 @@ function constantTimeEquals(expected: string, provided: string): boolean {
   const b = Buffer.from(provided);
   return a.length === b.length && timingSafeEqual(a, b);
 }
+/**
+ * Decodes the stored scope array.
+ *
+ * This is deliberately FAIL-CLOSED: an unreadable, empty or unrecognised scope
+ * list grants nothing. The previous implementation returned the full scope set
+ * as a "default", which silently escalated a malformed key to every permission
+ * the API offers.
+ */
 function normalizeScopes(value: unknown): ApiScope[] {
-  if (!Array.isArray(value)) return [...API_SCOPES];
-  const values = value.filter((scope): scope is ApiScope => typeof scope === "string" && (API_SCOPES as readonly string[]).includes(scope));
-  return values.length ? [...new Set(values)] : [...API_SCOPES];
+  const raw = typeof value === "string" ? safeJsonArray(value) : value;
+  if (!Array.isArray(raw)) return [];
+  const values = raw.filter((scope): scope is ApiScope => typeof scope === "string" && (API_SCOPES as readonly string[]).includes(scope));
+  return [...new Set(values)];
+}
+
+function safeJsonArray(value: string): unknown {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
 }
 function expired(value: unknown): boolean {
   const date = toDate(value);
@@ -100,43 +117,93 @@ interface KeyRecord {
   ref: { update: (fields: Record<string, unknown>) => Promise<void> };
 }
 
-async function findActiveKeyRecord(keyId: string): Promise<KeyRecord | null> {
-  const result = await query(`SELECT id, key_id, secret_hash, expires_at, revoked_at FROM api_keys WHERE kind = 'bridge' AND key_id = $1 LIMIT 1`, [keyId]);
+/** Why a key id failed to authenticate — logged server-side, never returned verbatim. */
+export type ApiKeyRejection = "not_found" | "revoked" | "expired" | "bad_secret";
+
+/**
+ * Looks up a key by its public key id.
+ *
+ * Keys are matched across BOTH `kind` values. The dashboard issues keys with
+ * `kind = 'bearer'`, and this lookup previously filtered on `kind = 'bridge'`,
+ * so every dashboard-issued credential presented on the
+ * `X-AM-Storage-Key-Id` / `X-AM-Storage-Key-Secret` headers missed the row
+ * entirely and was rejected with 401 — the production bug.
+ */
+async function findKeyRecordByKeyId(keyId: string): Promise<{ record: KeyRecord | null; rejection: ApiKeyRejection | null }> {
+  const result = await query(
+    `SELECT id, key_id, secret_hash, expires_at, revoked_at FROM api_keys WHERE key_id = $1 LIMIT 1`,
+    [keyId],
+  );
   const row = result.rows[0];
-  if (!row || row.revoked_at || expired(row.expires_at)) return null;
+  if (!row) return { record: null, rejection: "not_found" };
+  if (row.revoked_at) return { record: null, rejection: "revoked" };
+  if (expired(row.expires_at)) return { record: null, rejection: "expired" };
   return {
-    id: String(row.id),
-    keyId: String(row.key_id),
-    secretHash: typeof row.secret_hash === "string" ? row.secret_hash : null,
-    ref: { update: async (fields) => { await query(`UPDATE api_keys SET last_used_at = $2 WHERE id = $1`, [String(row.id), fields.lastUsedAt ?? new Date()]); } },
+    record: {
+      id: String(row.id),
+      keyId: String(row.key_id),
+      secretHash: typeof row.secret_hash === "string" ? row.secret_hash : null,
+      ref: { update: async (fields) => { await query(`UPDATE api_keys SET last_used_at = $2 WHERE id = $1`, [String(row.id), fields.lastUsedAt ?? new Date()]); } },
+    },
+    rejection: null,
   };
 }
 
+/** Fail-closed: an unknown record grants no scopes. */
 export async function getApiKeyScopes(recordId: string | null): Promise<ApiScope[]> {
-  if (!recordId) return [...API_SCOPES];
+  if (!recordId) return [];
   const result = await query(`SELECT scopes FROM api_keys WHERE id = $1`, [recordId]);
-  return result.rows[0] ? normalizeScopes(result.rows[0].scopes) : [...API_SCOPES];
+  return result.rows[0] ? normalizeScopes(result.rows[0].scopes) : [];
 }
 export async function getApiKeyScopesByKeyId(keyId: string | null): Promise<ApiScope[]> {
-  if (!keyId) return [...API_SCOPES];
+  if (!keyId) return [];
   const result = await query(`SELECT scopes FROM api_keys WHERE key_id = $1`, [keyId]);
-  return result.rows[0] ? normalizeScopes(result.rows[0].scopes) : [...API_SCOPES];
+  return result.rows[0] ? normalizeScopes(result.rows[0].scopes) : [];
 }
 export function requireScope(granted: readonly string[], scope: ApiScope): void {
   if (!granted.includes(scope)) throw new ApiError(403, "INSUFFICIENT_SCOPE", `This API key is missing the required scope: ${scope}.`);
 }
 
-export async function verifyApiCredential(keyId: string, secret: string, requestContext: ApiRequestContext = {}): Promise<string | null> {
-  const record = await findActiveKeyRecord(keyId.trim());
-  if (!record || !record.secretHash || !constantTimeEquals(record.secretHash, hash(secret))) return null;
+export interface VerifiedApiCredential {
+  recordId: string;
+  keyId: string;
+  scopes: ApiScope[];
+}
+
+/**
+ * Verifies an `X-AM-Storage-Key-Id` + `X-AM-Storage-Key-Secret` pair.
+ *
+ * Returns the record id, the public key id and the granted scopes so callers
+ * authorize against the same row they just authenticated, with no second
+ * lookup that could race against a revocation.
+ */
+export async function verifyApiCredentialDetailed(
+  keyId: string,
+  secret: string,
+  requestContext: ApiRequestContext = {},
+): Promise<{ credential: VerifiedApiCredential | null; rejection: ApiKeyRejection | null }> {
+  const { record, rejection } = await findKeyRecordByKeyId(keyId.trim());
+  if (!record) return { credential: null, rejection };
+  if (!record.secretHash || !constantTimeEquals(record.secretHash, hash(secret))) {
+    return { credential: null, rejection: "bad_secret" };
+  }
   await record.ref.update({ lastUsedAt: new Date() });
   await recordApiRequestSafe(record.keyId, requestContext);
-  return record.id;
+  const scopeRow = await query(`SELECT scopes FROM api_keys WHERE id = $1`, [record.id]);
+  return {
+    credential: { recordId: record.id, keyId: record.keyId, scopes: normalizeScopes(scopeRow.rows[0]?.scopes) },
+    rejection: null,
+  };
+}
+
+export async function verifyApiCredential(keyId: string, secret: string, requestContext: ApiRequestContext = {}): Promise<string | null> {
+  const { credential } = await verifyApiCredentialDetailed(keyId, secret, requestContext);
+  return credential?.recordId ?? null;
 }
 
 /** Legacy single-header keys are still verified by digest; the raw value is never persisted. */
 export async function verifyApiKey(key: string, requestContext: ApiRequestContext = {}): Promise<string | null> {
-  const result = await query(`SELECT id, revoked_at, expires_at, secret_hash, legacy_hash FROM api_keys WHERE kind = 'bridge' AND (legacy_hash = $1 OR secret_hash = $1) LIMIT 1`, [hash(key)]);
+  const result = await query(`SELECT id, revoked_at, expires_at, secret_hash, legacy_hash FROM api_keys WHERE (legacy_hash = $1 OR secret_hash = $1) LIMIT 1`, [hash(key)]);
   const row = result.rows[0];
   if (!row || row.revoked_at || expired(row.expires_at)) return null;
   await query(`UPDATE api_keys SET last_used_at = ${SQL_NOW} WHERE id = $1`, [row.id]);

@@ -13,7 +13,14 @@ function sha256(value: string): string { return createHash("sha256").update(valu
 function b64url(bytes: number): string { return randomBytes(bytes).toString("base64url"); }
 function equal(a: string, b: string): boolean { const x = Buffer.from(a); const y = Buffer.from(b); return x.length === y.length && timingSafeEqual(x, y); }
 function expired(value: unknown): boolean { const date = toDate(value); return Boolean(date && date.getTime() <= Date.now()); }
-function scopes(value: unknown): ApiScope[] { if (!Array.isArray(value)) return [...API_SCOPES]; const result = value.filter((item): item is ApiScope => typeof item === "string" && (API_SCOPES as readonly string[]).includes(item)); return result.length ? [...new Set(result)] : [...API_SCOPES]; }
+/** Fail-closed scope decoding: an unreadable or empty list grants nothing. */
+function scopes(value: unknown): ApiScope[] {
+  let raw: unknown = value;
+  if (typeof raw === "string") { try { raw = JSON.parse(raw) as unknown; } catch { raw = null; } }
+  if (!Array.isArray(raw)) return [];
+  const result = raw.filter((item): item is ApiScope => typeof item === "string" && (API_SCOPES as readonly string[]).includes(item));
+  return [...new Set(result)];
+}
 
 export interface BearerKeyRecord { id: string; keyId: string; prefix: string; name: string; description: string; scopes: ApiScope[]; expiresAt: string | null; createdAt: string | null; lastUsedAt: string | null; revokedAt: string | null; createdBy: string; rotatedFromId: string | null; rotatedToId: string | null; }
 export interface CreatedBearerKey { id: string; keyId: string; keySecret: string; name: string; description: string; scopes: ApiScope[]; expiresAt: string | null; }

@@ -5,7 +5,7 @@ import { can, type Capability } from "@/lib/auth/authorization";
 import { verifySessionCookie, SESSION_COOKIE_NAME } from "@/lib/auth/session";
 import { getRequiredSecret, constantTimeSecretEquals } from "@/lib/env";
 import { hasBridgeCredentialHeaders, requireBridgeCredential } from "@/lib/bridge/auth";
-import { getApiKeyScopes, requireScope, type ApiScope } from "@/lib/security/api-keys";
+import { requireScope, type ApiScope } from "@/lib/security/api-keys";
 import type { IntegrationActor, RequestActor, SessionActor } from "@/types/auth";
 
 export function getClientIp(request: Request): string {
@@ -34,7 +34,7 @@ export async function requireAdminRequest(request: Request, capability: Capabili
 /** Validates a PostgreSQL-backed bridge key for internal server-to-server routes. */
 export async function requireIntegrationKey(request: Request, requiredScope: ApiScope = "metadata:read"): Promise<IntegrationActor> {
   const credential = await requireBridgeCredential(request);
-  requireScope(await getApiKeyScopes(credential.recordId), requiredScope);
+  requireScope(credential.scopes, requiredScope);
   return { uid: "website-integration", email: null, role: "viewer", type: "integration" };
 }
 
@@ -44,7 +44,7 @@ export async function requireReadActor(request: Request, requiredScope: ApiScope
     // bridge keys as the /api/v1 surface; there is no static raw integration
     // secret fallback.
     const credential = await requireBridgeCredential(request);
-    requireScope(await getApiKeyScopes(credential.recordId), requiredScope);
+    requireScope(credential.scopes, requiredScope);
     return { uid: "website-integration", email: null, role: "viewer", type: "integration" };
   }
   const actor = await verifySessionCookie(sessionCookieFromRequest(request));

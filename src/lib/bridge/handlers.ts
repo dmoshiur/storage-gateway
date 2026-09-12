@@ -4,6 +4,7 @@ import type { z } from "zod";
 import { ApiError, isApiError } from "@/lib/api/errors";
 import { success } from "@/lib/api/response";
 import { getClientIp } from "@/lib/security/request-auth";
+import { logger } from "@/lib/logging/logger";
 import type { ApiRequestContext } from "@/lib/db/api-metrics";
 import { enforceRateLimit, enforceDatabaseRateLimit } from "@/lib/security/rate-limit";
 import { bridgeLogKeyFromHeaders, hasBridgeCredentialHeaders, requireBridgeCredential, type BridgeCredential } from "@/lib/bridge/auth";
@@ -37,7 +38,7 @@ import { auditActorFrom, writeAuditLogSafely } from "@/lib/db/audit";
 import { defaultRetention } from "@/lib/retention";
 import { createHash } from "node:crypto";
 import { emitWebhookEvent } from "@/lib/webhooks/dispatch";
-import { getApiKeyScopes, requireScope, type ApiScope } from "@/lib/security/api-keys";
+import { requireScope, type ApiScope } from "@/lib/security/api-keys";
 import { bearerTokenFrom, requireBearerScope, verifyBearerKeySafely } from "@/lib/security/bearer-keys";
 import { getStorageService } from "@/lib/storage";
 import { toServiceFailure } from "@/lib/api/failures";
@@ -50,17 +51,31 @@ type UploadCredential =
 
 async function requireUploadCredential(request: Request, requiredScope: ApiScope, requestId: string): Promise<UploadCredential> {
   const requestContext: ApiRequestContext = { method: request.method, path: new URL(request.url).pathname, requestId, ip: getClientIp(request) };
+
+  // Key-id/secret headers take precedence: when a caller sends them explicitly
+  // they must be the credential that is validated, never silently ignored in
+  // favour of an Authorization header.
+  if (hasBridgeCredentialHeaders(request)) {
+    const credential = await requireBridgeCredential(request, requestContext);
+    // Authorize against the scopes resolved during authentication so a key
+    // cannot be revoked-and-reused between the two steps.
+    requireScope(credential.scopes, requiredScope);
+    return credential;
+  }
+
   const bearer = bearerTokenFrom(request);
   if (bearer) {
     const verified = await verifyBearerKeySafely(bearer, requestContext);
-    if (!verified) throw new ApiError(401, "INVALID_API_KEY", "Missing or invalid API key. Send Authorization: Bearer ng_live_….");
+    if (!verified) {
+      logger.warn("API key authentication failed", { reason: "bad_bearer_token", method: request.method, path: requestContext.path, requestId, ip: requestContext.ip });
+      throw new ApiError(401, "INVALID_API_KEY", "Missing or invalid API credential. Send X-AM-Storage-Key-Id with X-AM-Storage-Key-Secret, or Authorization: Bearer <secret>.");
+    }
     requireBearerScope(verified.scopes, requiredScope);
     return { mode: "bearer", keyId: verified.keyId, logKey: verified.keyId };
   }
-  if (!hasBridgeCredentialHeaders(request)) throw new ApiError(401, "INVALID_API_KEY", "Missing or invalid API key.");
-  const credential = await requireBridgeCredential(request, requestContext);
-    requireScope(await getApiKeyScopes(credential.recordId), requiredScope);
-  return credential;
+
+  logger.warn("API key authentication failed", { reason: "missing_headers", method: request.method, path: requestContext.path, requestId, ip: requestContext.ip });
+  throw new ApiError(401, "INVALID_API_KEY", "Missing or invalid API credential. Send X-AM-Storage-Key-Id with X-AM-Storage-Key-Secret, or Authorization: Bearer <secret>.");
 }
 
 const VALIDATION_CODES = new Set(["INVALID_FILE_TYPE", "UPLOAD_SIZE_MISMATCH", "UPLOAD_OWNERSHIP_MISMATCH", "INVALID_DOCUMENT"]);
@@ -142,7 +157,7 @@ export async function handleBridgeDirectUpload(
       uploaderLabel = credential.mode === "bearer" ? `api:${credential.keyId}` : bridgeUploader(credential);
     } else {
       credential = await requireBridgeCredential(request, requestContext);
-      if (options.requiredScope) requireScope(await getApiKeyScopes(credential.recordId), options.requiredScope);
+      if (options.requiredScope) requireScope(credential.scopes, options.requiredScope);
       uploaderLabel = bridgeUploader(credential);
     }
 
