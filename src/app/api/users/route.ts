@@ -6,11 +6,10 @@ import { requireAdminRequest } from "@/lib/security/request-auth";
 import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { inviteUser, listManagedUsers } from "@/lib/db/users";
 import { writeAuditLogSafely, auditActorFrom } from "@/lib/db/audit";
-import { ROLES } from "@/types/auth";
+import { createUserSchema } from "@/lib/validation/schemas";
 
 export const runtime = "nodejs";
 
-const createSchema = z.object({ email: z.string().trim().email().max(256), role: z.enum(ROLES), displayName: z.string().trim().max(120).optional(), password: z.string().min(12).max(512).optional() });
 const listSchema = z.object({ limit: z.coerce.number().int().min(1).max(200).default(100) });
 
 export async function GET(request: Request) {
@@ -24,11 +23,25 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   return apiRoute(request, async (requestId) => {
+    // Server-side authorization: only a signed-in admin may create accounts,
+    // regardless of what the browser UI allows. `mutate: true` also enforces
+    // the same-origin check against CSRF.
     const actor = await requireAdminRequest(request, "manage_users", true);
     enforceRateLimit(`users:create:${actor.uid}`, 20);
-    const input = await parseJson(request, createSchema);
+
+    // Zod validates email, password policy and role before any database work.
+    // A failure here now returns the specific reason (see lib/api/validation).
+    const input = await parseJson(request, createUserSchema);
+
     const user = await inviteUser(input);
-    await writeAuditLogSafely({ action: "USER_INVITED", actor: auditActorFrom(actor), details: { userId: user.uid, email: user.email, role: user.role }, requestId });
+
+    // The audit entry records who was created and by whom — never the password.
+    await writeAuditLogSafely({
+      action: "USER_INVITED",
+      actor: auditActorFrom(actor),
+      details: { userId: user.uid, email: user.email, role: user.role, status: user.status },
+      requestId,
+    });
     return success({ user }, requestId, 201);
   }, { route: "users/create" });
 }

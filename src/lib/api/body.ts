@@ -1,5 +1,6 @@
 import type { z } from "zod";
 import { ApiError } from "@/lib/api/errors";
+import { validationError } from "@/lib/api/validation";
 
 /**
  * Parses small JSON control-plane payloads with both declared-length and actual
@@ -50,11 +51,9 @@ export async function parseJson<T extends z.ZodTypeAny>(
   }
 
   const parsed = schema.safeParse(body);
-  if (!parsed.success) {
-    const fields: Record<string, string> = {};
-    for (const issue of parsed.error.issues) fields[issue.path.join(".") || "body"] = issue.message;
-    throw new ApiError(400, "VALIDATION_ERROR", "Some information is missing or invalid.", fields);
-  }
+  // Report the actual reason (e.g. "Password must be at least 12 characters.")
+  // instead of a generic sentence that hides which field failed and why.
+  if (!parsed.success) throw validationError(parsed.error.issues, "body");
   return parsed.data;
 }
 
@@ -72,10 +71,6 @@ export async function parseJsonOptional<T extends z.ZodTypeAny>(
 
 export function parseQuery<T extends z.ZodTypeAny>(values: Record<string, string>, schema: T): z.infer<T> {
   const parsed = schema.safeParse(values);
-  if (!parsed.success) {
-    const fields: Record<string, string> = {};
-    for (const issue of parsed.error.issues) fields[issue.path.join(".") || "query"] = issue.message;
-    throw new ApiError(400, "VALIDATION_ERROR", "One or more query parameters are invalid.", fields);
-  }
+  if (!parsed.success) throw validationError(parsed.error.issues, "query");
   return parsed.data;
 }

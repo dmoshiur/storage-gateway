@@ -4,8 +4,9 @@ import { cookies } from "next/headers";
 import { createHash, randomBytes } from "node:crypto";
 import { ApiError, isApiError } from "@/lib/api/errors";
 import { query, toDate, SQL_NOW } from "@/lib/db/client";
-import { actorFromUser, getUserForAuth, type AuthUserRow, recordAdminLogin } from "@/lib/db/users";
-import { verifyPassword } from "@/lib/auth/password";
+import { actorFromUser, getUserForAuth, type AuthUserRow, recordAdminLogin, upgradePasswordHash } from "@/lib/db/users";
+import { needsRehash, verifyPassword } from "@/lib/auth/password";
+import { logger } from "@/lib/logging/logger";
 import { can, type Capability } from "@/lib/auth/authorization";
 import type { SessionActor } from "@/types/auth";
 
@@ -53,9 +54,24 @@ export async function authenticateUser(
 ): Promise<{ cookie: string; actor: SessionActor }> {
   const user = await getUserForAuth(email);
   if (!user || !verifyPassword(password, user.password_hash)) {
+    // One generic message for both "no such account" and "wrong password" so
+    // the endpoint cannot be used to enumerate registered email addresses.
     throw new ApiError(401, "INVALID_CREDENTIALS", "Invalid email or password.");
   }
   if (user.disabled) throw new ApiError(403, "ACCOUNT_DISABLED", "This account has been disabled. Contact an administrator.");
+
+  // Transparently upgrade hashes written under weaker scrypt parameters. The
+  // password is already verified here; a failure must not block the sign-in.
+  if (needsRehash(user.password_hash)) {
+    try {
+      await upgradePasswordHash(user.id, password);
+    } catch (error) {
+      logger.warn("Password hash upgrade failed", {
+        userId: user.id,
+        error: error instanceof Error ? error.message : "unknown",
+      });
+    }
+  }
   return createUserSession(user, metadata);
 }
 
