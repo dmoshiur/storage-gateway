@@ -113,6 +113,10 @@ button:not(:disabled), [role="button"]:not([aria-disabled="true"]) { cursor: poi
   .menu-item[data-danger="true"] { @apply text-red-600 hover:bg-red-500/10 dark:text-red-400; }
   .menu-sep { @apply my-1.5 border-t border-line; }
   .menu-label { @apply px-2.5 pb-1 pt-1.5 text-[11px] font-semibold uppercase tracking-wider text-ink-faint; }
+  /* Touch-friendly rows on small screens (the app's mobile layout, below lg). */
+  @media (max-width: 1023px) {
+    .menu-item { padding-top: 0.625rem; padding-bottom: 0.625rem; }
+  }
 
   /* ---------- misc ---------- */
   .kbd { @apply inline-flex min-w-[20px] items-center justify-center rounded border border-line-strong bg-surface-sunken px-1.5 py-0.5 font-mono text-[11px] font-medium text-ink-muted; }

@@ -274,7 +274,7 @@ export function FilesView({
               {filtersActive && search === "" && <span className="dot bg-blue-500" />}
             </span>
           } align="left">
-            <div className="w-64 p-3" onClick={(event) => event.stopPropagation()}>
+            <div className="w-64 max-w-full min-w-0 p-3" onClick={(event) => event.stopPropagation()}>
               <label className="field-label" htmlFor="filter-category">Category</label>
               <input id="filter-category" className="field-input" value={category} onChange={(event) => setCategory(event.target.value)} placeholder="e.g. Finance" />
               <label className="field-label mt-3" htmlFor="filter-retention">Retention</label>
