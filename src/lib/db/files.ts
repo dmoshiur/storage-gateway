@@ -171,7 +171,7 @@ export async function createBridgeFile(input: {
       `INSERT INTO files(storage_path, original_name, title, description, category, tags, mime_type, extension,
          size_bytes, content_hash, uploaded_by, auto_delete_enabled, retention_type, custom_delete_at, delete_at,
          status, validated_at, version)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'active',$17,1)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'active',$16,1)
        RETURNING ${FILE_COLUMNS}`,
       [input.storagePath, cleanFilename(input.originalName), input.title, input.description, input.category, tags, input.mimeType, input.extension, input.size, input.contentHash ?? null, input.uploadedBy, retention.autoDeleteEnabled, retention.retentionType, retention.customDeleteAt, retention.deleteAt, now],
     );

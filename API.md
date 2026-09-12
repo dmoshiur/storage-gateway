@@ -116,11 +116,74 @@ Administrators create keys at `POST /api/api-keys`:
 
 The response contains a bearer secret exactly once. Only its SHA-256 digest is stored. The server checks key existence, expiry, revocation, and scopes on every request. `PATCH /api/api-keys?rotate=true` rotates a key, and `DELETE /api/api-keys?id=<record-id>` revokes it.
 
-Use:
+### External integrations (key id + secret)
+
+An external website authenticates with the two credential headers returned when
+the key was created. No browser cookie or session is involved, and Firebase is
+not used anywhere in this path:
+
+```http
+POST /api/v1/files
+X-AM-Storage-Key-Id: ng_key_<key-id>
+X-AM-Storage-Key-Secret: ng_live_<secret>
+Content-Type: multipart/form-data
+```
+
+The equivalent, already-documented bearer form is also accepted:
 
 ```http
 Authorization: Bearer ng_live_<secret>
 ```
+
+Example upload with cURL:
+
+```bash
+curl -X POST https://<your-app>/api/v1/files \
+  -H "X-AM-Storage-Key-Id: ng_key_…" \
+  -H "X-AM-Storage-Key-Secret: ng_live_…" \
+  -F "file=@report.pdf;type=application/pdf" \
+  -F "title=Annual Report"
+```
+
+On success the API returns `201` with the persisted metadata:
+
+```json
+{
+  "success": true,
+  "data": {
+    "file": {
+      "id": "7fa7a823-d6bd-495a-bc6b-149de45a9539",
+      "originalName": "report.pdf",
+      "size": 563,
+      "mimeType": "application/pdf",
+      "status": "active"
+    },
+    "url": "https://…signed…",
+    "expiresAt": "2026-09-12T03:29:30.000Z"
+  },
+  "requestId": "…"
+}
+```
+
+Every request is verified against key existence, revocation, expiry, the stored
+SHA-256 secret digest, and the required scope. Uploads require `files:upload`.
+Only PDFs are accepted: the filename extension, the declared MIME type, and the
+file's magic bytes (`%PDF-` header and `%%EOF` trailer) are all validated
+server-side before anything is written to the private Blob store.
+
+### Verifying a key
+
+`POST /api/v1/auth/test` authenticates with the same headers and returns a
+step-by-step report covering key → scope → upload permission → Vercel Private
+Blob round trip → database. The admin API Playground calls this endpoint and
+sends the identical headers an external site sends, so a green result there
+means a green result from cURL.
+
+### CORS
+
+Browser-based integrations must be allow-listed via the `CORS_ORIGINS`
+environment variable. The allowed origin is echoed back explicitly alongside
+`Access-Control-Allow-Credentials: true`; a wildcard `*` is never returned.
 
 The embedded versioned API includes:
 
@@ -131,11 +194,13 @@ The embedded versioned API includes:
 - `PATCH /api/v1/files/:id`
 - `DELETE /api/v1/files/:id`
 - `POST /api/v1/files/:id/restore`
+- `POST /api/v1/files` — multipart PDF upload (scope `files:upload`)
+- `POST /api/v1/auth/test` — verify a key end to end
 - `POST /api/v1/storage/upload`
 - `POST /api/v1/storage/upload/init`
 - `POST /api/v1/storage/upload/complete`
 
-A missing scope returns `403 INSUFFICIENT_SCOPE`; an invalid, expired, or revoked key returns `401 INVALID_API_KEY`. Key registry/database failures return `503 KEY_SERVICE_UNAVAILABLE`, never a misleading bad-key response.
+A missing scope returns `403 INSUFFICIENT_SCOPE`; an invalid, expired, or revoked key returns `401 INVALID_API_KEY`. The 401 body is deliberately identical for every credential failure so the API cannot be used to probe which key ids exist; the precise reason (`not_found`, `revoked`, `expired`, `bad_secret`) is recorded in the server logs with the `requestId`. Scope resolution is fail-closed: a key with an empty or unreadable scope list is granted nothing. Key registry/database failures return `503 KEY_SERVICE_UNAVAILABLE`, never a misleading bad-key response.
 
 ## Rate limiting, audit, and status codes
 

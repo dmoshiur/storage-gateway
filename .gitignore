@@ -35,3 +35,4 @@ fastapi/__pycache__/
 fastapi/**/__pycache__/
 fastapi/.venv/
 *.py[cod]
+local.db*
